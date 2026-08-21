@@ -13,7 +13,10 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - run: dotnet restore
-      - run: dotnet format --verify-no-changes --no-restore
-      - run: dotnet build --configuration Release --no-restore
+      - run: dotnet restore CodexContinuity.csproj
+      - run: dotnet restore tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj
+      - run: dotnet format CodexContinuity.csproj --verify-no-changes --no-restore
+      - run: dotnet format tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj --verify-no-changes --no-restore
+      - run: dotnet build CodexContinuity.csproj --configuration Release --no-restore
+      - run: dotnet test tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj --configuration Release --no-restore
       - run: dotnet run --configuration Release --no-build -- help

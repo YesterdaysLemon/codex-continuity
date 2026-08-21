@@ -78,10 +78,12 @@ Installation makes four user-level changes:
 - `CODEX_SPARKLE_ENABLED=false`
 - a `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\CodexContinuity`
   startup entry
-- a copy of the coordinator at
-  `%LOCALAPPDATA%\OpenAI\CodexContinuity\CodexContinuity.exe`
+- versioned coordinator builds and owned install state under
+  `%LOCALAPPDATA%\OpenAI\CodexContinuity`
 
-It never closes or restarts the running desktop app.
+It never closes or restarts the running desktop app. Upgrades stage a new
+version and redirect only the next safe supervisor start; they do not overwrite
+the executable that currently owns active agents.
 
 ## Commands
 
@@ -92,6 +94,7 @@ It never closes or restarts the running desktop app.
 | `serve` | Run the background supervisor. |
 | `install --start-now` | Configure future launches and start the supervisor. |
 | `uninstall` | Remove future-launch and startup configuration without killing work. |
+| `rollback` | Select the previous known-good build for the next safe supervisor start. |
 | `self-test` | Prove reconnect behavior in an isolated temporary Codex home. |
 
 ## Local evidence
@@ -122,18 +125,28 @@ the running desktop client.
 ## Roll back
 
 ```powershell
+.\CodexContinuity.exe rollback
 .\CodexContinuity.exe uninstall
 ```
 
-Uninstall removes only values that match this tool's configuration. It does
-not stop a running backend or restart the desktop. A later desktop restart
+`rollback` changes only the build selected for a future safe start. Uninstall
+restores values captured before installation, and only while their current
+values still match the ones Continuity applied. Neither command stops a running
+backend or restarts the desktop. A later desktop restart after uninstall
 returns to its normal bundled app-server and updater.
 
 ## Security and operational boundary
 
-The app-server listens on loopback only. Codex Continuity does not collect
-telemetry, proxy prompts, store credentials, or modify installed Store package
-files. Logs stay under `%LOCALAPPDATA%\OpenAI\CodexContinuity`.
+The app-server listens on loopback only. Loopback prevents remote-network
+exposure, but it is not an authentication boundary: another process on the
+same Windows machine can attempt to connect to the local app-server port.
+Codex Continuity does not add a shared secret because the current desktop
+transport does not provide one to the external backend.
+
+Codex Continuity does not collect telemetry, proxy prompts, store credentials,
+or modify installed Store package files. App-server output stays under
+`%LOCALAPPDATA%\OpenAI\CodexContinuity`; logs rotate at 5 MB with three retained
+history files. Treat those local logs as potentially sensitive diagnostics.
 
 The continuity proof covers UI disconnect/reconnect and durable thread
 ownership. It does not make incompatible app-server protocol versions

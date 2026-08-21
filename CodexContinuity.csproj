@@ -13,4 +13,7 @@
     <Description>Keep Codex agent threads alive while the Windows desktop UI updates or restarts.</Description>
     <RepositoryUrl>https://github.com/YesterdaysLemon/codex-continuity</RepositoryUrl>
   </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+  </ItemGroup>
 </Project>
