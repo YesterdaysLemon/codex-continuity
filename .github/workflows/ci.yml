@@ -87,8 +87,9 @@ jobs:
           finally {
             & .\artifacts\install-smoke\CodexContinuity.exe uninstall
           }
-          $supervisorStartupAfter = Get-ItemPropertyValue $runKey -Name CodexContinuity -ErrorAction SilentlyContinue
-          $trayStartupAfter = Get-ItemPropertyValue $runKey -Name CodexContinuityTray -ErrorAction SilentlyContinue
+          $runValuesAfter = Get-ItemProperty $runKey -ErrorAction SilentlyContinue
+          $supervisorStartupAfter = $runValuesAfter.PSObject.Properties['CodexContinuity'].Value
+          $trayStartupAfter = $runValuesAfter.PSObject.Properties['CodexContinuityTray'].Value
           if ($LASTEXITCODE -ne 0 -or
               (Test-Path $uninstallKey) -or
               (Test-Path $statePath) -or
