@@ -1,6 +1,7 @@
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Win32;
 
@@ -21,6 +22,14 @@ internal enum ExistingEndpointOwnership
     Legacy,
     Foreign,
 }
+
+internal enum UninstallReconnectPolicy
+{
+    RestoreImmediately,
+    PreserveUntilNextSignIn,
+}
+
+internal sealed record DeferredEnvironmentRestore(string Name, OwnedString Value);
 
 internal sealed record InstalledAppRegistration(
     string DisplayName,
@@ -334,15 +343,29 @@ internal sealed class InstallCoordinator(
             CurrentBackendUnchanged: true);
     }
 
-    internal bool Uninstall()
+    internal bool Uninstall(
+        UninstallReconnectPolicy reconnectPolicy = UninstallReconnectPolicy.RestoreImmediately)
     {
         var state = stateStore.Load() ?? LoadLegacyState();
         if (state is null)
         {
-            return UninstallLegacyConfiguration();
+            return UninstallLegacyConfiguration(reconnectPolicy);
         }
 
-        RestoreOwnedEnvironmentValue(AppServerUrlVariable, state.AppServerUrl);
+        var deferredEnvironmentRestores = new List<DeferredEnvironmentRestore>();
+        if (reconnectPolicy == UninstallReconnectPolicy.PreserveUntilNextSignIn &&
+            string.Equals(
+                platform.GetUserEnvironmentVariable(AppServerUrlVariable),
+                state.AppServerUrl.AppliedValue,
+                StringComparison.Ordinal))
+        {
+            deferredEnvironmentRestores.Add(
+                new DeferredEnvironmentRestore(AppServerUrlVariable, state.AppServerUrl));
+        }
+        else
+        {
+            RestoreOwnedEnvironmentValue(AppServerUrlVariable, state.AppServerUrl);
+        }
         RestoreOwnedEnvironmentValue(DisableUpdaterVariable, state.UpdaterSetting);
         if (state.CommandPath is not null)
         {
@@ -367,9 +390,14 @@ internal sealed class InstallCoordinator(
             platform.SetInstalledAppRegistration(state.PreviousInstalledAppRegistration);
         }
 
-        platform.SetCleanupCommand(DeferredCleanupCommandBuilder.Build(UninstallCleanupDirectories()));
-        stateStore.Delete();
-        LegacyStateStore()?.Delete();
+        platform.SetCleanupCommand(DeferredCleanupCommandBuilder.Build(
+            UninstallCleanupDirectories(),
+            deferredEnvironmentRestores));
+        if (deferredEnvironmentRestores.Count == 0)
+        {
+            stateStore.Delete();
+            LegacyStateStore()?.Delete();
+        }
         platform.BroadcastEnvironmentChange();
         return true;
     }
@@ -561,7 +589,7 @@ internal sealed class InstallCoordinator(
         }
     }
 
-    private bool UninstallLegacyConfiguration()
+    private bool UninstallLegacyConfiguration(UninstallReconnectPolicy reconnectPolicy)
     {
         var startup = platform.GetStartupCommand();
         var legacyPort = LegacyInstalledPort(startup);
@@ -584,7 +612,8 @@ internal sealed class InstallCoordinator(
             platform.SetInstalledAppRegistration(null);
         }
         var currentUrl = platform.GetUserEnvironmentVariable(AppServerUrlVariable);
-        if (string.Equals(
+        if (reconnectPolicy == UninstallReconnectPolicy.RestoreImmediately &&
+            string.Equals(
                 currentUrl,
                 LoopbackEndpoint.WebSocketUrl(legacyPort.Value),
                 StringComparison.Ordinal))
@@ -598,7 +627,24 @@ internal sealed class InstallCoordinator(
         {
             platform.SetUserEnvironmentVariable(DisableUpdaterVariable, null);
         }
-        platform.SetCleanupCommand(DeferredCleanupCommandBuilder.Build(UninstallCleanupDirectories()));
+        var deferredEnvironmentRestores =
+            reconnectPolicy == UninstallReconnectPolicy.PreserveUntilNextSignIn &&
+            string.Equals(
+                currentUrl,
+                LoopbackEndpoint.WebSocketUrl(legacyPort.Value),
+                StringComparison.Ordinal)
+                ? new DeferredEnvironmentRestore[]
+                {
+                    new(
+                        AppServerUrlVariable,
+                        new OwnedString(
+                            PreviousValue: null,
+                            AppliedValue: LoopbackEndpoint.WebSocketUrl(legacyPort.Value))),
+                }
+                : [];
+        platform.SetCleanupCommand(DeferredCleanupCommandBuilder.Build(
+            UninstallCleanupDirectories(),
+            deferredEnvironmentRestores));
         platform.BroadcastEnvironmentChange();
         return true;
     }
@@ -828,6 +874,63 @@ internal static class DeferredCleanupCommandBuilder
 
     internal static string Build(IReadOnlyList<string> stateDirectories)
     {
+        var cleanupScript = BuildDirectoryCleanupScript(stateDirectories);
+        return $"\"{WindowsPowerShellPath()}\" -NoProfile -WindowStyle Hidden -Command " +
+               $"\"& {{ {cleanupScript} }}\"";
+    }
+
+    internal static string Build(
+        IReadOnlyList<string> stateDirectories,
+        IReadOnlyList<DeferredEnvironmentRestore> environmentRestores)
+    {
+        if (environmentRestores.Count == 0)
+        {
+            return Build(stateDirectories);
+        }
+
+        if (environmentRestores.Any(restore => string.IsNullOrWhiteSpace(restore.Name)))
+        {
+            throw new ArgumentException(
+                "Deferred environment variable names cannot be empty.",
+                nameof(environmentRestores));
+        }
+
+        var restoreEntries = string.Join(
+            ", ",
+            environmentRestores.Select(restore =>
+                $"[pscustomobject]@{{ Name = {PowerShellLiteral(restore.Name)}; " +
+                $"AppliedValue = {PowerShellLiteral(restore.Value.AppliedValue)}; " +
+                $"PreviousValue = {PowerShellLiteral(restore.Value.PreviousValue)} }}"));
+        const string memberDefinition =
+            "[System.Runtime.InteropServices.DllImport(\"user32.dll\", " +
+            "CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)] " +
+            "public static extern System.IntPtr SendMessageTimeout(" +
+            "System.IntPtr window, uint message, System.UIntPtr wParam, string lParam, " +
+            "uint flags, uint timeout, out System.UIntPtr result);";
+        var environmentScript =
+            $"$environmentRestores = @({restoreEntries}); $environmentChanged = $false; " +
+            "foreach ($entry in $environmentRestores) { " +
+            "$current = [Environment]::GetEnvironmentVariable(" +
+            "$entry.Name, [System.EnvironmentVariableTarget]::User); " +
+            "if ([string]::Equals(" +
+            "$current, $entry.AppliedValue, [System.StringComparison]::Ordinal)) { " +
+            "[Environment]::SetEnvironmentVariable(" +
+            "$entry.Name, $entry.PreviousValue, [System.EnvironmentVariableTarget]::User); " +
+            "$environmentChanged = $true } } " +
+            "if ($environmentChanged) { try { " +
+            $"Add-Type -Namespace CodexContinuity -Name EnvironmentChangeNative -MemberDefinition {PowerShellLiteral(memberDefinition)}; " +
+            "$broadcastResult = [UIntPtr]::Zero; " +
+            "[void][CodexContinuity.EnvironmentChangeNative]::SendMessageTimeout(" +
+            "[IntPtr]0xffff, 0x001a, [UIntPtr]::Zero, 'Environment', " +
+            "0x0002, 5000, [ref]$broadcastResult) } catch { } }";
+        var script = $"& {{ {environmentScript} {BuildDirectoryCleanupScript(stateDirectories)} }}";
+        var encodedScript = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        return $"\"{WindowsPowerShellPath()}\" -NoProfile -WindowStyle Hidden " +
+               $"-EncodedCommand {encodedScript}";
+    }
+
+    private static string BuildDirectoryCleanupScript(IReadOnlyList<string> stateDirectories)
+    {
         if (stateDirectories.Count == 0)
         {
             throw new ArgumentException("At least one cleanup directory is required.", nameof(stateDirectories));
@@ -853,18 +956,22 @@ internal static class DeferredCleanupCommandBuilder
             ", ",
             targets.Select(target =>
                 $"'{target.Replace("'", "''", StringComparison.Ordinal)}'"));
-        var powershell = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
-            "System32",
-            "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe");
-        return $"\"{powershell}\" -NoProfile -WindowStyle Hidden -Command " +
-               $"\"& {{ $targets = @({targetArray}); foreach ($target in $targets) {{ " +
+        return $"$targets = @({targetArray}); foreach ($target in $targets) {{ " +
                "for ($attempt = 0; $attempt -lt 20; $attempt++) { " +
                "try { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop; break } " +
-               "catch { Start-Sleep -Milliseconds 500 } } } }\"";
+               "catch { Start-Sleep -Milliseconds 500 } } }";
     }
+
+    private static string PowerShellLiteral(string? value) => value is null
+        ? "$null"
+        : $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
+
+    private static string WindowsPowerShellPath() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe");
 }
 
 internal static class StartupCommandBuilder

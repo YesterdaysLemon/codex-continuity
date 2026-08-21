@@ -37,11 +37,11 @@ internal static class Program
                         : TrayInstallMode.Enabled),
                 "repair" => await RepairAsync(
                     args.Contains("--start-now", StringComparer.OrdinalIgnoreCase)),
-                "uninstall" => Uninstall(),
+                "uninstall" => await UninstallAsync(),
                 "rollback" => Rollback(),
                 "setup" when args.Contains(
                     "--uninstall",
-                    StringComparer.OrdinalIgnoreCase) => Uninstall(),
+                    StringComparer.OrdinalIgnoreCase) => await UninstallAsync(),
                 "setup" => await BootstrapInstaller.RunAsync(
                     port,
                     args.Contains("--no-tray", StringComparer.OrdinalIgnoreCase)
@@ -472,13 +472,34 @@ internal static class Program
         }
     }
 
-    private static int Uninstall()
+    private static async Task<int> UninstallAsync()
     {
-        var removed = CreateInstallCoordinator(ContinuityPaths.StateDirectory).Uninstall();
-        Console.WriteLine(removed
-            ? "Removed owned future-launch configuration. Installed files will be removed at the next sign-in; no running process was stopped."
-            : "No owned future-launch configuration was found. No running process was stopped.");
-        return removed ? 0 : 1;
+        var coordinator = CreateInstallCoordinator(ContinuityPaths.StateDirectory);
+        var installedPort = LoadInstallState()?.Port ?? coordinator.DetectLegacyInstalledPort();
+        var configuredUrl = Environment.GetEnvironmentVariable(
+            InstallCoordinator.AppServerUrlVariable,
+            EnvironmentVariableTarget.User);
+        var reconnectPolicy = installedPort is { } port &&
+            string.Equals(
+                configuredUrl,
+                LoopbackEndpoint.WebSocketUrl(port),
+                StringComparison.Ordinal) &&
+            await IsReadyAsync(port, TimeSpan.FromSeconds(1))
+                ? UninstallReconnectPolicy.PreserveUntilNextSignIn
+                : UninstallReconnectPolicy.RestoreImmediately;
+        var removed = coordinator.Uninstall(reconnectPolicy);
+        if (!removed)
+        {
+            Console.WriteLine(
+                "No owned future-launch configuration was found. No running process was stopped.");
+            return 1;
+        }
+
+        Console.WriteLine(
+            reconnectPolicy == UninstallReconnectPolicy.PreserveUntilNextSignIn
+                ? "Removed future startup configuration. Codex reopenings in this Windows session will keep reconnecting to the running backend; the owned reconnect setting and installed files will be removed at the next sign-in. No running process was stopped."
+                : "Removed owned future-launch configuration. Installed files will be removed at the next sign-in; no running process was stopped.");
+        return 0;
     }
 
     private static async Task<int> RepairAsync(bool startNow)
