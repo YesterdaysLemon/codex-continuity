@@ -43,6 +43,7 @@ internal static partial class BootstrapInstaller
     }
 
     internal static async Task<int> RunAsync(
+        int port,
         TrayInstallMode trayInstallMode,
         bool startNow,
         bool skipSelfTest,
@@ -98,15 +99,7 @@ internal static partial class BootstrapInstaller
                 }
             }
 
-            var installArguments = new List<string> { "install" };
-            if (startNow)
-            {
-                installArguments.Add("--start-now");
-            }
-            if (trayInstallMode == TrayInstallMode.Disabled)
-            {
-                installArguments.Add("--no-tray");
-            }
+            var installArguments = BuildInstallArguments(port, trayInstallMode, startNow);
             var installExitCode = await RunChildAsync(supervisor, installArguments, quiet);
             if (installExitCode != 0)
             {
@@ -120,6 +113,24 @@ internal static partial class BootstrapInstaller
         {
             DeleteVerifiedTemporaryDirectory(workRoot);
         }
+    }
+
+    internal static List<string> BuildInstallArguments(
+        int port,
+        TrayInstallMode trayInstallMode,
+        bool startNow)
+    {
+        LoopbackEndpoint.ValidatePort(port);
+        var arguments = new List<string> { "install", "--port", port.ToString() };
+        if (startNow)
+        {
+            arguments.Add("--start-now");
+        }
+        if (trayInstallMode == TrayInstallMode.Disabled)
+        {
+            arguments.Add("--no-tray");
+        }
+        return arguments;
     }
 
     private static async Task DownloadAsync(string url, string destination)

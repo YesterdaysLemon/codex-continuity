@@ -7,6 +7,31 @@ namespace CodexContinuity.Tests;
 
 public sealed class BootstrapInstallerTests
 {
+    [Theory]
+    [InlineData("--help", "help")]
+    [InlineData("-h", "help")]
+    [InlineData("--silent", "setup")]
+    [InlineData("--port", "setup")]
+    public void SetupExecutableResolvesReadOnlyHelpAndInstallerOptions(
+        string argument,
+        string expectedCommand)
+    {
+        Assert.Equal(expectedCommand, Program.ResolveCommand(setupExecutable: true, [argument]));
+    }
+
+    [Fact]
+    public void SetupForwardsCustomPortAndLifecycleOptions()
+    {
+        var arguments = BootstrapInstaller.BuildInstallArguments(
+            45124,
+            TrayInstallMode.Disabled,
+            startNow: true);
+
+        Assert.Equal(
+            ["install", "--port", "45124", "--start-now", "--no-tray"],
+            arguments);
+    }
+
     [Fact]
     public void ResolvesVersionedStableReleaseAssets()
     {

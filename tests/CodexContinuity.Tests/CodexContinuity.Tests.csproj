@@ -16,5 +16,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\CodexContinuity.csproj" />
     <ProjectReference Include="..\..\tray\CodexContinuity.Tray.csproj" />
+    <ProjectReference Include="..\CodexContinuity.ProcessHarness\CodexContinuity.ProcessHarness.csproj" />
+    <ProjectReference Include="..\CodexContinuity.InstallerFixture\CodexContinuity.InstallerFixture.csproj"
+                      ReferenceOutputAssembly="false" />
   </ItemGroup>
 </Project>

@@ -1,18 +1,37 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-async function render() {
+const publicDirectory = new URL("../public/", import.meta.url);
+
+async function render(path = "/", accept = "text/html") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
 
   return worker.fetch(
-    new Request("http://localhost/", {
-      headers: { accept: "text/html" },
+    new Request(new URL(path, "http://localhost/"), {
+      headers: { accept },
     }),
     {
       ASSETS: {
-        fetch: async () => new Response("Not found", { status: 404 }),
+        fetch: async (request) => {
+          const pathname = new URL(request.url).pathname;
+          const relativePath = pathname.replace(/^\//, "");
+          try {
+            const body = await readFile(new URL(relativePath, publicDirectory));
+            const contentType = relativePath.endsWith(".svg")
+              ? "image/svg+xml"
+              : relativePath.endsWith(".png")
+                ? "image/png"
+                : relativePath.endsWith(".xml")
+                  ? "application/xml"
+                  : "text/plain";
+            return new Response(body, { headers: { "content-type": contentType } });
+          } catch {
+            return new Response("Not found", { status: 404 });
+          }
+        },
       },
     },
     {
@@ -41,4 +60,24 @@ test("server-renders the Codex Continuity launch page", async () => {
   assert.match(html, /github\.com\/sponsors\/YesterdaysLemon/);
   assert.match(html, /alirezaafshan\.com\/projects/);
   assert.doesNotMatch(html, /site-creator|starter loading skeleton/i);
+});
+
+test("serves agent and crawler discovery assets", async () => {
+  const expectations = [
+    ["/llms.txt", /restartsCodex: false/],
+    ["/robots.txt", /Sitemap:/],
+    ["/sitemap.xml", /<loc>https:\/\/codex-continuity\./],
+    ["/icon.svg", /<svg/],
+  ];
+
+  for (const [path, pattern] of expectations) {
+    const response = await render(path, "*/*");
+    assert.equal(response.status, 200, path);
+    assert.match(await response.text(), pattern, path);
+  }
+
+  const socialCard = await render("/og.png", "image/png");
+  assert.equal(socialCard.status, 200);
+  assert.match(socialCard.headers.get("content-type") ?? "", /^image\/png\b/i);
+  assert.ok((await socialCard.arrayBuffer()).byteLength > 100_000);
 });

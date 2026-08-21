@@ -22,7 +22,21 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - run: dotnet restore tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj
+      - name: Verify release version
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+            throw "Release tag must use vX.Y.Z syntax: $tag"
+          }
+          $tagVersion = $Matches.version
+          $supervisorVersion = ([xml](Get-Content CodexContinuity.csproj -Raw)).Project.PropertyGroup.Version
+          $trayVersion = ([xml](Get-Content tray/CodexContinuity.Tray.csproj -Raw)).Project.PropertyGroup.Version
+          if ($tagVersion -ne $supervisorVersion -or $tagVersion -ne $trayVersion) {
+            throw "Release version mismatch: tag=$tagVersion supervisor=$supervisorVersion tray=$trayVersion"
+          }
       - run: dotnet build CodexContinuity.csproj --configuration Release --no-restore
+      - run: dotnet test tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj --configuration Release --no-restore
       - name: Publish single-file executable
         run: >-
           dotnet publish CodexContinuity.csproj --configuration Release
@@ -74,7 +88,15 @@ jobs:
           $version = $tag.TrimStart('v')
           $installerUrl = "https://github.com/YesterdaysLemon/codex-continuity/releases/download/$tag/CodexContinuity-$tag-Setup.exe"
           .\scripts\write-winget-manifests.ps1 -Version $version -InstallerUrl $installerUrl -InstallerSha256 $setupHash -ReleaseDate (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd') -OutputDirectory release/winget
-          winget validate --manifest release/winget --disable-interactivity
+          winget --version
+          $validationOutput = winget validate --manifest release/winget --disable-interactivity 2>&1
+          $validationExitCode = $LASTEXITCODE
+          $validationOutput | Write-Host
+          $validationText = $validationOutput -join "`n"
+          if ($validationExitCode -ne 0 -and $validationText -notmatch 'Manifest validation succeeded') {
+            throw "WinGet manifest validation failed with exit code $validationExitCode."
+          }
+          $global:LASTEXITCODE = 0
           Compress-Archive -Path release/winget/* -DestinationPath "release/CodexContinuity-$tag-winget-manifests.zip"
       - name: Attest release provenance
         uses: actions/attest@v4

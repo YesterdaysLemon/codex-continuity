@@ -35,4 +35,15 @@ public sealed class TrayStatusParserTests
 
         Assert.Equal(ContinuityHealth.Degraded, status.Health);
     }
+
+    [Fact]
+    public void TreatsPreviouslyAttachedForeignBackendAsDegraded()
+    {
+        const string json =
+            """{"ready":true,"activeThreadCount":1,"supervisor":{"state":"attached"}}""";
+
+        var status = TrayStatusParser.Parse(json);
+
+        Assert.Equal(ContinuityHealth.Degraded, status.Health);
+    }
 }

@@ -37,7 +37,7 @@ internal static class TrayStatusParser
             supervisor.TryGetProperty("state", out var stateElement)
                 ? stateElement.GetString()
                 : null;
-        var health = ready && supervisorState is "running" or "attached"
+        var health = ready && supervisorState == "running"
             ? ContinuityHealth.Healthy
             : ready
                 ? ContinuityHealth.Degraded

@@ -46,7 +46,7 @@ internal sealed class RollingLogWriter(
 
     internal async Task AppendLineAsync(string line, CancellationToken cancellationToken)
     {
-        var entry = $"{DateTimeOffset.UtcNow:O} {line}{Environment.NewLine}";
+        var entry = CreateBoundedEntry(line);
         var entryBytes = Encoding.UTF8.GetByteCount(entry);
         await gate.WaitAsync(cancellationToken);
         try
@@ -64,6 +64,39 @@ internal sealed class RollingLogWriter(
         {
             gate.Release();
         }
+    }
+
+    private string CreateBoundedEntry(string line)
+    {
+        var entryBudget = maximumBytes - Encoding.UTF8.GetPreamble().Length;
+        var prefix = $"{DateTimeOffset.UtcNow:O} ";
+        var fullEntry = $"{prefix}{line}{Environment.NewLine}";
+        if (Encoding.UTF8.GetByteCount(fullEntry) <= entryBudget)
+        {
+            return fullEntry;
+        }
+
+        const string truncationMarker = "… [truncated]";
+        var suffix = $"{truncationMarker}{Environment.NewLine}";
+        var availableBytes = entryBudget -
+            Encoding.UTF8.GetByteCount(prefix) -
+            Encoding.UTF8.GetByteCount(suffix);
+        if (availableBytes <= 0 || availableBytes > int.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maximumBytes),
+                "Maximum log size must leave room for a timestamp and truncation marker.");
+        }
+
+        var buffer = new byte[(int)availableBytes];
+        Encoding.UTF8.GetEncoder().Convert(
+            line.AsSpan(),
+            buffer.AsSpan(),
+            flush: true,
+            out _,
+            out var bytesUsed,
+            out _);
+        return $"{prefix}{Encoding.UTF8.GetString(buffer, 0, bytesUsed)}{suffix}";
     }
 
     private void Rotate()
@@ -97,6 +130,8 @@ internal sealed record SupervisorStatus(
     string State,
     int SupervisorProcessId,
     int? BackendProcessId,
+    int Port,
+    string? CodexHome,
     int ConsecutiveFailures,
     int? LastExitCode,
     DateTimeOffset UpdatedAtUtc,

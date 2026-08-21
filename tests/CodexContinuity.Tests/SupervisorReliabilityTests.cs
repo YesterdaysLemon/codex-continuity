@@ -43,6 +43,19 @@ public sealed class SupervisorReliabilityTests : IDisposable
     }
 
     [Fact]
+    public async Task RollingLogTruncatesSingleEntryToMaximumFileSize()
+    {
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "app-server.log");
+        var writer = new RollingLogWriter(path, maximumBytes: 90, retainedFiles: 2);
+
+        await writer.AppendLineAsync(new string('x', 10_000), CancellationToken.None);
+
+        Assert.InRange(new FileInfo(path).Length, 1, 90);
+        Assert.Contains("[truncated]", await File.ReadAllTextAsync(path));
+    }
+
+    [Fact]
     public void EndpointCanOnlyProduceLoopbackUrls()
     {
         var websocket = new Uri(LoopbackEndpoint.WebSocketUrl(45123));

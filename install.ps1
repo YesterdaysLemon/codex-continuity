@@ -5,6 +5,9 @@ param(
 
     [string]$Version = "latest",
 
+    [ValidateRange(1, 65535)]
+    [int]$Port = 45123,
+
     [switch]$StartNow,
 
     [switch]$SkipSelfTest,
@@ -85,6 +88,7 @@ if ($Plan) {
         mode = "plan"
         version = $Version
         runtime = $Runtime
+        port = $Port
         assetUrl = $assetUrl
         checksumUrl = $checksumUrl
         selfTest = -not $SkipSelfTest
@@ -139,7 +143,7 @@ try {
         }
     }
 
-    $installArguments = @("install")
+    $installArguments = @("install", "--port", $Port)
     if ($NoTray) {
         $installArguments += "--no-tray"
     }

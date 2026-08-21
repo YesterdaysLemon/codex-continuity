@@ -20,7 +20,7 @@ internal static class LoopbackEndpoint
 
     internal static void ValidatePort(int port)
     {
-        if (port is < IPEndPoint.MinPort or > IPEndPoint.MaxPort)
+        if (port is < 1 or > IPEndPoint.MaxPort)
         {
             throw new ArgumentOutOfRangeException(nameof(port), "Port must be a valid TCP port.");
         }

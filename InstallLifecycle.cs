@@ -14,6 +14,14 @@ internal enum TrayInstallMode
     Disabled,
 }
 
+internal enum ExistingEndpointOwnership
+{
+    NotReady,
+    Managed,
+    Legacy,
+    Foreign,
+}
+
 internal sealed record InstalledAppRegistration(
     string DisplayName,
     string DisplayVersion,
@@ -39,7 +47,7 @@ internal sealed record InstallState(
     OwnedString StartupCommand,
     OwnedString? TrayStartupCommand,
     InstalledAppRegistration? PreviousInstalledAppRegistration,
-    InstalledAppRegistration InstalledAppRegistration,
+    InstalledAppRegistration? InstalledAppRegistration,
     DateTimeOffset InstalledAtUtc);
 
 internal sealed record InstallOutcome(
@@ -136,11 +144,21 @@ internal sealed class InstallCoordinator(
     internal const string AppServerUrlVariable = "CODEX_APP_SERVER_WS_URL";
     internal const string DisableUpdaterVariable = "CODEX_SPARKLE_ENABLED";
 
+    internal int? DetectLegacyInstalledPort() => stateStore.Load() is null
+        ? LegacyInstalledPort(platform.GetStartupCommand())
+        : null;
+
     internal InstallOutcome Install(
         string sourceExecutable,
         int port,
-        TrayInstallMode trayInstallMode)
+        TrayInstallMode trayInstallMode,
+        ExistingEndpointOwnership endpointOwnership = ExistingEndpointOwnership.NotReady)
     {
+        if (endpointOwnership == ExistingEndpointOwnership.Foreign)
+        {
+            throw new InvalidOperationException(
+                "The requested port is already ready but is not owned by this Continuity installation. No configuration was changed.");
+        }
         LoopbackEndpoint.ValidatePort(port);
         var sourcePath = Path.GetFullPath(sourceExecutable);
         if (!File.Exists(sourcePath))
@@ -177,6 +195,20 @@ internal sealed class InstallCoordinator(
         var previousStartup = platform.GetStartupCommand();
         var previousTrayStartup = platform.GetTrayStartupCommand();
         var previousRegistration = platform.GetInstalledAppRegistration();
+        var legacyInstalledPort = LegacyInstalledPort(previousStartup);
+        var previousUrlToRestore = legacyInstalledPort is not null && string.Equals(
+            previousUrl,
+            LoopbackEndpoint.WebSocketUrl(legacyInstalledPort.Value),
+            StringComparison.Ordinal)
+                ? null
+                : previousUrl;
+        var previousUpdaterSettingToRestore = legacyInstalledPort is not null && string.Equals(
+            previousUpdaterSetting,
+            "false",
+            StringComparison.Ordinal)
+                ? null
+                : previousUpdaterSetting;
+        var previousStartupToRestore = legacyInstalledPort is null ? previousStartup : null;
         var registration = BuildInstalledAppRegistration(installedExecutable);
         var state = new InstallState(
             SchemaVersion: 3,
@@ -191,13 +223,16 @@ internal sealed class InstallCoordinator(
                 previousState,
                 stagedVersion.TrayExecutable),
             BinarySha256: hash,
-            AppServerUrl: CaptureOwnedValue(previousUrl, previousState?.AppServerUrl, serverUrl),
+            AppServerUrl: CaptureOwnedValue(
+                previousUrlToRestore,
+                previousState?.AppServerUrl,
+                serverUrl),
             UpdaterSetting: CaptureOwnedValue(
-                previousUpdaterSetting,
+                previousUpdaterSettingToRestore,
                 previousState?.UpdaterSetting,
                 "false"),
             StartupCommand: CaptureOwnedValue(
-                previousStartup,
+                previousStartupToRestore,
                 previousState?.StartupCommand,
                 startupCommand),
             TrayStartupCommand: trayStartupCommand is null
@@ -305,6 +340,10 @@ internal sealed class InstallCoordinator(
             : StartupCommandBuilder.BuildTray(previousTrayExecutable);
         var currentStartup = platform.GetStartupCommand();
         var currentTrayStartup = platform.GetTrayStartupCommand();
+        var currentRegistration = platform.GetInstalledAppRegistration();
+        var rolledBackRegistration = IsLegacyExecutable(previousExecutable)
+            ? state.PreviousInstalledAppRegistration
+            : BuildInstalledAppRegistration(previousExecutable);
         var rolledBack = state with
         {
             InstalledExecutable = previousExecutable,
@@ -319,23 +358,33 @@ internal sealed class InstallCoordinator(
                     currentTrayStartup,
                     state.TrayStartupCommand,
                     trayStartupCommand),
-            InstalledAppRegistration = BuildInstalledAppRegistration(previousExecutable),
+            InstalledAppRegistration = rolledBackRegistration,
             InstalledAtUtc = DateTimeOffset.UtcNow,
         };
-        platform.SetStartupCommand(startupCommand);
-        if (rolledBack.TrayStartupCommand is not null)
+        try
         {
-            platform.SetTrayStartupCommand(rolledBack.TrayStartupCommand.AppliedValue);
+            platform.SetStartupCommand(startupCommand);
+            if (rolledBack.TrayStartupCommand is not null)
+            {
+                platform.SetTrayStartupCommand(rolledBack.TrayStartupCommand.AppliedValue);
+            }
+            else if (state.TrayStartupCommand is not null && string.Equals(
+                         currentTrayStartup,
+                         state.TrayStartupCommand.AppliedValue,
+                         StringComparison.Ordinal))
+            {
+                platform.SetTrayStartupCommand(state.TrayStartupCommand.PreviousValue);
+            }
+            platform.SetInstalledAppRegistration(rolledBackRegistration);
+            stateStore.Save(rolledBack);
         }
-        else if (state.TrayStartupCommand is not null && string.Equals(
-                     currentTrayStartup,
-                     state.TrayStartupCommand.AppliedValue,
-                     StringComparison.Ordinal))
+        catch
         {
-            platform.SetTrayStartupCommand(state.TrayStartupCommand.PreviousValue);
+            platform.SetStartupCommand(currentStartup);
+            platform.SetTrayStartupCommand(currentTrayStartup);
+            platform.SetInstalledAppRegistration(currentRegistration);
+            throw;
         }
-        platform.SetInstalledAppRegistration(rolledBack.InstalledAppRegistration);
-        stateStore.Save(rolledBack);
         return rolledBack;
     }
 
@@ -405,10 +454,8 @@ internal sealed class InstallCoordinator(
     private bool UninstallLegacyConfiguration()
     {
         var startup = platform.GetStartupCommand();
-        var ownedStartup = startup is not null &&
-            startup.Contains("CodexContinuity", StringComparison.OrdinalIgnoreCase) &&
-            startup.Contains("serve", StringComparison.OrdinalIgnoreCase);
-        if (!ownedStartup)
+        var legacyPort = LegacyInstalledPort(startup);
+        if (legacyPort is null)
         {
             return false;
         }
@@ -427,10 +474,10 @@ internal sealed class InstallCoordinator(
             platform.SetInstalledAppRegistration(null);
         }
         var currentUrl = platform.GetUserEnvironmentVariable(AppServerUrlVariable);
-        if (Uri.TryCreate(currentUrl, UriKind.Absolute, out var uri) &&
-            uri.Scheme == "ws" &&
-            IPAddress.TryParse(uri.Host, out var address) &&
-            IPAddress.IsLoopback(address))
+        if (string.Equals(
+                currentUrl,
+                LoopbackEndpoint.WebSocketUrl(legacyPort.Value),
+                StringComparison.Ordinal))
         {
             platform.SetUserEnvironmentVariable(AppServerUrlVariable, null);
         }
@@ -505,8 +552,43 @@ internal sealed class InstallCoordinator(
         return previousState.InstalledTrayExecutable;
     }
 
+    private int? LegacyInstalledPort(string? startupCommand)
+    {
+        if (startupCommand is null)
+        {
+            return null;
+        }
+
+        var legacyExecutable = Path.Combine(stateDirectory, "CodexContinuity.exe");
+        var escapedLegacyExecutable = legacyExecutable.Replace("'", "''", StringComparison.Ordinal);
+        if (!startupCommand.Contains(escapedLegacyExecutable, StringComparison.OrdinalIgnoreCase) ||
+            !startupCommand.Contains("serve", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        const string portMarker = "'--port','";
+        var portStart = startupCommand.IndexOf(portMarker, StringComparison.OrdinalIgnoreCase);
+        if (portStart < 0)
+        {
+            return null;
+        }
+        portStart += portMarker.Length;
+        var portEnd = startupCommand.IndexOf('\'', portStart);
+        return portEnd > portStart && int.TryParse(
+            startupCommand.AsSpan(portStart, portEnd - portStart),
+            out var port) &&
+            port is >= 1 and <= IPEndPoint.MaxPort
+                ? port
+                : null;
+    }
+
     private static bool PathsEqual(string first, string second) =>
         Path.GetFullPath(first).Equals(Path.GetFullPath(second), StringComparison.OrdinalIgnoreCase);
+
+    private bool IsLegacyExecutable(string executable) => PathsEqual(
+        executable,
+        Path.Combine(stateDirectory, "CodexContinuity.exe"));
 
     private static string ComputeSha256(string path)
     {
