@@ -49,22 +49,8 @@ internal static partial class BootstrapInstaller
         bool skipSelfTest,
         bool quiet,
         string? downloadBaseUrl)
-        => await RunReleaseAsync(
-            ResolveRelease(downloadBaseUrl),
-            port,
-            trayInstallMode,
-            startNow,
-            skipSelfTest,
-            quiet);
-
-    internal static async Task<int> RunReleaseAsync(
-        BootstrapRelease release,
-        int port,
-        TrayInstallMode trayInstallMode,
-        bool startNow,
-        bool skipSelfTest,
-        bool quiet)
     {
+        var release = ResolveRelease(downloadBaseUrl);
         var workRoot = Path.Combine(
             Path.GetTempPath(),
             $"codex-continuity-setup-{Guid.NewGuid():N}");
@@ -93,7 +79,6 @@ internal static partial class BootstrapInstaller
                     $"Expected exactly one CodexContinuity.exe; found {supervisors.Length}.");
             }
             var supervisor = supervisors[0];
-            VerifyReleaseVersion(supervisor, release.Version);
             var tray = Path.Combine(
                 Path.GetDirectoryName(supervisor)
                     ?? throw new InvalidDataException("Release executable has no directory."),
@@ -170,17 +155,6 @@ internal static partial class BootstrapInstaller
         {
             throw new InvalidDataException(
                 $"SHA-256 mismatch. Expected {expectedHash} but downloaded {actualHash}.");
-        }
-    }
-
-    internal static void VerifyReleaseVersion(string executable, string expectedVersion)
-    {
-        var version = FileVersionInfo.GetVersionInfo(executable);
-        var actualVersion = $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}";
-        if (!string.Equals(expectedVersion, actualVersion, StringComparison.Ordinal))
-        {
-            throw new InvalidDataException(
-                $"Release version mismatch. Expected {expectedVersion} but archive contains {actualVersion}.");
         }
     }
 
