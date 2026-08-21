@@ -21,12 +21,14 @@ public sealed class AutomaticUpdateRunnerTests : IDisposable
         using var cancellation = new CancellationTokenSource();
         var checks = 0;
         var delays = new List<TimeSpan>();
+        var events = new List<string>();
 
         await AutomaticUpdateRunner.RunAsync(
             root,
             "0.2.0",
             (_, _, _) =>
             {
+                events.Add("check");
                 checks++;
                 if (checks == 1)
                 {
@@ -37,6 +39,7 @@ public sealed class AutomaticUpdateRunnerTests : IDisposable
             },
             (delay, token) =>
             {
+                events.Add("delay");
                 delays.Add(delay);
                 token.ThrowIfCancellationRequested();
                 return Task.CompletedTask;
@@ -44,6 +47,7 @@ public sealed class AutomaticUpdateRunnerTests : IDisposable
             cancellation.Token);
 
         Assert.Equal(2, checks);
+        Assert.Equal(["check", "delay", "check", "delay"], events);
         Assert.Equal(
             [AutomaticUpdateRunner.CheckInterval, AutomaticUpdateRunner.CheckInterval],
             delays);
