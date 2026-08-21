@@ -45,7 +45,7 @@ try {
             & $signTool.FullName sign /f $certificatePath /p $certificatePassword `
                 /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
                 /d "Codex Continuity" `
-                /du "https://codex-continuity.alirezaafshan4.chatgpt.site" `
+                /du "https://continuity.alirezaafshan.com" `
                 $path
             if ($LASTEXITCODE -ne 0) {
                 throw "Authenticode signing failed for $path."
