@@ -85,6 +85,50 @@ public sealed class AutomaticUpdateRunnerTests : IDisposable
         Assert.True(File.Exists(ContinuityPaths.UpdateLockFile(root)));
     }
 
+    [Fact]
+    public async Task CheckOnceTreatsPersistedVersionAsInactiveWithoutLiveSupervisor()
+    {
+        var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
+        Directory.CreateDirectory(root);
+        new InstallStateStore(ContinuityPaths.InstallStateFile(root)).Save(
+            InstallState(45999, Path.Combine(root, "missing.exe")));
+        new ContinuityUpdateStateStore(ContinuityPaths.UpdateStatusFile(root)).Save(
+            new ContinuityUpdateState(
+                SchemaVersion: 1,
+                TrackingStartedAtUtc: now,
+                LastCheckedAtUtc: now,
+                BaselineVersion: "0.2.0",
+                RunningVersion: "0.3.0",
+                SelectedVersion: "0.3.0",
+                RunningProcessObserved: true,
+                LatestVersion: "0.3.0",
+                LastError: null,
+                ObservedCount: 1,
+                StagedCount: 1,
+                AppliedCount: 1,
+                Releases: [new TrackedContinuityRelease(
+                    "0.3.0",
+                    now,
+                    now,
+                    now,
+                    now,
+                    LastError: null)]));
+
+        var state = await AutomaticUpdateRunner.CheckOnceAsync(
+            root,
+            runningVersion: null,
+            _ => Task.FromResult<IReadOnlyList<PublishedContinuityRelease>>(
+                [Release("0.3.0")]),
+            (_, _, _) => throw new InvalidOperationException("The current release must not stage."),
+            () => now.AddMinutes(1),
+            CancellationToken.None);
+
+        Assert.NotNull(state);
+        Assert.False(state.RunningProcessObserved);
+        Assert.Equal(1, state.AppliedCount);
+        Assert.Equal("inactive", state.LatestState);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(root))
