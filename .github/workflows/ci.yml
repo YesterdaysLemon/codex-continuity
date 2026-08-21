@@ -67,4 +67,11 @@ jobs:
           }
           $setupHash = (Get-FileHash .\artifacts\install-smoke\CodexContinuity.exe -Algorithm SHA256).Hash
           .\scripts\write-winget-manifests.ps1 -Version 0.2.0 -InstallerUrl https://example.invalid/CodexContinuity-v0.2.0-Setup.exe -InstallerSha256 $setupHash -ReleaseDate 2026-08-20 -OutputDirectory artifacts/winget-smoke
-          winget validate --manifest artifacts/winget-smoke --disable-interactivity
+          winget --version
+          $validationOutput = winget validate --manifest artifacts/winget-smoke --disable-interactivity 2>&1
+          $validationExitCode = $LASTEXITCODE
+          $validationOutput | Write-Host
+          $validationText = $validationOutput -join "`n"
+          if ($validationExitCode -ne 0 -and $validationText -notmatch 'Manifest validation succeeded') {
+            throw "WinGet manifest validation failed with exit code $validationExitCode."
+          }
