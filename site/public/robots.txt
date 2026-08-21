@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://codex-continuity.alirezaafshan4.chatgpt.site/sitemap.xml
+Sitemap: https://continuity.alirezaafshan.com/sitemap.xml

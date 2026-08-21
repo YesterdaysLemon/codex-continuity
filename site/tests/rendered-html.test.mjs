@@ -66,7 +66,7 @@ test("serves agent and crawler discovery assets", async () => {
   const expectations = [
     ["/llms.txt", /restartsCodex: false/],
     ["/robots.txt", /Sitemap:/],
-    ["/sitemap.xml", /<loc>https:\/\/codex-continuity\./],
+    ["/sitemap.xml", /<loc>https:\/\/continuity\.alirezaafshan\.com\//],
     ["/icon.svg", /<svg/],
   ];
 
