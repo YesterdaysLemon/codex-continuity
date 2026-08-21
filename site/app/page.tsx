@@ -16,6 +16,7 @@ export default function Home() {
         <div className="nav-cluster">
           <a className="nav-link nav-section-link" href="#how">How it works</a>
           <a className="nav-link nav-section-link" href="#install">Install</a>
+          <a className="nav-link nav-section-link" href="#cli">CLI</a>
           <a
             className="nav-link"
             href="https://github.com/YesterdaysLemon/codex-continuity"
@@ -189,9 +190,34 @@ export default function Home() {
         </div>
       </section>
 
+      <section className="section agent-section" id="cli">
+        <div>
+          <span className="section-number">03 / INSTALLED CLI</span>
+          <h2>Inspect.<br />Repair. Remove.</h2>
+        </div>
+        <div className="agent-copy">
+          <p>
+            Installation adds one stable command to your user PATH. Open a new
+            PowerShell window, then manage Continuity without hunting through
+            versioned folders.
+          </p>
+          <div className="terminal" aria-label="Installed Codex Continuity commands">
+            <div className="terminal-bar">
+              <span>CodexContinuity</span>
+              <span>user PATH / v0.2.1</span>
+            </div>
+            <pre><code>CodexContinuity status{"\n"}CodexContinuity probe{"\n"}CodexContinuity repair{"\n"}CodexContinuity uninstall</code></pre>
+            <div className="terminal-foot">
+              <span>Uninstall never stops active agents</span>
+              <span>Files leave at next sign-in</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section className="section agent-section" id="agents">
         <div>
-          <span className="section-number">03 / AGENT DISCOVERY</span>
+          <span className="section-number">04 / AGENT DISCOVERY</span>
           <h2>Inspect first.<br />Then act.</h2>
         </div>
         <div className="agent-copy">
@@ -228,8 +254,9 @@ export default function Home() {
           <p>
             Codex Continuity relies on experimental app-server transport and
             undocumented desktop environment hooks. A future Codex release may
-            change them. The utility is deliberately small, fail-closed, and
-            removable with one command.
+            change them. v0.2.1 supports Windows 11 x64 only; there is no macOS
+            or Linux build today. The utility is deliberately small,
+            fail-closed, and removable with one command.
           </p>
         </div>
         <a className="button button-secondary" href="https://github.com/YesterdaysLemon/codex-continuity/blob/main/REVERSE_ENGINEERING.md">

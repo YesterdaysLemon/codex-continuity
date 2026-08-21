@@ -66,8 +66,9 @@ export default function RootLayout({
               "@context": "https://schema.org",
               "@type": "SoftwareApplication",
               name: "Codex Continuity",
+              softwareVersion: "0.2.1",
               applicationCategory: "UtilitiesApplication",
-              operatingSystem: "Windows 11",
+              operatingSystem: "Windows 11 x64",
               description:
                 "An unofficial Windows utility that keeps Codex agent threads alive while the desktop app updates or restarts.",
               url: "https://continuity.alirezaafshan.com",

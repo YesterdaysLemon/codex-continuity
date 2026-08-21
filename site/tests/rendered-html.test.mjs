@@ -56,11 +56,15 @@ test("server-renders the Codex Continuity launch page", async () => {
   assert.match(html, /-Plan -Json/);
   assert.match(html, /\/llms\.txt/);
   assert.match(html, /SoftwareApplication/);
+  assert.match(html, /softwareVersion[^<]*0\.2\.1/);
   assert.match(html, /Unofficial · Windows · Experimental/);
   assert.match(html, /Skip to content/);
   assert.match(html, /WIN11 VERIFIED/);
   assert.match(html, /One command\./);
   assert.match(html, /No forced restart\./);
+  assert.match(html, /CodexContinuity status/);
+  assert.match(html, /Files leave at next sign-in/);
+  assert.match(html, /there is no macOS\s+or Linux build today/i);
   assert.doesNotMatch(html, /Zero interrupted agents|>PROVEN</i);
   assert.match(html, /github\.com\/YesterdaysLemon\/codex-continuity/);
   assert.match(html, /github\.com\/sponsors\/YesterdaysLemon/);
@@ -79,7 +83,7 @@ test("retains responsive and keyboard-accessible site polish", async () => {
 
 test("serves agent and crawler discovery assets", async () => {
   const expectations = [
-    ["/llms.txt", /restartsCodex: false/],
+    ["/llms.txt", /Installed files and logs are removed at the next Windows sign-in/],
     ["/robots.txt", /Sitemap:/],
     ["/sitemap.xml", /<loc>https:\/\/continuity\.alirezaafshan\.com\//],
     ["/icon.svg", /<svg/],

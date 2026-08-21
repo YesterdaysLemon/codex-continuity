@@ -47,6 +47,24 @@ external community-manifest review completes, the standard command will be:
 winget install --id YesterdaysLemon.CodexContinuity -e
 ```
 
+## Installed CLI
+
+Installation adds a stable `CodexContinuity` command to the user `PATH`. Open a
+new PowerShell window after installation, then inspect or maintain the service
+without finding a versioned executable:
+
+```powershell
+CodexContinuity status
+CodexContinuity probe
+CodexContinuity repair
+CodexContinuity uninstall
+```
+
+`uninstall` restores only the environment, startup, `PATH`, and Installed Apps
+values still owned by Continuity. It never stops the running backend or active
+agents. The app's files and logs are removed at the next Windows sign-in, when
+they are no longer in use.
+
 ## Why a separate executable?
 
 A plugin would share the desktop lifecycle and disappear during the same
@@ -137,8 +155,13 @@ Installation makes these user-level changes:
 - by default, a separate `CodexContinuityTray` startup entry for the optional
   notification-area controller
 - a repair/uninstall entry named **Codex Continuity** in Windows Installed Apps
+- a stable `CodexContinuity` command on the user `PATH`
 - versioned coordinator builds and owned install state under
-  `%LOCALAPPDATA%\OpenAI\CodexContinuity`
+  `%LOCALAPPDATA%\YesterdaysLemon\CodexContinuity`
+
+Upgrading from v0.2.0 migrates ownership from the former OpenAI-adjacent data
+directory without stopping its running backend. That legacy directory is
+removed at the next Windows sign-in.
 
 It never closes or restarts the running desktop app. Upgrades stage a new
 version and redirect only the next safe supervisor start; they do not overwrite
@@ -154,7 +177,7 @@ the executable that currently owns active agents.
 | `install --start-now` | Configure future launches and start the supervisor. |
 | `install --no-tray` | Install headlessly without the notification-area controller. |
 | `repair` | Reapply the persisted custom port and tray choice without stopping work. |
-| `uninstall` | Remove future-launch and startup configuration without killing work. |
+| `uninstall` | Restore owned configuration now and remove installed files at next sign-in, without killing work. |
 | `rollback` | Select the previous known-good build for the next safe supervisor start. |
 | `self-test` | Prove reconnect behavior in an isolated temporary Codex home. |
 
@@ -186,15 +209,16 @@ the running desktop client.
 ## Roll back
 
 ```powershell
-.\CodexContinuity.exe rollback
-.\CodexContinuity.exe uninstall
+CodexContinuity rollback
+CodexContinuity uninstall
 ```
 
 `rollback` changes only the build selected for a future safe start. Uninstall
 restores values captured before installation, and only while their current
 values still match the ones Continuity applied. Neither command stops a running
 backend or restarts the desktop. A later desktop restart after uninstall
-returns to its normal bundled app-server and updater.
+returns to its normal bundled app-server and updater. Continuity's installed
+files and logs are deleted at the next Windows sign-in.
 
 ## What appears in Windows
 
@@ -219,8 +243,8 @@ transport does not provide one to the external backend.
 
 Codex Continuity does not collect telemetry, proxy prompts, store credentials,
 or modify installed Store package files. App-server output stays under
-`%LOCALAPPDATA%\OpenAI\CodexContinuity`; logs rotate at 5 MB with three retained
-history files. Treat those local logs as potentially sensitive diagnostics.
+`%LOCALAPPDATA%\YesterdaysLemon\CodexContinuity`; logs rotate at 5 MB with three
+retained history files. Treat those local logs as potentially sensitive diagnostics.
 
 The continuity proof covers UI disconnect/reconnect and durable thread
 ownership. It does not make incompatible app-server protocol versions

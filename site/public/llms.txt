@@ -24,14 +24,18 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $i -StartNow
 
 Use `-NoTray` for a headless install. The bootstrapper verifies the release SHA-256 before execution and never restarts the Codex desktop app.
 
-## Verify and remove
+## Installed CLI, verification, and removal
+
+Installation adds `CodexContinuity` to the user PATH. Open a new PowerShell window before invoking it by name.
 
 ```powershell
-CodexContinuity.exe status
-CodexContinuity.exe uninstall
+CodexContinuity status
+CodexContinuity probe
+CodexContinuity repair
+CodexContinuity uninstall
 ```
 
-Uninstall changes only future launch configuration and never stops a running backend. See the repository README and SECURITY.md before production use.
+Uninstall restores only configuration still owned by Continuity and never stops a running backend. Installed files and logs are removed at the next Windows sign-in. The supported v0.2.1 release target is Windows 11 x64 only; no macOS or Linux build is available. See the repository README and SECURITY.md before production use.
 
 ## Canonical links
 
