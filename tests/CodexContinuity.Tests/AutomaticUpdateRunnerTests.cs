@@ -92,6 +92,18 @@ public sealed class AutomaticUpdateRunnerTests : IDisposable
         Directory.CreateDirectory(root);
         new InstallStateStore(ContinuityPaths.InstallStateFile(root)).Save(
             InstallState(45999, Path.Combine(root, "missing.exe")));
+        new SupervisorStatusStore(ContinuityPaths.SupervisorStatusFile(root)).Write(
+            new SupervisorStatus(
+                State: "stopped",
+                SupervisorProcessId: int.MaxValue,
+                BackendProcessId: null,
+                Port: 45999,
+                CodexHome: null,
+                ConsecutiveFailures: 0,
+                LastExitCode: null,
+                UpdatedAtUtc: now,
+                NextRetryAtUtc: null,
+                Detail: "test fixture"));
         new ContinuityUpdateStateStore(ContinuityPaths.UpdateStatusFile(root)).Save(
             new ContinuityUpdateState(
                 SchemaVersion: 1,
