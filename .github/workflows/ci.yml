@@ -75,3 +75,4 @@ jobs:
           if ($validationExitCode -ne 0 -and $validationText -notmatch 'Manifest validation succeeded') {
             throw "WinGet manifest validation failed with exit code $validationExitCode."
           }
+          exit 0
