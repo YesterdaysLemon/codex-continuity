@@ -38,6 +38,10 @@ internal sealed record ContinuityUpdateState(
             {
                 return "active";
             }
+            if (!RunningProcessObserved && latest?.AppliedAtUtc is not null)
+            {
+                return "inactive";
+            }
             if (latest?.StagedAtUtc is not null)
             {
                 return string.Equals(
