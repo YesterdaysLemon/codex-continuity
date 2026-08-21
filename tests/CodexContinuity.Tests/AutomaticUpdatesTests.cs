@@ -10,6 +10,12 @@ public sealed class AutomaticUpdatesTests : IDisposable
         $"codex-continuity-update-tests-{Guid.NewGuid():N}");
 
     [Fact]
+    public void MissingSelectedExecutableIsTreatedAsUnselected()
+    {
+        Assert.Null(AutomaticUpdateRunner.ResolveSelectedVersion(Path.Combine(root, "missing.exe")));
+    }
+
+    [Fact]
     public void ReleaseFeedFiltersNonStableReleasesAndRetainsRequiredAssets()
     {
         const string json =
