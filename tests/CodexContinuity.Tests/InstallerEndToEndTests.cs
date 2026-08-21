@@ -156,7 +156,14 @@ public sealed class InstallerEndToEndTests : IDisposable
         int port)
     {
         var script = FindRepositoryFile("install.ps1");
-        var startInfo = new ProcessStartInfo("pwsh.exe")
+        var windowsPowerShell = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "System32",
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
+        var startInfo = new ProcessStartInfo(
+            FindExecutableOnPath("pwsh.exe") ?? windowsPowerShell)
         {
             UseShellExecute = false,
             RedirectStandardOutput = true,
@@ -187,6 +194,12 @@ public sealed class InstallerEndToEndTests : IDisposable
             process.StandardOutput.ReadToEndAsync(),
             process.StandardError.ReadToEndAsync());
     }
+
+    private static string? FindExecutableOnPath(string executableName) =>
+        (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .Select(entry => Path.Combine(entry.Trim().Trim('"'), executableName))
+            .FirstOrDefault(File.Exists);
 
     private byte[] CreateFixtureArchive(string recordPath)
     {
