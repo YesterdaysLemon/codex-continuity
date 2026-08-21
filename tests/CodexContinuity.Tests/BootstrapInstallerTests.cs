@@ -80,4 +80,5 @@ public sealed class BootstrapInstallerTests
             Environment.ProcessPath!,
             "99.99.99"));
     }
+
 }

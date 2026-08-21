@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace CodexContinuity;
@@ -394,9 +395,22 @@ internal sealed class AutomaticUpdateCoordinator(
         value.Length == 64 && value.All(Uri.IsHexDigit);
 }
 
+internal enum AutomaticUpdateCheckKind
+{
+    Completed,
+    Busy,
+    NotInstalled,
+    DeferredUninstall,
+}
+
+internal sealed record AutomaticUpdateCheckResult(
+    AutomaticUpdateCheckKind Kind,
+    ContinuityUpdateState? State);
+
 internal static class AutomaticUpdateRunner
 {
     internal static readonly TimeSpan CheckInterval = TimeSpan.FromHours(4);
+    internal static readonly TimeSpan CheckTimeout = TimeSpan.FromMinutes(10);
 
     internal static Task RunAsync(
         string stateDirectory,
@@ -420,16 +434,24 @@ internal static class AutomaticUpdateRunner
     {
         while (!cancellationToken.IsCancellationRequested)
         {
+            using var checkCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+            checkCancellation.CancelAfter(CheckTimeout);
             try
             {
                 await checkOnce(
                     stateDirectory,
                     runningVersion,
-                    cancellationToken);
+                    checkCancellation.Token);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
             }
             catch (OperationCanceledException)
             {
-                return;
+                Console.Error.WriteLine(
+                    $"Automatic update check exceeded {CheckTimeout.TotalMinutes:0} minutes.");
             }
             catch (Exception exception)
             {
@@ -446,31 +468,32 @@ internal static class AutomaticUpdateRunner
         }
     }
 
-    internal static Task<ContinuityUpdateState?> CheckOnceAsync(
+    internal static Task<AutomaticUpdateCheckResult> CheckOnceAsync(
         string stateDirectory,
         string? runningVersion,
         CancellationToken cancellationToken) => CheckOnceAsync(
             stateDirectory,
             runningVersion,
             GitHubReleaseFeed.ReadAsync,
-            (release, port, trayMode) => BootstrapInstaller.RunReleaseAsync(
-                new BootstrapRelease(
-                    release.Version,
-                    release.ArchiveUrl!,
-                    release.ChecksumUrl!),
-                port,
+            (release, installState, trayMode, token) => StageReleaseAsync(
+                stateDirectory,
+                release,
+                installState,
                 trayMode,
-                startNow: false,
-                skipSelfTest: false,
-                quiet: true),
+                token),
             () => DateTimeOffset.UtcNow,
             cancellationToken);
 
-    internal static async Task<ContinuityUpdateState?> CheckOnceAsync(
+    internal static async Task<AutomaticUpdateCheckResult> CheckOnceAsync(
         string stateDirectory,
         string? runningVersion,
         Func<CancellationToken, Task<IReadOnlyList<PublishedContinuityRelease>>> readReleases,
-        Func<PublishedContinuityRelease, int, TrayInstallMode, Task> stageRelease,
+        Func<
+            PublishedContinuityRelease,
+            InstallState,
+            TrayInstallMode,
+            CancellationToken,
+            Task<StagedContinuityBuild>> stageRelease,
         Func<DateTimeOffset> utcNow,
         CancellationToken cancellationToken)
     {
@@ -478,7 +501,11 @@ internal static class AutomaticUpdateRunner
             ContinuityPaths.InstallStateFile(stateDirectory)).Load();
         if (installState is null)
         {
-            return null;
+            return new(AutomaticUpdateCheckKind.NotInstalled, State: null);
+        }
+        if (installState.Lifecycle == InstallLifecycle.DeferredUninstall)
+        {
+            return new(AutomaticUpdateCheckKind.DeferredUninstall, State: null);
         }
 
         Directory.CreateDirectory(stateDirectory);
@@ -493,8 +520,13 @@ internal static class AutomaticUpdateRunner
         }
         catch (IOException)
         {
-            return new ContinuityUpdateStateStore(
+            var loadResult = new ContinuityUpdateStateStore(
                 ContinuityPaths.UpdateStatusFile(stateDirectory)).Load();
+            return new(
+                AutomaticUpdateCheckKind.Busy,
+                loadResult.Kind == ContinuityUpdateStateLoadKind.Loaded
+                    ? loadResult.State
+                    : null);
         }
 
         await using (updateLock)
@@ -506,21 +538,33 @@ internal static class AutomaticUpdateRunner
                 new ContinuityUpdateStateStore(
                     ContinuityPaths.UpdateStatusFile(stateDirectory)),
                 readReleases,
-                release => stageRelease(release, installState.Port, trayMode),
+                release => stageRelease(
+                    release,
+                    installState,
+                    trayMode,
+                    cancellationToken),
                 utcNow);
-            var resolvedRunning = runningVersion is null
-                ? ResolveRunningVersion(stateDirectory)
-                : new RunningContinuityVersion(runningVersion, ProcessObserved: true);
-            return await coordinator.CheckAndStageAsync(
-                resolvedRunning.Version,
-                ResolveSelectedVersion(installState.InstalledExecutable),
+            var resolvedRunning = ResolveRunningBuild(stateDirectory, runningVersion);
+            var state = await coordinator.CheckAndStageAsync(
+                resolvedRunning.Build,
+                ResolveBuildIdentity(installState.InstalledExecutable),
                 resolvedRunning.ProcessObserved,
                 cancellationToken);
+            return new(AutomaticUpdateCheckKind.Completed, state);
         }
     }
 
-    private static RunningContinuityVersion ResolveRunningVersion(string stateDirectory)
+    private static ResolvedRunningBuild ResolveRunningBuild(
+        string stateDirectory,
+        string? runningVersion)
     {
+        if (runningVersion is not null && Environment.ProcessPath is { } processPath)
+        {
+            return new(
+                new ContinuityBuildIdentity(runningVersion, ComputeSha256(processPath)),
+                ProcessObserved: true);
+        }
+
         var status = new SupervisorStatusStore(
             ContinuityPaths.SupervisorStatusFile(stateDirectory)).Read() ??
             new SupervisorStatusStore(ContinuityPaths.SupervisorStatusFile(
@@ -534,8 +578,10 @@ internal static class AutomaticUpdateRunner
                 if (path is not null)
                 {
                     var version = FileVersionInfo.GetVersionInfo(path);
-                    return new RunningContinuityVersion(
-                        $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}",
+                    return new ResolvedRunningBuild(
+                        new ContinuityBuildIdentity(
+                            $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}",
+                            ComputeSha256(path)),
                         ProcessObserved: true);
                 }
             }
@@ -544,12 +590,19 @@ internal static class AutomaticUpdateRunner
             {
             }
         }
-        var lastRunningVersion = new ContinuityUpdateStateStore(
-            ContinuityPaths.UpdateStatusFile(stateDirectory)).Load()?.RunningVersion;
-        return new RunningContinuityVersion(lastRunningVersion ?? "0.0.0", ProcessObserved: false);
+        var loadResult = new ContinuityUpdateStateStore(
+            ContinuityPaths.UpdateStatusFile(stateDirectory)).Load();
+        var lastState = loadResult.Kind == ContinuityUpdateStateLoadKind.Loaded
+            ? loadResult.State
+            : null;
+        return new ResolvedRunningBuild(
+            new ContinuityBuildIdentity(
+                lastState?.RunningVersion ?? "0.0.0",
+                lastState?.RunningExecutableSha256 ?? new string('0', 64)),
+            ProcessObserved: false);
     }
 
-    internal static string? ResolveSelectedVersion(string executable)
+    internal static ContinuityBuildIdentity? ResolveBuildIdentity(string executable)
     {
         if (!File.Exists(executable))
         {
@@ -560,7 +613,9 @@ internal static class AutomaticUpdateRunner
             var version = FileVersionInfo.GetVersionInfo(executable);
             return version.FileMajorPart == 0 && version.FileMinorPart == 0 && version.FileBuildPart == 0
                 ? null
-                : $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}";
+                : new ContinuityBuildIdentity(
+                    $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}",
+                    ComputeSha256(executable));
         }
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
@@ -569,5 +624,54 @@ internal static class AutomaticUpdateRunner
         }
     }
 
-    private sealed record RunningContinuityVersion(string Version, bool ProcessObserved);
+    private static async Task<StagedContinuityBuild> StageReleaseAsync(
+        string stateDirectory,
+        PublishedContinuityRelease release,
+        InstallState previousState,
+        TrayInstallMode trayMode,
+        CancellationToken cancellationToken)
+    {
+        await BootstrapInstaller.RunReleaseAsync(
+            new BootstrapRelease(
+                release.Version,
+                release.ArchiveUrl!,
+                release.ChecksumUrl!),
+            previousState.Port,
+            trayMode,
+            startNow: false,
+            skipSelfTest: false,
+            quiet: true,
+            cancellationToken: cancellationToken);
+        var stagedState = new InstallStateStore(
+            ContinuityPaths.InstallStateFile(stateDirectory)).Load()
+            ?? throw new InvalidDataException("Automatic update did not persist installed state.");
+        if (stagedState.Lifecycle != InstallLifecycle.Installed ||
+            stagedState.PreviousInstalledExecutable is not { } rollbackExecutable ||
+            !File.Exists(rollbackExecutable))
+        {
+            throw new InvalidDataException(
+                "Automatic update did not retain a rollback executable.");
+        }
+
+        var rollbackSha256 = ComputeSha256(rollbackExecutable);
+        if (!string.Equals(
+                rollbackSha256,
+                previousState.BinarySha256,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "Automatic update rollback executable does not match the previous installed build.");
+        }
+        return new StagedContinuityBuild(stagedState.BinarySha256, rollbackSha256);
+    }
+
+    private static string ComputeSha256(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+    }
+
+    private sealed record ResolvedRunningBuild(
+        ContinuityBuildIdentity Build,
+        bool ProcessObserved);
 }

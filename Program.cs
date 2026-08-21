@@ -345,16 +345,24 @@ internal static class Program
 
     private static async Task<int> UpdateAsync()
     {
-        var state = await AutomaticUpdateRunner.CheckOnceAsync(
+        var result = await AutomaticUpdateRunner.CheckOnceAsync(
             ContinuityPaths.StateDirectory,
             runningVersion: null,
             CancellationToken.None);
-        if (state is null)
+        if (result.Kind == AutomaticUpdateCheckKind.NotInstalled)
         {
             return Fail("No installed Continuity state is available for automatic updates.");
         }
-        Console.WriteLine(JsonSerializer.Serialize(state, JsonOptions));
-        return state.LastError is null ? 0 : 1;
+        if (result.Kind == AutomaticUpdateCheckKind.DeferredUninstall)
+        {
+            return Fail("Continuity is pending deferred uninstall; automatic updates are disabled.");
+        }
+        if (result.Kind == AutomaticUpdateCheckKind.Busy)
+        {
+            return Fail("Another automatic update check is already in progress.");
+        }
+        Console.WriteLine(JsonSerializer.Serialize(result.State, JsonOptions));
+        return result.State?.LastError is null ? 0 : 1;
     }
 
     private static SupervisorStatus NewSupervisorStatus(

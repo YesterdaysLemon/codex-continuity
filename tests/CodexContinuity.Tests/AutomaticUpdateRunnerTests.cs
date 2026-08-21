@@ -12,7 +12,7 @@ public sealed class AutomaticUpdateRunnerTests : IDisposable
     [Fact]
     public void MissingSelectedExecutableIsTreatedAsUnselected()
     {
-        Assert.Null(AutomaticUpdateRunner.ResolveSelectedVersion(Path.Combine(root, "missing.exe")));
+        Assert.Null(AutomaticUpdateRunner.ResolveBuildIdentity(Path.Combine(root, "missing.exe")));
     }
 
     [Fact]
@@ -54,6 +54,72 @@ public sealed class AutomaticUpdateRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task PollingContinuesAfterANonShutdownCancellation()
+    {
+        using var shutdown = new CancellationTokenSource();
+        var checks = 0;
+
+        await AutomaticUpdateRunner.RunAsync(
+            root,
+            "0.2.0",
+            (_, _, _) =>
+            {
+                checks++;
+                if (checks == 1)
+                {
+                    throw new OperationCanceledException("check timeout");
+                }
+                shutdown.Cancel();
+                return Task.CompletedTask;
+            },
+            (_, token) =>
+            {
+                token.ThrowIfCancellationRequested();
+                return Task.CompletedTask;
+            },
+            shutdown.Token);
+
+        Assert.Equal(2, checks);
+    }
+
+    [Fact]
+    public async Task CheckOnceDistinguishesBusyMissingAndDeferredLifecycle()
+    {
+        var missing = await AutomaticUpdateRunner.CheckOnceAsync(
+            root,
+            "0.2.0",
+            CancellationToken.None);
+        Assert.Equal(AutomaticUpdateCheckKind.NotInstalled, missing.Kind);
+
+        Directory.CreateDirectory(root);
+        var stateStore = new InstallStateStore(ContinuityPaths.InstallStateFile(root));
+        stateStore.Save(InstallState(45999, Environment.ProcessPath!) with
+        {
+            Lifecycle = InstallLifecycle.DeferredUninstall,
+        });
+        var deferred = await AutomaticUpdateRunner.CheckOnceAsync(
+            root,
+            "0.2.0",
+            CancellationToken.None);
+        Assert.Equal(AutomaticUpdateCheckKind.DeferredUninstall, deferred.Kind);
+
+        stateStore.Save(InstallState(45999, Environment.ProcessPath!));
+        await using var updateLock = new FileStream(
+            ContinuityPaths.UpdateLockFile(root),
+            FileMode.OpenOrCreate,
+            FileAccess.ReadWrite,
+            FileShare.None);
+        var busy = await AutomaticUpdateRunner.CheckOnceAsync(
+            root,
+            "0.2.0",
+            _ => throw new InvalidOperationException("A busy check must not use the network."),
+            (_, _, _, _) => throw new InvalidOperationException("A busy check must not stage."),
+            () => DateTimeOffset.Parse("2026-08-21T13:00:00Z"),
+            CancellationToken.None);
+        Assert.Equal(AutomaticUpdateCheckKind.Busy, busy.Kind);
+    }
+
+    [Fact]
     public async Task CheckOnceUsesInstalledPortAndRecordsLiveRunningVersion()
     {
         const int installedPort = 45999;
@@ -63,20 +129,22 @@ public sealed class AutomaticUpdateRunnerTests : IDisposable
         int? stagedPort = null;
         TrayInstallMode? stagedTrayMode = null;
 
-        var state = await AutomaticUpdateRunner.CheckOnceAsync(
+        var result = await AutomaticUpdateRunner.CheckOnceAsync(
             root,
             "0.2.0",
             _ => Task.FromResult<IReadOnlyList<PublishedContinuityRelease>>(
                 [Release("0.3.0")]),
-            (_, port, trayMode) =>
+            (_, installState, trayMode, _) =>
             {
-                stagedPort = port;
+                stagedPort = installState.Port;
                 stagedTrayMode = trayMode;
-                return Task.CompletedTask;
+                return Task.FromResult(StagedBuild());
             },
             () => DateTimeOffset.Parse("2026-08-21T13:00:00Z"),
             CancellationToken.None);
 
+        var state = result.State;
+        Assert.Equal(AutomaticUpdateCheckKind.Completed, result.Kind);
         Assert.NotNull(state);
         Assert.Equal(installedPort, stagedPort);
         Assert.Equal(TrayInstallMode.Disabled, stagedTrayMode);
@@ -86,7 +154,7 @@ public sealed class AutomaticUpdateRunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task CheckOnceTreatsPersistedVersionAsInactiveWithoutLiveSupervisor()
+    public async Task CheckOnceRepairsMissingSelectionWithoutClaimingALiveSupervisor()
     {
         var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
         Directory.CreateDirectory(root);
@@ -126,16 +194,24 @@ public sealed class AutomaticUpdateRunnerTests : IDisposable
                     now,
                     LastError: null)]));
 
-        var state = await AutomaticUpdateRunner.CheckOnceAsync(
+        var staged = 0;
+        var result = await AutomaticUpdateRunner.CheckOnceAsync(
             root,
             runningVersion: null,
             _ => Task.FromResult<IReadOnlyList<PublishedContinuityRelease>>(
                 [Release("0.3.0")]),
-            (_, _, _) => throw new InvalidOperationException("The current release must not stage."),
+            (_, _, _, _) =>
+            {
+                staged++;
+                return Task.FromResult(StagedBuild());
+            },
             () => now.AddMinutes(1),
             CancellationToken.None);
 
+        var state = result.State;
+        Assert.Equal(AutomaticUpdateCheckKind.Completed, result.Kind);
         Assert.NotNull(state);
+        Assert.Equal(1, staged);
         Assert.False(state.RunningProcessObserved);
         Assert.Equal(1, state.AppliedCount);
         Assert.Equal("inactive", state.LatestState);
@@ -171,4 +247,7 @@ public sealed class AutomaticUpdateRunnerTests : IDisposable
         DateTimeOffset.Parse("2026-08-21T12:00:00Z"),
         $"https://example.test/v{version}/archive",
         $"https://example.test/v{version}/checksum");
+
+    private static StagedContinuityBuild StagedBuild() =>
+        new(new string('b', 64), new string('a', 64));
 }
