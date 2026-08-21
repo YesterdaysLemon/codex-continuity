@@ -31,8 +31,8 @@ internal sealed record ContinuityUpdateState(
         {
             var latest = Releases.FirstOrDefault(release =>
                 string.Equals(release.Version, LatestVersion, StringComparison.OrdinalIgnoreCase));
-            if (latest is not null && string.Equals(
-                    latest.Version,
+            if (LatestVersion is not null && string.Equals(
+                    LatestVersion,
                     RunningVersion,
                     StringComparison.OrdinalIgnoreCase))
             {

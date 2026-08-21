@@ -43,6 +43,24 @@ public sealed class UpdateStateTests : IDisposable
     }
 
     [Fact]
+    public void LatestStateIsActiveWhenBaselineAlreadyMatchesLatestRelease()
+    {
+        var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
+        var state = new ContinuityUpdateState(
+            1,
+            now,
+            now,
+            "0.3.0",
+            "0.3.0",
+            "0.3.0",
+            "0.3.0",
+            null,
+            Releases: []);
+
+        Assert.Equal("active", state.LatestState);
+    }
+
+    [Fact]
     public void StoreBoundsHistoryAndToleratesMalformedState()
     {
         var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
