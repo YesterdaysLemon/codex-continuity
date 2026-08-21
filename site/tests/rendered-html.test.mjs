@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const publicDirectory = new URL("../public/", import.meta.url);
+const sourceDirectory = new URL("../app/", import.meta.url);
 
 async function render(path = "/", accept = "text/html") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -56,10 +57,24 @@ test("server-renders the Codex Continuity launch page", async () => {
   assert.match(html, /\/llms\.txt/);
   assert.match(html, /SoftwareApplication/);
   assert.match(html, /Unofficial · Windows · Experimental/);
+  assert.match(html, /Skip to content/);
+  assert.match(html, /WIN11 VERIFIED/);
+  assert.match(html, /One command\./);
+  assert.match(html, /No forced restart\./);
+  assert.doesNotMatch(html, /Zero interrupted agents|>PROVEN</i);
   assert.match(html, /github\.com\/YesterdaysLemon\/codex-continuity/);
   assert.match(html, /github\.com\/sponsors\/YesterdaysLemon/);
   assert.match(html, /alirezaafshan\.com\/projects/);
   assert.doesNotMatch(html, /site-creator|starter loading skeleton/i);
+});
+
+test("retains responsive and keyboard-accessible site polish", async () => {
+  const css = await readFile(new URL("globals.css", sourceDirectory), "utf8");
+
+  assert.match(css, /\.agent-copy\s*\{\s*min-width:\s*0;/);
+  assert.match(css, /button:focus-visible/);
+  assert.match(css, /\.install-command button\s*\{[^}]*position:\s*static;/s);
+  assert.doesNotMatch(css, /var\(--text\)/);
 });
 
 test("serves agent and crawler discovery assets", async () => {
