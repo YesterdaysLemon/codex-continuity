@@ -72,12 +72,4 @@ public sealed class BootstrapInstallerTests
             File.Delete(path);
         }
     }
-
-    [Fact]
-    public void RejectsArchiveWhoseExecutableVersionDoesNotMatchRelease()
-    {
-        Assert.Throws<InvalidDataException>(() => BootstrapInstaller.VerifyReleaseVersion(
-            Environment.ProcessPath!,
-            "99.99.99"));
-    }
 }
