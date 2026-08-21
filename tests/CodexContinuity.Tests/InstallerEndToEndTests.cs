@@ -138,9 +138,16 @@ public sealed class InstallerEndToEndTests : IDisposable
 
     public void Dispose()
     {
-        if (Directory.Exists(root))
+        for (var attempt = 1; Directory.Exists(root); attempt++)
         {
-            Directory.Delete(root, recursive: true);
+            try
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            catch (IOException) when (attempt < 6)
+            {
+                Thread.Sleep(TimeSpan.FromMilliseconds(100 * attempt));
+            }
         }
     }
 

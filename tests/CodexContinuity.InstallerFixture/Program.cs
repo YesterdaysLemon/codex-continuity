@@ -15,8 +15,8 @@ internal static class Program
         File.AppendAllLines(recordPath, [string.Join(' ', args)]);
         if (args[0] == "install" && args.Contains("--start-now"))
         {
-            var persistentWorkingDirectory = Path.GetDirectoryName(recordPath)
-                ?? throw new InvalidOperationException("Record path has no parent directory.");
+            var persistentWorkingDirectory = Environment.GetFolderPath(
+                Environment.SpecialFolder.Windows);
             var powershell = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.Windows),
                 "System32",
