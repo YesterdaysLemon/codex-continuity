@@ -13,7 +13,7 @@ Store replaces or restarts the UI during an update, working threads remain
 owned by the supervised backend and the new UI reconnects.
 
 [Download the latest release](https://github.com/YesterdaysLemon/codex-continuity/releases/latest)
-· [Visit the product site](https://codex-continuity.alirezaafshan4.chatgpt.site)
+· [Visit the product site](https://continuity.alirezaafshan.com)
 · [Read the technical evidence](REVERSE_ENGINEERING.md)
 
 ## Install in one command
@@ -38,7 +38,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $i -Plan -Json
 Agents should download `install.ps1`, run `-Plan -Json`, present the resolved
 asset/checksum URLs and `restartsCodex: false`, then run with `-StartNow` only
 after that plan is accepted. Add `-NoTray` for headless automation. The same
-contract is published at the site's [`/llms.txt`](https://codex-continuity.alirezaafshan4.chatgpt.site/llms.txt).
+contract is published at the site's [`/llms.txt`](https://continuity.alirezaafshan.com/llms.txt).
 
 The prepared WinGet identity is `YesterdaysLemon.CodexContinuity`. After the
 external community-manifest review completes, the standard command will be:

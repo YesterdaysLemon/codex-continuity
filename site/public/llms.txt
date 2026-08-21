@@ -35,7 +35,7 @@ Uninstall changes only future launch configuration and never stops a running bac
 
 ## Canonical links
 
-- Site: https://codex-continuity.alirezaafshan4.chatgpt.site
+- Site: https://continuity.alirezaafshan.com
 - Repository: https://github.com/YesterdaysLemon/codex-continuity
 - Releases: https://github.com/YesterdaysLemon/codex-continuity/releases/latest
 - Security boundary: https://github.com/YesterdaysLemon/codex-continuity/blob/main/SECURITY.md
