@@ -28,6 +28,7 @@ internal static class Program
                 "help" or "--help" or "-h" => PrintHelp(),
                 "probe" => await ProbeAsync(port),
                 "status" => await PrintStatusAsync(port),
+                "update" => await UpdateAsync(),
                 "serve" => await ServeAsync(port),
                 "install" => await InstallAsync(
                     port,
@@ -86,6 +87,7 @@ internal static class Program
             Commands:
               probe       Inspect the installed desktop, update manifest, and backend configuration.
               status      Check backend health and count active threads.
+              update      Check for and safely stage a verified Continuity release.
               serve       Supervise a loopback WebSocket app-server.
               install     Configure future desktop launches and start at user logon.
               repair      Reapply the persisted port and tray choices without restarting agents.
@@ -238,6 +240,10 @@ internal static class Program
         var backoff = new RestartBackoffPolicy();
         var codexHome = FutureProcessEnvironment.ResolveCodexHome();
         var consecutiveFailures = 0;
+        var updateTask = AutomaticUpdateRunner.RunAsync(
+            stateDirectory,
+            ProductVersion(),
+            shutdown.Token);
         Console.WriteLine(
             $"Supervising {LoopbackEndpoint.WebSocketUrl(port)} with logs at {logPath}");
 
@@ -333,7 +339,30 @@ internal static class Program
             lastExitCode: null,
             nextRetryAtUtc: null,
             "Supervisor stopped without changing future-launch configuration."));
+        await updateTask;
         return 0;
+    }
+
+    private static async Task<int> UpdateAsync()
+    {
+        var result = await AutomaticUpdateRunner.CheckOnceAsync(
+            ContinuityPaths.StateDirectory,
+            runningVersion: null,
+            CancellationToken.None);
+        if (result.Kind == AutomaticUpdateCheckKind.NotInstalled)
+        {
+            return Fail("No installed Continuity state is available for automatic updates.");
+        }
+        if (result.Kind == AutomaticUpdateCheckKind.DeferredUninstall)
+        {
+            return Fail("Continuity is pending deferred uninstall; automatic updates are disabled.");
+        }
+        if (result.Kind == AutomaticUpdateCheckKind.Busy)
+        {
+            return Fail("Another automatic update check is already in progress.");
+        }
+        Console.WriteLine(JsonSerializer.Serialize(result.State, JsonOptions));
+        return result.State?.LastError is null ? 0 : 1;
     }
 
     private static SupervisorStatus NewSupervisorStatus(

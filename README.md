@@ -84,6 +84,9 @@ Codex desktop UI  ── reconnectable WebSocket ──  supervised app-server
 - Keeps the app-server in a user-level background supervisor.
 - Shows optional health, active-agent count, and update status in the Windows
   notification area; the tray is a separate process and can safely exit.
+- Checks for stable Continuity releases at supervisor start and every four
+  hours, verifies the published SHA-256 digest, reruns the isolated self-test,
+  and stages a newer build without restarting active agents.
 - Binds only to `127.0.0.1`; it does not expose Codex over the network.
 - Removes the desktop's blue in-app update prompt on future launches.
 - Leaves signed package delivery to Microsoft Store, Intune, or another
@@ -94,6 +97,18 @@ Codex desktop UI  ── reconnectable WebSocket ──  supervised app-server
 Microsoft Store's **Settings > App updates** option must remain on for the fully
 automatic path. Store-delivered MSIX packages are updated by Windows in the
 background rather than by this tool.
+
+Continuity's own updater is separate from those Codex desktop updates. It keeps
+a bounded ledger in `update-status.json` under the owned state directory. A
+release can be **observed**, **staged**, or **active**:
+
+- **Observed** means the stable GitHub release was discovered.
+- **Staged** means its archive checksum and isolated self-test passed and the
+  installed startup target now selects that version for the next safe start.
+- **Active** means a supervisor process with that version is actually running.
+
+The updater never turns "downloaded" into "active" and never restarts the live
+backend or desktop to apply a release.
 
 ## Requirements
 
@@ -174,6 +189,7 @@ the executable that currently owns active agents.
 | --- | --- |
 | `status` | Check backend health and list active thread count. |
 | `probe` | Inspect desktop version, update manifest, and configuration. |
+| `update` | Check stable releases now and safely stage a verified newer build. |
 | `serve` | Run the background supervisor. |
 | `install --start-now` | Configure future launches and start the supervisor. |
 | `install --no-tray` | Install headlessly without the notification-area controller. |
@@ -222,6 +238,10 @@ restarts in the current Windows session continue reconnecting to it so a second
 app-server cannot contend for the same threads. The next sign-in returns Codex
 to its normal bundled app-server and updater, then deletes Continuity's installed
 files and logs.
+
+If an automatic update was staged but should not become active, run `rollback`
+before the next supervisor start. The tray will continue to report the running
+version separately from the staged startup target.
 
 ## What appears in Windows
 

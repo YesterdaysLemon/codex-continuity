@@ -49,8 +49,39 @@ internal static partial class BootstrapInstaller
         bool skipSelfTest,
         bool quiet,
         string? downloadBaseUrl)
+        => await RunReleaseAsync(
+            ResolveRelease(downloadBaseUrl),
+            port,
+            trayInstallMode,
+            startNow,
+            skipSelfTest,
+            quiet);
+
+    internal static async Task<int> RunReleaseAsync(
+        BootstrapRelease release,
+        int port,
+        TrayInstallMode trayInstallMode,
+        bool startNow,
+        bool skipSelfTest,
+        bool quiet)
+        => await RunReleaseAsync(
+            release,
+            port,
+            trayInstallMode,
+            startNow,
+            skipSelfTest,
+            quiet,
+            CancellationToken.None);
+
+    internal static async Task<int> RunReleaseAsync(
+        BootstrapRelease release,
+        int port,
+        TrayInstallMode trayInstallMode,
+        bool startNow,
+        bool skipSelfTest,
+        bool quiet,
+        CancellationToken cancellationToken)
     {
-        var release = ResolveRelease(downloadBaseUrl);
         var workRoot = Path.Combine(
             Path.GetTempPath(),
             $"codex-continuity-setup-{Guid.NewGuid():N}");
@@ -61,8 +92,8 @@ internal static partial class BootstrapInstaller
         {
             Directory.CreateDirectory(workRoot);
             Report(quiet, $"Downloading Codex Continuity {release.Version}…");
-            await DownloadAsync(release.ArchiveUrl, archivePath);
-            await DownloadAsync(release.ChecksumUrl, checksumPath);
+            await DownloadAsync(release.ArchiveUrl, archivePath, cancellationToken);
+            await DownloadAsync(release.ChecksumUrl, checksumPath, cancellationToken);
 
             var expectedHash = ParseSha256(await File.ReadAllTextAsync(checksumPath));
             await VerifySha256Async(archivePath, expectedHash);
@@ -79,6 +110,7 @@ internal static partial class BootstrapInstaller
                     $"Expected exactly one CodexContinuity.exe; found {supervisors.Length}.");
             }
             var supervisor = supervisors[0];
+            VerifyReleaseVersion(supervisor, release.Version);
             var tray = Path.Combine(
                 Path.GetDirectoryName(supervisor)
                     ?? throw new InvalidDataException("Release executable has no directory."),
@@ -91,7 +123,11 @@ internal static partial class BootstrapInstaller
             if (!skipSelfTest)
             {
                 Report(quiet, "Running isolated reconnect proof…");
-                var selfTestExitCode = await RunChildAsync(supervisor, ["self-test"], quiet);
+                var selfTestExitCode = await RunChildAsync(
+                    supervisor,
+                    ["self-test"],
+                    quiet,
+                    cancellationToken);
                 if (selfTestExitCode != 0)
                 {
                     throw new InvalidOperationException(
@@ -99,8 +135,15 @@ internal static partial class BootstrapInstaller
                 }
             }
 
-            var installArguments = BuildInstallArguments(port, trayInstallMode, startNow);
-            var installExitCode = await RunChildAsync(supervisor, installArguments, quiet);
+            var installArguments = BuildInstallArguments(
+                port,
+                trayInstallMode,
+                startNow);
+            var installExitCode = await RunChildAsync(
+                supervisor,
+                installArguments,
+                quiet,
+                cancellationToken);
             if (installExitCode != 0)
             {
                 throw new InvalidOperationException(
@@ -133,13 +176,19 @@ internal static partial class BootstrapInstaller
         return arguments;
     }
 
-    private static async Task DownloadAsync(string url, string destination)
+    private static async Task DownloadAsync(
+        string url,
+        string destination,
+        CancellationToken cancellationToken)
     {
-        using var response = await HttpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+        using var response = await HttpClient.GetAsync(
+            url,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
         response.EnsureSuccessStatusCode();
-        await using var source = await response.Content.ReadAsStreamAsync();
+        await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
         await using var output = File.Create(destination);
-        await source.CopyToAsync(output);
+        await source.CopyToAsync(output, cancellationToken);
     }
 
     private static async Task<string> ComputeSha256Async(string path)
@@ -158,10 +207,22 @@ internal static partial class BootstrapInstaller
         }
     }
 
+    internal static void VerifyReleaseVersion(string executable, string expectedVersion)
+    {
+        var version = FileVersionInfo.GetVersionInfo(executable);
+        var actualVersion = $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}";
+        if (!string.Equals(expectedVersion, actualVersion, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Release version mismatch. Expected {expectedVersion} but archive contains {actualVersion}.");
+        }
+    }
+
     private static async Task<int> RunChildAsync(
         string executable,
         IEnumerable<string> arguments,
-        bool quiet)
+        bool quiet,
+        CancellationToken cancellationToken)
     {
         var startInfo = new ProcessStartInfo(executable)
         {
@@ -183,9 +244,21 @@ internal static partial class BootstrapInstaller
         var errorTask = quiet
             ? process.StandardError.ReadToEndAsync()
             : Task.FromResult(string.Empty);
-        await process.WaitForExitAsync();
-        await Task.WhenAll(outputTask, errorTask);
-        return process.ExitCode;
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken);
+            await Task.WhenAll(outputTask, errorTask);
+            return process.ExitCode;
+        }
+        catch (OperationCanceledException)
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+            throw;
+        }
     }
 
     private static void DeleteVerifiedTemporaryDirectory(string path)

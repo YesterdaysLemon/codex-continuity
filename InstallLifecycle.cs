@@ -102,6 +102,9 @@ internal static class ContinuityPaths
     internal static string UpdateStatusFile(string stateDirectory) =>
         Path.Combine(stateDirectory, "update-status.json");
 
+    internal static string UpdateLockFile(string stateDirectory) =>
+        Path.Combine(stateDirectory, "update.lock");
+
     internal static string AppServerLogFile(string stateDirectory) =>
         Path.Combine(stateDirectory, "app-server.log");
 }

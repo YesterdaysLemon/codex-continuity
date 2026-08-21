@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace CodexContinuity;
@@ -391,4 +393,285 @@ internal sealed class AutomaticUpdateCoordinator(
 
     private static bool IsSha256(string value) =>
         value.Length == 64 && value.All(Uri.IsHexDigit);
+}
+
+internal enum AutomaticUpdateCheckKind
+{
+    Completed,
+    Busy,
+    NotInstalled,
+    DeferredUninstall,
+}
+
+internal sealed record AutomaticUpdateCheckResult(
+    AutomaticUpdateCheckKind Kind,
+    ContinuityUpdateState? State);
+
+internal static class AutomaticUpdateRunner
+{
+    internal static readonly TimeSpan CheckInterval = TimeSpan.FromHours(4);
+    internal static readonly TimeSpan CheckTimeout = TimeSpan.FromMinutes(10);
+
+    internal static Task RunAsync(
+        string stateDirectory,
+        string runningVersion,
+        CancellationToken cancellationToken) => RunAsync(
+            stateDirectory,
+            runningVersion,
+            async (directory, version, token) =>
+            {
+                await CheckOnceAsync(directory, version, token);
+            },
+            Task.Delay,
+            cancellationToken);
+
+    internal static async Task RunAsync(
+        string stateDirectory,
+        string runningVersion,
+        Func<string, string, CancellationToken, Task> checkOnce,
+        Func<TimeSpan, CancellationToken, Task> delay,
+        CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            using var checkCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+            checkCancellation.CancelAfter(CheckTimeout);
+            try
+            {
+                await checkOnce(
+                    stateDirectory,
+                    runningVersion,
+                    checkCancellation.Token);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (OperationCanceledException)
+            {
+                Console.Error.WriteLine(
+                    $"Automatic update check exceeded {CheckTimeout.TotalMinutes:0} minutes.");
+            }
+            catch (Exception exception)
+            {
+                Console.Error.WriteLine($"Automatic update check failed: {exception.Message}");
+            }
+            try
+            {
+                await delay(CheckInterval, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
+    }
+
+    internal static Task<AutomaticUpdateCheckResult> CheckOnceAsync(
+        string stateDirectory,
+        string? runningVersion,
+        CancellationToken cancellationToken) => CheckOnceAsync(
+            stateDirectory,
+            runningVersion,
+            GitHubReleaseFeed.ReadAsync,
+            (release, installState, trayMode, token) => StageReleaseAsync(
+                stateDirectory,
+                release,
+                installState,
+                trayMode,
+                token),
+            () => DateTimeOffset.UtcNow,
+            cancellationToken);
+
+    internal static async Task<AutomaticUpdateCheckResult> CheckOnceAsync(
+        string stateDirectory,
+        string? runningVersion,
+        Func<CancellationToken, Task<IReadOnlyList<PublishedContinuityRelease>>> readReleases,
+        Func<
+            PublishedContinuityRelease,
+            InstallState,
+            TrayInstallMode,
+            CancellationToken,
+            Task<StagedContinuityBuild>> stageRelease,
+        Func<DateTimeOffset> utcNow,
+        CancellationToken cancellationToken)
+    {
+        var installState = new InstallStateStore(
+            ContinuityPaths.InstallStateFile(stateDirectory)).Load();
+        if (installState is null)
+        {
+            return new(AutomaticUpdateCheckKind.NotInstalled, State: null);
+        }
+        if (installState.Lifecycle == InstallLifecycle.DeferredUninstall)
+        {
+            return new(AutomaticUpdateCheckKind.DeferredUninstall, State: null);
+        }
+
+        Directory.CreateDirectory(stateDirectory);
+        FileStream? updateLock = null;
+        try
+        {
+            updateLock = new FileStream(
+                ContinuityPaths.UpdateLockFile(stateDirectory),
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None);
+        }
+        catch (IOException)
+        {
+            var loadResult = new ContinuityUpdateStateStore(
+                ContinuityPaths.UpdateStatusFile(stateDirectory)).Load();
+            return new(
+                AutomaticUpdateCheckKind.Busy,
+                loadResult.Kind == ContinuityUpdateStateLoadKind.Loaded
+                    ? loadResult.State
+                    : null);
+        }
+
+        await using (updateLock)
+        {
+            var trayMode = installState.InstalledTrayExecutable is null
+                ? TrayInstallMode.Disabled
+                : TrayInstallMode.Enabled;
+            var coordinator = new AutomaticUpdateCoordinator(
+                new ContinuityUpdateStateStore(
+                    ContinuityPaths.UpdateStatusFile(stateDirectory)),
+                readReleases,
+                release => stageRelease(
+                    release,
+                    installState,
+                    trayMode,
+                    cancellationToken),
+                utcNow);
+            var resolvedRunning = ResolveRunningBuild(stateDirectory, runningVersion);
+            var state = await coordinator.CheckAndStageAsync(
+                resolvedRunning.Build,
+                ResolveBuildIdentity(installState.InstalledExecutable),
+                resolvedRunning.ProcessObserved,
+                cancellationToken);
+            return new(AutomaticUpdateCheckKind.Completed, state);
+        }
+    }
+
+    private static ResolvedRunningBuild ResolveRunningBuild(
+        string stateDirectory,
+        string? runningVersion)
+    {
+        if (runningVersion is not null && Environment.ProcessPath is { } processPath)
+        {
+            return new(
+                new ContinuityBuildIdentity(runningVersion, ComputeSha256(processPath)),
+                ProcessObserved: true);
+        }
+
+        var status = new SupervisorStatusStore(
+            ContinuityPaths.SupervisorStatusFile(stateDirectory)).Read() ??
+            new SupervisorStatusStore(ContinuityPaths.SupervisorStatusFile(
+                ContinuityPaths.LegacyOpenAiStateDirectory)).Read();
+        if (status is not null)
+        {
+            try
+            {
+                using var process = Process.GetProcessById(status.SupervisorProcessId);
+                var path = process.MainModule?.FileName;
+                if (path is not null)
+                {
+                    var version = FileVersionInfo.GetVersionInfo(path);
+                    return new ResolvedRunningBuild(
+                        new ContinuityBuildIdentity(
+                            $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}",
+                            ComputeSha256(path)),
+                        ProcessObserved: true);
+                }
+            }
+            catch (Exception exception) when (
+                exception is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+            }
+        }
+        var loadResult = new ContinuityUpdateStateStore(
+            ContinuityPaths.UpdateStatusFile(stateDirectory)).Load();
+        var lastState = loadResult.Kind == ContinuityUpdateStateLoadKind.Loaded
+            ? loadResult.State
+            : null;
+        return new ResolvedRunningBuild(
+            new ContinuityBuildIdentity(
+                lastState?.RunningVersion ?? "0.0.0",
+                lastState?.RunningExecutableSha256 ?? new string('0', 64)),
+            ProcessObserved: false);
+    }
+
+    internal static ContinuityBuildIdentity? ResolveBuildIdentity(string executable)
+    {
+        if (!File.Exists(executable))
+        {
+            return null;
+        }
+        try
+        {
+            var version = FileVersionInfo.GetVersionInfo(executable);
+            return version.FileMajorPart == 0 && version.FileMinorPart == 0 && version.FileBuildPart == 0
+                ? null
+                : new ContinuityBuildIdentity(
+                    $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}",
+                    ComputeSha256(executable));
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            return null;
+        }
+    }
+
+    private static async Task<StagedContinuityBuild> StageReleaseAsync(
+        string stateDirectory,
+        PublishedContinuityRelease release,
+        InstallState previousState,
+        TrayInstallMode trayMode,
+        CancellationToken cancellationToken)
+    {
+        await BootstrapInstaller.RunReleaseAsync(
+            new BootstrapRelease(
+                release.Version,
+                release.ArchiveUrl!,
+                release.ChecksumUrl!),
+            previousState.Port,
+            trayMode,
+            startNow: false,
+            skipSelfTest: false,
+            quiet: true,
+            cancellationToken: cancellationToken);
+        var stagedState = new InstallStateStore(
+            ContinuityPaths.InstallStateFile(stateDirectory)).Load()
+            ?? throw new InvalidDataException("Automatic update did not persist installed state.");
+        if (stagedState.Lifecycle != InstallLifecycle.Installed ||
+            stagedState.PreviousInstalledExecutable is not { } rollbackExecutable ||
+            !File.Exists(rollbackExecutable))
+        {
+            throw new InvalidDataException(
+                "Automatic update did not retain a rollback executable.");
+        }
+
+        var rollbackSha256 = ComputeSha256(rollbackExecutable);
+        if (!string.Equals(
+                rollbackSha256,
+                previousState.BinarySha256,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "Automatic update rollback executable does not match the previous installed build.");
+        }
+        return new StagedContinuityBuild(stagedState.BinarySha256, rollbackSha256);
+    }
+
+    private static string ComputeSha256(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+    }
+
+    private sealed record ResolvedRunningBuild(
+        ContinuityBuildIdentity Build,
+        bool ProcessObserved);
 }
