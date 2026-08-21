@@ -69,10 +69,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
             () => now);
 
         var first = await coordinator.CheckAndStageAsync(
-            "0.1.0",
-            "0.1.0",
-            runningProcessObserved: true,
-            CancellationToken.None);
+            "0.1.0", "0.1.0", runningProcessObserved: true, CancellationToken.None);
 
         Assert.Equal(["0.3.0"], staged);
         Assert.Equal(2, first.ObservedCount);
@@ -92,10 +89,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
             () => now);
 
         var restaged = await repaired.CheckAndStageAsync(
-            "0.1.0",
-            selectedVersion: null,
-            runningProcessObserved: true,
-            CancellationToken.None);
+            "0.1.0", selectedVersion: null, runningProcessObserved: true, CancellationToken.None);
 
         Assert.Equal(["0.3.0", "0.3.0"], staged);
         Assert.Equal("staged", restaged.LatestState);
@@ -108,10 +102,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
             () => now);
 
         var deferred = await rolledBack.CheckAndStageAsync(
-            "0.1.0",
-            "0.1.0",
-            runningProcessObserved: true,
-            CancellationToken.None);
+            "0.1.0", "0.1.0", runningProcessObserved: true, CancellationToken.None);
 
         Assert.Equal("0.1.0", deferred.SelectedVersion);
         Assert.Equal("deferred", deferred.LatestState);
@@ -124,10 +115,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
             () => now);
 
         var second = await restarted.CheckAndStageAsync(
-            "0.3.0",
-            "0.3.0",
-            runningProcessObserved: true,
-            CancellationToken.None);
+            "0.3.0", "0.3.0", runningProcessObserved: true, CancellationToken.None);
 
         Assert.Equal(1, second.StagedCount);
         Assert.Equal(1, second.AppliedCount);
@@ -142,10 +130,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
             () => now);
 
         var stopped = await unavailable.CheckAndStageAsync(
-            "0.3.0",
-            "0.3.0",
-            runningProcessObserved: false,
-            CancellationToken.None);
+            "0.3.0", "0.3.0", runningProcessObserved: false, CancellationToken.None);
 
         Assert.False(stopped.RunningProcessObserved);
         Assert.Equal(1, stopped.AppliedCount);
@@ -163,10 +148,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
             () => DateTimeOffset.Parse("2026-08-21T13:00:00Z"));
 
         var state = await coordinator.CheckAndStageAsync(
-            "0.2.0",
-            "0.3.0",
-            runningProcessObserved: true,
-            CancellationToken.None);
+            "0.2.0", "0.3.0", runningProcessObserved: true, CancellationToken.None);
 
         Assert.Equal(1, state.StagedCount);
         Assert.Equal("0.3.0", state.SelectedVersion);
@@ -189,10 +171,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
             () => DateTimeOffset.Parse("2026-08-21T13:00:00Z"));
 
         var state = await coordinator.CheckAndStageAsync(
-            "0.1.0",
-            "0.1.0",
-            runningProcessObserved: true,
-            CancellationToken.None);
+            "0.1.0", "0.1.0", runningProcessObserved: true, CancellationToken.None);
 
         Assert.Equal(1, state.ObservedCount);
         Assert.Equal(0, state.StagedCount);
@@ -211,10 +190,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
             () => DateTimeOffset.Parse("2026-08-21T13:00:00Z"));
 
         var state = await coordinator.CheckAndStageAsync(
-            "0.1.0",
-            "0.1.0",
-            runningProcessObserved: true,
-            CancellationToken.None);
+            "0.1.0", "0.1.0", runningProcessObserved: true, CancellationToken.None);
 
         Assert.NotNull(state.LastError);
         Assert.Equal(1_001, state.LastError.Length);
