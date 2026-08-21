@@ -82,8 +82,8 @@ Installers:
     InstallerUrl: $InstallerUrl
     InstallerSha256: $sha256
     InstallerSwitches:
-      Silent: --silent
-      SilentWithProgress: --silent
+      Silent: --silent --skip-self-test --no-start
+      SilentWithProgress: --silent --skip-self-test --no-start
     ProductCode: CodexContinuity
     AppsAndFeaturesEntries:
       - DisplayName: Codex Continuity
