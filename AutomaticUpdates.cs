@@ -277,16 +277,31 @@ internal static class AutomaticUpdateRunner
 {
     internal static readonly TimeSpan CheckInterval = TimeSpan.FromHours(4);
 
+    internal static Task RunAsync(
+        string stateDirectory,
+        string runningVersion,
+        CancellationToken cancellationToken) => RunAsync(
+            stateDirectory,
+            runningVersion,
+            async (directory, version, token) =>
+            {
+                await CheckOnceAsync(directory, version, token);
+            },
+            Task.Delay,
+            cancellationToken);
+
     internal static async Task RunAsync(
         string stateDirectory,
         string runningVersion,
+        Func<string, string, CancellationToken, Task> checkOnce,
+        Func<TimeSpan, CancellationToken, Task> delay,
         CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
-                await CheckOnceAsync(
+                await checkOnce(
                     stateDirectory,
                     runningVersion,
                     cancellationToken);
@@ -301,7 +316,7 @@ internal static class AutomaticUpdateRunner
             }
             try
             {
-                await Task.Delay(CheckInterval, cancellationToken);
+                await delay(CheckInterval, cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -310,9 +325,32 @@ internal static class AutomaticUpdateRunner
         }
     }
 
+    internal static Task<ContinuityUpdateState?> CheckOnceAsync(
+        string stateDirectory,
+        string? runningVersion,
+        CancellationToken cancellationToken) => CheckOnceAsync(
+            stateDirectory,
+            runningVersion,
+            GitHubReleaseFeed.ReadAsync,
+            (release, port, trayMode) => BootstrapInstaller.RunReleaseAsync(
+                new BootstrapRelease(
+                    release.Version,
+                    release.ArchiveUrl!,
+                    release.ChecksumUrl!),
+                port,
+                trayMode,
+                startNow: false,
+                skipSelfTest: false,
+                quiet: true),
+            () => DateTimeOffset.UtcNow,
+            cancellationToken);
+
     internal static async Task<ContinuityUpdateState?> CheckOnceAsync(
         string stateDirectory,
         string? runningVersion,
+        Func<CancellationToken, Task<IReadOnlyList<PublishedContinuityRelease>>> readReleases,
+        Func<PublishedContinuityRelease, int, TrayInstallMode, Task> stageRelease,
+        Func<DateTimeOffset> utcNow,
         CancellationToken cancellationToken)
     {
         var installState = new InstallStateStore(
@@ -346,26 +384,21 @@ internal static class AutomaticUpdateRunner
             var coordinator = new AutomaticUpdateCoordinator(
                 new ContinuityUpdateStateStore(
                     ContinuityPaths.UpdateStatusFile(stateDirectory)),
-                GitHubReleaseFeed.ReadAsync,
-                release => BootstrapInstaller.RunReleaseAsync(
-                    new BootstrapRelease(
-                        release.Version,
-                        release.ArchiveUrl!,
-                        release.ChecksumUrl!),
-                    installState.Port,
-                    trayMode,
-                    startNow: false,
-                    skipSelfTest: false,
-                    quiet: true),
-                () => DateTimeOffset.UtcNow);
+                readReleases,
+                release => stageRelease(release, installState.Port, trayMode),
+                utcNow);
+            var resolvedRunning = runningVersion is null
+                ? ResolveRunningVersion(stateDirectory)
+                : new RunningContinuityVersion(runningVersion, ProcessObserved: true);
             return await coordinator.CheckAndStageAsync(
-                runningVersion ?? ResolveRunningVersion(stateDirectory),
+                resolvedRunning.Version,
                 ResolveSelectedVersion(installState.InstalledExecutable),
+                resolvedRunning.ProcessObserved,
                 cancellationToken);
         }
     }
 
-    private static string ResolveRunningVersion(string stateDirectory)
+    private static RunningContinuityVersion ResolveRunningVersion(string stateDirectory)
     {
         var status = new SupervisorStatusStore(
             ContinuityPaths.SupervisorStatusFile(stateDirectory)).Read() ??
@@ -380,7 +413,9 @@ internal static class AutomaticUpdateRunner
                 if (path is not null)
                 {
                     var version = FileVersionInfo.GetVersionInfo(path);
-                    return $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}";
+                    return new RunningContinuityVersion(
+                        $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}",
+                        ProcessObserved: true);
                 }
             }
             catch (Exception exception) when (
@@ -388,9 +423,9 @@ internal static class AutomaticUpdateRunner
             {
             }
         }
-        return new ContinuityUpdateStateStore(
-            ContinuityPaths.UpdateStatusFile(stateDirectory)).Load()?.RunningVersion ??
-            "0.0.0";
+        var lastRunningVersion = new ContinuityUpdateStateStore(
+            ContinuityPaths.UpdateStatusFile(stateDirectory)).Load()?.RunningVersion;
+        return new RunningContinuityVersion(lastRunningVersion ?? "0.0.0", ProcessObserved: false);
     }
 
     internal static string? ResolveSelectedVersion(string executable)
@@ -412,4 +447,6 @@ internal static class AutomaticUpdateRunner
             return null;
         }
     }
+
+    private sealed record RunningContinuityVersion(string Version, bool ProcessObserved);
 }
