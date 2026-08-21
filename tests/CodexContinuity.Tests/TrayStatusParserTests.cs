@@ -62,7 +62,7 @@ public sealed class TrayStatusParserTests
     }
 
     [Fact]
-    public void ParsesObservedStagedAndActiveUpdateCounts()
+    public void ParsesObservedStagedAndAppliedUpdateCounts()
     {
         const string json =
             """
@@ -82,5 +82,45 @@ public sealed class TrayStatusParserTests
         Assert.Equal(
             new ContinuityUpdateSnapshot("0.2.1", "0.3.0", 2, 1, 0, "staged", null),
             update);
+    }
+
+    [Fact]
+    public void UpdatePresentationLabelsAppliedHistoryAndKeepsVersionsOnFailure()
+    {
+        var update = new ContinuityUpdateSnapshot(
+            "0.2.1",
+            "0.3.0",
+            2,
+            1,
+            1,
+            "failed",
+            "checksum mismatch");
+
+        Assert.Equal(
+            "Updates: 2 observed / 1 staged / 1 applied",
+            TrayStatusPresentation.UpdateCounts(update));
+        Assert.Equal(
+            "Running v0.2.1; latest v0.3.0; last check failed: checksum mismatch",
+            TrayStatusPresentation.UpdateDetail(update));
+    }
+
+    [Fact]
+    public void UpdatePresentationExplainsRollbackAndFailedManualCheck()
+    {
+        var update = new ContinuityUpdateSnapshot(
+            "0.2.1",
+            "0.3.0",
+            1,
+            1,
+            0,
+            "deferred",
+            null);
+
+        var detail = TrayStatusPresentation.UpdateDetail(update);
+
+        Assert.Equal("v0.3.0 deferred by rollback; running v0.2.1", detail);
+        Assert.Equal(
+            $"Manual update check failed; {detail}",
+            TrayStatusPresentation.ManualCheckResult(succeeded: false, detail));
     }
 }

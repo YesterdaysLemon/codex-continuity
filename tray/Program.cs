@@ -124,15 +124,14 @@ internal sealed class ContinuityTrayContext : ApplicationContext
             recoveryItem.Visible = status.Health == ContinuityHealth.Unavailable;
 
             var update = await statusClient.ReadUpdateAsync(shutdown.Token);
-            updateItem.Text = $"Updates: {update.ObservedCount} observed / " +
-                $"{update.StagedCount} staged / {update.AppliedCount} active";
+            updateItem.Text = TrayStatusPresentation.UpdateCounts(update);
             updateItem.Enabled = update.LatestVersion is not null;
             updateItem.Click -= OpenLatestRelease;
             if (updateItem.Enabled)
             {
                 updateItem.Click += OpenLatestRelease;
             }
-            updateDetailItem.Text = UpdateDetail(update);
+            updateDetailItem.Text = TrayStatusPresentation.UpdateDetail(update);
         }
         catch (OperationCanceledException)
         {
@@ -148,8 +147,11 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         try
         {
             updateDetailItem.Text = "Checking for verified releases…";
-            await statusClient.CheckForUpdatesAsync(shutdown.Token);
+            var succeeded = await statusClient.CheckForUpdatesAsync(shutdown.Token);
             await RefreshAsync();
+            updateDetailItem.Text = TrayStatusPresentation.ManualCheckResult(
+                succeeded,
+                updateDetailItem.Text);
         }
         catch (OperationCanceledException)
         {
@@ -168,38 +170,6 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         catch (OperationCanceledException)
         {
         }
-    }
-
-    private static string UpdateDetail(ContinuityUpdateSnapshot update)
-    {
-        if (update.LastError is not null)
-        {
-            return $"Last update failed: {Compact(update.LastError)}";
-        }
-        if (update.RunningVersion is null)
-        {
-            return "Update tracking: waiting for first supervisor check";
-        }
-        return update.LatestVersion is null
-            ? $"Running v{update.RunningVersion}; latest release unknown"
-            : update.LatestState switch
-            {
-                "active" => $"Running v{update.RunningVersion}; latest is active",
-                "staged" => $"v{update.LatestVersion} staged; running v{update.RunningVersion}",
-                "failed" => $"v{update.LatestVersion} could not be staged",
-                "observed" => $"v{update.LatestVersion} observed; staging pending",
-                "unknown" => $"Running v{update.RunningVersion}; update state unknown",
-                _ => $"Running v{update.RunningVersion}; update state {update.LatestState}",
-            };
-    }
-
-    private static string Compact(string text)
-    {
-        const int maximumLength = 160;
-        var singleLine = text.Replace('\r', ' ').Replace('\n', ' ').Trim();
-        return singleLine.Length <= maximumLength
-            ? singleLine
-            : $"{singleLine[..maximumLength]}…";
     }
 
     private static void OpenDiagnostics()

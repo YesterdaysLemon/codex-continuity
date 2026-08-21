@@ -33,6 +33,53 @@ internal sealed record ContinuityUpdateSnapshot(
         new(null, null, 0, 0, 0, "unknown", error);
 }
 
+internal static class TrayStatusPresentation
+{
+    internal static string UpdateCounts(ContinuityUpdateSnapshot update) =>
+        $"Updates: {update.ObservedCount} observed / {update.StagedCount} staged / " +
+        $"{update.AppliedCount} applied";
+
+    internal static string UpdateDetail(ContinuityUpdateSnapshot update)
+    {
+        var versions = update.RunningVersion is null
+            ? "Update tracking unavailable"
+            : update.LatestVersion is null
+                ? $"Running v{update.RunningVersion}; latest release unknown"
+                : $"Running v{update.RunningVersion}; latest v{update.LatestVersion}";
+        if (update.LastError is not null)
+        {
+            return $"{versions}; last check failed: {Compact(update.LastError)}";
+        }
+        if (update.RunningVersion is null || update.LatestVersion is null)
+        {
+            return versions;
+        }
+        return update.LatestState switch
+        {
+            "active" => $"Running v{update.RunningVersion}; latest is active",
+            "staged" => $"v{update.LatestVersion} staged; running v{update.RunningVersion}",
+            "deferred" => $"v{update.LatestVersion} deferred by rollback; running v{update.RunningVersion}",
+            "ahead" => $"Running v{update.RunningVersion}; ahead of stable v{update.LatestVersion}",
+            "failed" => $"v{update.LatestVersion} could not be staged; running v{update.RunningVersion}",
+            "observed" => $"v{update.LatestVersion} observed; staging pending",
+            "unknown" => $"Running v{update.RunningVersion}; update state unknown",
+            _ => $"Running v{update.RunningVersion}; update state {update.LatestState}",
+        };
+    }
+
+    internal static string ManualCheckResult(bool succeeded, string detail) =>
+        succeeded ? detail : $"Manual update check failed; {detail}";
+
+    private static string Compact(string text)
+    {
+        const int maximumLength = 160;
+        var singleLine = text.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return singleLine.Length <= maximumLength
+            ? singleLine
+            : $"{singleLine[..maximumLength]}…";
+    }
+}
+
 internal static class TrayStatusParser
 {
     internal static TrayStatusSnapshot Parse(string json)
@@ -139,7 +186,7 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
                     string.IsNullOrWhiteSpace(error) ? "Backend unavailable" : error.Trim());
         }
         catch (Exception exception) when (
-            exception is IOException or InvalidOperationException or JsonException)
+            exception is IOException or InvalidOperationException or Win32Exception or JsonException)
         {
             return TrayStatusSnapshot.Unavailable(exception.Message);
         }
@@ -163,7 +210,7 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
     }
 
     internal async Task<bool> CheckForUpdatesAsync(CancellationToken cancellationToken) =>
-        await RunCommandAsync(["update", "--port", ReadInstalledPort().ToString()], cancellationToken) == 0;
+        await RunCommandAsync(["update"], cancellationToken) == 0;
 
     internal async Task<bool> RestartSupervisorAsync(CancellationToken cancellationToken) =>
         await RunCommandAsync(["repair", "--start-now"], cancellationToken) == 0;
