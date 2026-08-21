@@ -60,4 +60,27 @@ public sealed class TrayStatusParserTests
 
         Assert.Equal(ContinuityHealth.Degraded, status.Health);
     }
+
+    [Fact]
+    public void ParsesObservedStagedAndActiveUpdateCounts()
+    {
+        const string json =
+            """
+            {
+              "runningVersion": "0.2.1",
+              "latestVersion": "0.3.0",
+              "observedCount": 2,
+              "stagedCount": 1,
+              "appliedCount": 0,
+              "latestState": "staged",
+              "lastError": null
+            }
+            """;
+
+        var update = TrayStatusParser.ParseUpdate(json);
+
+        Assert.Equal(
+            new ContinuityUpdateSnapshot("0.2.1", "0.3.0", 2, 1, 0, "staged", null),
+            update);
+    }
 }

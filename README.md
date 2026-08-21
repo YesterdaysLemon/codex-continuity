@@ -114,6 +114,12 @@ backend or desktop to apply a release. Unsigned and development builds can still
 observe releases, but automatic staging fails closed; use the explicit manual
 installation path until publisher signing is configured.
 
+Left-click the tray icon to see running and latest versions,
+observed/staged/active counts, the last failure, and actions to check
+immediately or safely start an unavailable backend. The recovery action retains
+the existing foreign-endpoint refusal, so it cannot adopt or create a competing
+app-server on an occupied port.
+
 ## Requirements
 
 - Windows 11 (the initial release is tested on Windows 11 x64).
