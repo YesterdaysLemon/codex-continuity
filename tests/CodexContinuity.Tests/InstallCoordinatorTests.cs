@@ -9,8 +9,10 @@ public sealed class InstallCoordinatorTests : IDisposable
         Path.GetTempPath(),
         $"codex-continuity-install-tests-{Guid.NewGuid():N}");
 
-    [Fact]
-    public void CustomPortUninstallRestoresOwnedValuesWithoutRepeatingPort()
+    [Theory]
+    [InlineData(45123)]
+    [InlineData(45124)]
+    public void UninstallRestoresOwnedValuesWithoutRepeatingInstallPort(int installPort)
     {
         var platform = new FakeInstallPlatform
         {
@@ -21,11 +23,11 @@ public sealed class InstallCoordinatorTests : IDisposable
         var coordinator = CreateCoordinator(platform);
         var source = CreateSource("version-one");
 
-        var outcome = coordinator.Install(source, 45124, TrayInstallMode.Disabled);
+        var outcome = coordinator.Install(source, installPort, TrayInstallMode.Disabled);
         var removed = coordinator.Uninstall();
 
         Assert.True(removed);
-        Assert.Equal(45124, outcome.State.Port);
+        Assert.Equal(installPort, outcome.State.Port);
         Assert.Equal("ws://127.0.0.1:40000", platform.Environment[InstallCoordinator.AppServerUrlVariable]);
         Assert.Equal("true", platform.Environment[InstallCoordinator.DisableUpdaterVariable]);
         Assert.Equal("previous startup", platform.StartupCommand);

@@ -2,7 +2,11 @@
 param(
     [switch]$Check,
 
-    [string]$ExecutablePath
+    [string]$ExecutablePath,
+
+    [string]$ExpectedDescription = "Codex Continuity Supervisor",
+
+    [string]$ExpectedOriginalFilename = "CodexContinuity.dll"
 )
 
 Set-StrictMode -Version Latest
@@ -36,10 +40,10 @@ function Assert-Icon {
     if (-not [string]::IsNullOrWhiteSpace($ExecutablePath)) {
         $resolvedExecutable = (Resolve-Path -LiteralPath $ExecutablePath).Path
         $versionInfo = (Get-Item -LiteralPath $resolvedExecutable).VersionInfo
-        if ($versionInfo.FileDescription -ne "Codex Continuity Supervisor" -or
+        if ($versionInfo.FileDescription -ne $ExpectedDescription -or
             $versionInfo.ProductName -ne "Codex Continuity" -or
             $versionInfo.CompanyName -ne "YesterdaysLemon" -or
-            $versionInfo.OriginalFilename -ne "CodexContinuity.dll") {
+            $versionInfo.OriginalFilename -ne $ExpectedOriginalFilename) {
             throw "The executable does not contain the expected Windows version resources."
         }
 

@@ -64,12 +64,7 @@ internal static partial class BootstrapInstaller
             await DownloadAsync(release.ChecksumUrl, checksumPath);
 
             var expectedHash = ParseSha256(await File.ReadAllTextAsync(checksumPath));
-            var actualHash = await ComputeSha256Async(archivePath);
-            if (!string.Equals(expectedHash, actualHash, StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidDataException(
-                    $"SHA-256 mismatch. Expected {expectedHash} but downloaded {actualHash}.");
-            }
+            await VerifySha256Async(archivePath, expectedHash);
             Report(quiet, "Release checksum verified.");
 
             ZipFile.ExtractToDirectory(archivePath, extractPath);
@@ -140,6 +135,16 @@ internal static partial class BootstrapInstaller
     {
         await using var stream = File.OpenRead(path);
         return Convert.ToHexString(await SHA256.HashDataAsync(stream)).ToLowerInvariant();
+    }
+
+    internal static async Task VerifySha256Async(string path, string expectedHash)
+    {
+        var actualHash = await ComputeSha256Async(path);
+        if (!string.Equals(expectedHash, actualHash, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"SHA-256 mismatch. Expected {expectedHash} but downloaded {actualHash}.");
+        }
     }
 
     private static async Task<int> RunChildAsync(

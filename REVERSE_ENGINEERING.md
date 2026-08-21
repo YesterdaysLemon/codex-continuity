@@ -20,6 +20,22 @@ no installed file, signature, or running process was modified.
   19084 and PID 28648 during the investigation. The continuity test never
   signaled or replaced either process.
 
+## Local transport trust boundary
+
+- The inspected desktop transport constructs a standard WebSocket from the
+  configured URL. Its `CODEX_APP_SERVER_WS_URL` seam provides only an endpoint;
+  no token, custom-header, client-certificate, or named-pipe option was found.
+- The inspected `codex app-server --help` accepts `--listen ws://IP:PORT` (or
+  stdio) and exposes no authentication-token or Windows named-pipe switch.
+- A per-user named pipe would provide a stronger access-control boundary, but
+  it is not compatible with the desktop's current WebSocket-only external
+  transport. A private header cannot be added by Continuity alone because the
+  desktop has no corresponding configuration for it.
+- Continuity therefore hard-codes `127.0.0.1` in every generated endpoint and
+  documents that loopback blocks remote hosts, not other processes running as
+  the same Windows user. If the desktop/app-server later expose an authenticated
+  local transport, that should replace the unauthenticated WebSocket seam.
+
 ## Updater seam
 
 - `CODEX_SPARKLE_ENABLED=false` prevents inclusion of the desktop updater on
