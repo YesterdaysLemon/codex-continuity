@@ -10,15 +10,17 @@ public sealed class UpdateStateTests : IDisposable
         $"codex-continuity-update-state-tests-{Guid.NewGuid():N}");
 
     [Theory]
-    [InlineData("0.3.0", "0.3.0", true, "active")]
-    [InlineData("0.2.0", "0.3.0", true, "staged")]
-    [InlineData("0.2.0", "0.2.0", true, "deferred")]
-    [InlineData("0.2.0", "0.2.0", false, "observed")]
-    [InlineData("0.4.0", "0.4.0", false, "ahead")]
+    [InlineData("0.3.0", "0.3.0", true, true, "active")]
+    [InlineData("0.3.0", "0.3.0", false, false, "inactive")]
+    [InlineData("0.2.0", "0.3.0", true, true, "staged")]
+    [InlineData("0.2.0", "0.2.0", true, true, "deferred")]
+    [InlineData("0.2.0", "0.2.0", false, true, "observed")]
+    [InlineData("0.4.0", "0.4.0", false, true, "ahead")]
     public void LatestStateSeparatesRunningSelectedAndObservedVersions(
         string runningVersion,
         string selectedVersion,
         bool staged,
+        bool runningProcessObserved,
         string expected)
     {
         var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
@@ -29,8 +31,12 @@ public sealed class UpdateStateTests : IDisposable
             "0.2.0",
             runningVersion,
             selectedVersion,
+            runningProcessObserved,
             "0.3.0",
             null,
+            1,
+            staged ? 1 : 0,
+            0,
             [new TrackedContinuityRelease(
                 "0.3.0",
                 now,
@@ -53,8 +59,12 @@ public sealed class UpdateStateTests : IDisposable
             "0.3.0",
             "0.3.0",
             "0.3.0",
+            true,
             "0.3.0",
             null,
+            0,
+            0,
+            0,
             Releases: []);
 
         Assert.Equal("active", state.LatestState);
@@ -69,8 +79,8 @@ public sealed class UpdateStateTests : IDisposable
                 $"1.0.{index}",
                 now.AddMinutes(index),
                 now.AddMinutes(index),
-                StagedAtUtc: null,
-                AppliedAtUtc: null,
+                StagedAtUtc: index <= 35 ? now : null,
+                AppliedAtUtc: index <= 34 ? now : null,
                 LastError: null)).ToList();
         var store = Store();
         store.Save(new ContinuityUpdateState(
@@ -80,14 +90,21 @@ public sealed class UpdateStateTests : IDisposable
             "1.0.0",
             "1.0.0",
             "1.0.0",
+            true,
             "1.0.40",
             null,
+            40,
+            35,
+            34,
             releases));
 
         var loaded = store.Load();
 
         Assert.NotNull(loaded);
-        Assert.Equal(32, loaded.ObservedCount);
+        Assert.Equal(32, loaded.Releases.Count);
+        Assert.Equal(40, loaded.ObservedCount);
+        Assert.Equal(35, loaded.StagedCount);
+        Assert.Equal(34, loaded.AppliedCount);
         Assert.Equal("1.0.40", loaded.Releases[0].Version);
 
         File.WriteAllText(Path.Combine(root, "update-status.json"), "not json");

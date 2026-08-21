@@ -17,21 +17,21 @@ internal sealed record ContinuityUpdateState(
     string BaselineVersion,
     string RunningVersion,
     string SelectedVersion,
+    bool RunningProcessObserved,
     string? LatestVersion,
     string? LastError,
+    int ObservedCount,
+    int StagedCount,
+    int AppliedCount,
     IReadOnlyList<TrackedContinuityRelease> Releases)
 {
-    public int ObservedCount => Releases.Count;
-    public int StagedCount => Releases.Count(release => release.StagedAtUtc is not null);
-    public int AppliedCount => Releases.Count(release => release.AppliedAtUtc is not null);
-
     public string LatestState
     {
         get
         {
             var latest = Releases.FirstOrDefault(release =>
                 string.Equals(release.Version, LatestVersion, StringComparison.OrdinalIgnoreCase));
-            if (LatestVersion is not null && string.Equals(
+            if (RunningProcessObserved && LatestVersion is not null && string.Equals(
                     LatestVersion,
                     RunningVersion,
                     StringComparison.OrdinalIgnoreCase))
@@ -54,6 +54,10 @@ internal sealed record ContinuityUpdateState(
             if (LatestVersion is null)
             {
                 return "unknown";
+            }
+            if (!RunningProcessObserved)
+            {
+                return "inactive";
             }
             return CompareVersions(RunningVersion, LatestVersion) > 0 ? "ahead" : "observed";
         }
@@ -83,7 +87,7 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
                     File.ReadAllText(path),
                     SerializerOptions)
                 : null;
-            return IsUsable(state) ? state : null;
+            return IsUsable(state) ? NormalizeCounts(state!) : null;
         }
         catch (JsonException)
         {
@@ -97,7 +101,7 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
 
     internal void Save(ContinuityUpdateState state)
     {
-        var bounded = state with
+        var bounded = NormalizeCounts(state) with
         {
             Releases = state.Releases
                 .OrderByDescending(release => ParseVersion(release.Version))
@@ -127,6 +131,17 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
 
     private static Version ParseVersion(string version) =>
         Version.TryParse(version, out var parsed) ? parsed : new Version();
+
+    private static ContinuityUpdateState NormalizeCounts(ContinuityUpdateState state) => state with
+    {
+        ObservedCount = Math.Max(state.ObservedCount, state.Releases.Count),
+        StagedCount = Math.Max(
+            state.StagedCount,
+            state.Releases.Count(release => release.StagedAtUtc is not null)),
+        AppliedCount = Math.Max(
+            state.AppliedCount,
+            state.Releases.Count(release => release.AppliedAtUtc is not null)),
+    };
 
     private static bool IsUsable(ContinuityUpdateState? state) =>
         state is
