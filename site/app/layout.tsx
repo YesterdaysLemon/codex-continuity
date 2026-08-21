@@ -13,6 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL("https://codex-continuity.alirezaafshan4.chatgpt.site"),
   title: "Codex Continuity — Keep the agents. Replace the window.",
   description:
     "An unofficial Windows utility that keeps Codex agent threads alive while the desktop app updates or restarts.",
@@ -23,7 +24,7 @@ export const metadata: Metadata = {
       "An unofficial Windows utility that keeps Codex agent threads alive while the desktop app updates or restarts.",
     images: [
       {
-        url: "https://raw.githubusercontent.com/YesterdaysLemon/codex-continuity/main/site/public/og.png",
+        url: "/og.png",
         width: 1536,
         height: 1024,
         alt: "Codex Continuity — Keep the agents. Replace the window.",
@@ -36,9 +37,10 @@ export const metadata: Metadata = {
     description:
       "Keep Codex agent threads alive while the Windows desktop app updates or restarts.",
     images: [
-      "https://raw.githubusercontent.com/YesterdaysLemon/codex-continuity/main/site/public/og.png",
+      "/og.png",
     ],
   },
+  authors: [{ name: "Alireza Afshan", url: "https://alirezaafshan.com" }],
 };
 
 export default function RootLayout({

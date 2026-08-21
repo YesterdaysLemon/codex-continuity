@@ -226,6 +226,9 @@ export default function Home() {
           <a className="button button-secondary" href="https://github.com/YesterdaysLemon/codex-continuity">
             Star on GitHub <span aria-hidden="true">↗</span>
           </a>
+          <a className="button button-secondary" href="https://github.com/sponsors/YesterdaysLemon">
+            Sponsor <span aria-hidden="true">♥</span>
+          </a>
         </div>
       </section>
 
@@ -234,8 +237,12 @@ export default function Home() {
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
           <span>Codex Continuity</span>
         </a>
-        <p>Unofficial. Experimental. Built for work that takes longer than a window.</p>
+        <p>
+          Built by <a href="https://alirezaafshan.com">Alireza Afshan</a> for
+          work that takes longer than a window.
+        </p>
         <div>
+          <a href="https://alirezaafshan.com/projects">More projects</a>
           <a href="https://github.com/YesterdaysLemon/codex-continuity">Source</a>
           <a href="https://github.com/YesterdaysLemon/codex-continuity/blob/main/LICENSE">MIT License</a>
         </div>

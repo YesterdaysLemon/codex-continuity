@@ -34,5 +34,7 @@ test("server-renders the Codex Continuity launch page", async () => {
   assert.match(html, /Download for Windows/);
   assert.match(html, /Unofficial · Windows · Experimental/);
   assert.match(html, /github\.com\/YesterdaysLemon\/codex-continuity/);
+  assert.match(html, /github\.com\/sponsors\/YesterdaysLemon/);
+  assert.match(html, /alirezaafshan\.com\/projects/);
   assert.doesNotMatch(html, /site-creator|starter loading skeleton/i);
 });

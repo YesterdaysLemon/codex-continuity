@@ -495,6 +495,8 @@ footer {
 }
 
 footer p { margin: 0; text-align: center; }
+footer p a { color: var(--text); }
+footer p a:hover { color: var(--acid); }
 footer > div { justify-self: end; display: flex; gap: 20px; }
 footer > div a:hover { color: var(--acid); }
 

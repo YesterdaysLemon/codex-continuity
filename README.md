@@ -5,6 +5,7 @@
 [![CI](https://github.com/YesterdaysLemon/codex-continuity/actions/workflows/ci.yml/badge.svg)](https://github.com/YesterdaysLemon/codex-continuity/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/YesterdaysLemon/codex-continuity)](https://github.com/YesterdaysLemon/codex-continuity/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-79f2c0.svg)](LICENSE)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%99%A5-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/YesterdaysLemon)
 
 Codex Continuity is an **unofficial, experimental Windows utility** that keeps
 the Codex agent backend alive independently of the desktop window. If Microsoft
@@ -12,6 +13,7 @@ Store replaces or restarts the UI during an update, working threads remain
 owned by the supervised backend and the new UI reconnects.
 
 [Download the latest release](https://github.com/YesterdaysLemon/codex-continuity/releases/latest)
+· [Visit the product site](https://codex-continuity.alirezaafshan4.chatgpt.site)
 · [Read the technical evidence](REVERSE_ENGINEERING.md)
 
 ## Why a separate executable?
@@ -147,3 +149,7 @@ desktop observations behind the bridge.
 Codex Continuity is not affiliated with or endorsed by OpenAI. Codex and OpenAI
 are trademarks of their respective owner. This project uses undocumented and
 experimental integration seams that may change without notice.
+
+Built by [Alireza Afshan](https://alirezaafshan.com). See more
+[projects](https://alirezaafshan.com/projects), or
+[sponsor the work](https://github.com/sponsors/YesterdaysLemon).
