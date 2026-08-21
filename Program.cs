@@ -385,6 +385,12 @@ internal static class Program
         }
 
         var stateDirectory = ContinuityPaths.StateDirectory;
+        var existingState = new InstallStateStore(
+            ContinuityPaths.InstallStateFile(stateDirectory)).Load();
+        await EnsurePortChangeIsSafeAsync(
+            existingState?.Port,
+            port,
+            installedPort => IsReadyAsync(installedPort, TimeSpan.FromSeconds(1)));
         var coordinator = CreateInstallCoordinator(stateDirectory);
         var endpointOwnership = ExistingEndpointOwnership.NotReady;
         if (startNow && await IsReadyAsync(port, TimeSpan.FromSeconds(1)))
@@ -449,6 +455,25 @@ internal static class Program
         }
 
         return 0;
+    }
+
+    internal static async Task EnsurePortChangeIsSafeAsync(
+        int? installedPort,
+        int requestedPort,
+        Func<int, Task<bool>> isReadyAsync)
+    {
+        if (installedPort is null || installedPort == requestedPort)
+        {
+            return;
+        }
+
+        if (await isReadyAsync(installedPort.Value))
+        {
+            throw new InvalidOperationException(
+                $"The installed Continuity backend on port {installedPort} is still ready. " +
+                $"Refusing to redirect future Codex launches to port {requestedPort} while it may own active work. " +
+                "Let that work finish, stop the old supervisor, and then retry the port change.");
+        }
     }
 
     private static int Uninstall()
