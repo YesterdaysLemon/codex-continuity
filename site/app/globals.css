@@ -480,7 +480,7 @@ h1 span {
 .agent-copy { min-width: 0; }
 .agent-copy p { max-width: 660px; }
 .agent-copy a { color: var(--acid); }
-.agent-copy pre {
+.agent-copy > pre {
   max-width: 100%;
   margin: 28px 0 0;
   padding: 20px;
@@ -490,6 +490,7 @@ h1 span {
   color: var(--cyan);
   font: 500 11px/1.6 var(--font-geist-mono), monospace;
 }
+.agent-copy .terminal { margin-top: 28px; }
 
 .proof-section {
   display: grid;

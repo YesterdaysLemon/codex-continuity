@@ -87,7 +87,7 @@ jobs:
                   $appServerUrl -ne 'ws://127.0.0.1:45129' -or
                   $updaterSetting -ne 'false' -or
                   $registration.DisplayName -ne 'Codex Continuity' -or
-                  $registration.DisplayVersion -ne '0.2.0' -or
+                  $registration.DisplayVersion -ne '0.2.1' -or
                   $registration.UninstallString -notlike "*$commandExecutable*") {
                 throw 'Install smoke state did not match the requested lifecycle configuration.'
               }
@@ -137,7 +137,7 @@ jobs:
             Remove-Item -LiteralPath $stateDirectory -Recurse -Force -ErrorAction SilentlyContinue
           }
           $setupHash = (Get-FileHash .\artifacts\install-smoke\CodexContinuity.exe -Algorithm SHA256).Hash
-          .\scripts\write-winget-manifests.ps1 -Version 0.2.0 -InstallerUrl https://example.invalid/CodexContinuity-v0.2.0-Setup.exe -InstallerSha256 $setupHash -ReleaseDate 2026-08-20 -OutputDirectory artifacts/winget-smoke
+          .\scripts\write-winget-manifests.ps1 -Version 0.2.1 -InstallerUrl https://example.invalid/CodexContinuity-v0.2.1-Setup.exe -InstallerSha256 $setupHash -ReleaseDate 2026-08-21 -OutputDirectory artifacts/winget-smoke
           winget --version
           $validationOutput = winget validate --manifest artifacts/winget-smoke --disable-interactivity 2>&1
           $validationExitCode = $LASTEXITCODE
