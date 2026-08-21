@@ -107,6 +107,7 @@ internal sealed class AutomaticUpdateCoordinator(
     internal async Task<ContinuityUpdateState> CheckAndStageAsync(
         string runningVersion,
         string? selectedVersion,
+        bool runningProcessObserved,
         CancellationToken cancellationToken)
     {
         var now = utcNow();
@@ -118,11 +119,16 @@ internal sealed class AutomaticUpdateCoordinator(
                 BaselineVersion: runningVersion,
                 RunningVersion: runningVersion,
                 SelectedVersion: selectedVersion ?? "0.0.0",
+                RunningProcessObserved: runningProcessObserved,
                 LatestVersion: null,
                 LastError: null,
+                ObservedCount: 0,
+                StagedCount: 0,
+                AppliedCount: 0,
                 Releases: []),
             runningVersion,
             selectedVersion ?? "0.0.0",
+            runningProcessObserved,
             now);
         try
         {
@@ -169,20 +175,25 @@ internal sealed class AutomaticUpdateCoordinator(
         DateTimeOffset observedAt)
     {
         var tracked = state.Releases.ToDictionary(release => release.Version);
+        var newlyObserved = 0;
         foreach (var release in published.Where(release =>
                      CompareVersions(release.Version, state.BaselineVersion) > 0))
         {
-            tracked.TryAdd(release.Version, new TrackedContinuityRelease(
+            if (tracked.TryAdd(release.Version, new TrackedContinuityRelease(
                 release.Version,
                 release.PublishedAtUtc,
                 observedAt,
                 StagedAtUtc: null,
                 AppliedAtUtc: null,
-                LastError: null));
+                LastError: null)))
+            {
+                newlyObserved++;
+            }
         }
         return state with
         {
             LatestVersion = published.FirstOrDefault()?.Version,
+            ObservedCount = state.ObservedCount + newlyObserved,
             Releases = tracked.Values.ToList(),
         };
     }
@@ -191,16 +202,27 @@ internal sealed class AutomaticUpdateCoordinator(
         ContinuityUpdateState state,
         string runningVersion,
         string selectedVersion,
+        bool runningProcessObserved,
         DateTimeOffset appliedAt)
     {
+        var newlyApplied = runningProcessObserved
+            ? state.Releases.Count(release =>
+                release.Version == runningVersion &&
+                release.StagedAtUtc is not null &&
+                release.AppliedAtUtc is null)
+            : 0;
         var releases = state.Releases.Select(release =>
-            release.Version == runningVersion && release.StagedAtUtc is not null
+            runningProcessObserved &&
+            release.Version == runningVersion &&
+            release.StagedAtUtc is not null
                 ? release with { AppliedAtUtc = release.AppliedAtUtc ?? appliedAt, LastError = null }
                 : release).ToList();
         return state with
         {
             RunningVersion = runningVersion,
             SelectedVersion = selectedVersion,
+            RunningProcessObserved = runningProcessObserved,
+            AppliedCount = state.AppliedCount + newlyApplied,
             Releases = releases,
         };
     }
@@ -208,12 +230,18 @@ internal sealed class AutomaticUpdateCoordinator(
     private static ContinuityUpdateState MarkStaged(
         ContinuityUpdateState state,
         string version,
-        DateTimeOffset stagedAt) => state with
+        DateTimeOffset stagedAt)
+    {
+        var newlyStaged = state.Releases.Any(release =>
+            release.Version == version && release.StagedAtUtc is null);
+        return state with
         {
+            StagedCount = state.StagedCount + (newlyStaged ? 1 : 0),
             Releases = state.Releases.Select(release => release.Version == version
                 ? release with { StagedAtUtc = stagedAt, LastError = null }
                 : release).ToList(),
         };
+    }
 
     private static ContinuityUpdateState MarkFailure(
         ContinuityUpdateState state,

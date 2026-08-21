@@ -71,6 +71,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
         var first = await coordinator.CheckAndStageAsync(
             "0.1.0",
             "0.1.0",
+            runningProcessObserved: true,
             CancellationToken.None);
 
         Assert.Equal(["0.3.0"], staged);
@@ -93,6 +94,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
         var restaged = await repaired.CheckAndStageAsync(
             "0.1.0",
             selectedVersion: null,
+            runningProcessObserved: true,
             CancellationToken.None);
 
         Assert.Equal(["0.3.0", "0.3.0"], staged);
@@ -108,6 +110,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
         var deferred = await rolledBack.CheckAndStageAsync(
             "0.1.0",
             "0.1.0",
+            runningProcessObserved: true,
             CancellationToken.None);
 
         Assert.Equal("0.1.0", deferred.SelectedVersion);
@@ -123,12 +126,30 @@ public sealed class AutomaticUpdatesTests : IDisposable
         var second = await restarted.CheckAndStageAsync(
             "0.3.0",
             "0.3.0",
+            runningProcessObserved: true,
             CancellationToken.None);
 
         Assert.Equal(1, second.StagedCount);
         Assert.Equal(1, second.AppliedCount);
         Assert.Equal("active", second.LatestState);
         Assert.Null(second.LastError);
+
+        now = now.AddMinutes(1);
+        var unavailable = new AutomaticUpdateCoordinator(
+            store,
+            _ => Task.FromResult<IReadOnlyList<PublishedContinuityRelease>>(releases),
+            _ => throw new InvalidOperationException("The active release must not restage."),
+            () => now);
+
+        var stopped = await unavailable.CheckAndStageAsync(
+            "0.3.0",
+            "0.3.0",
+            runningProcessObserved: false,
+            CancellationToken.None);
+
+        Assert.False(stopped.RunningProcessObserved);
+        Assert.Equal(1, stopped.AppliedCount);
+        Assert.Equal("inactive", stopped.LatestState);
     }
 
     [Fact]
@@ -144,6 +165,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
         var state = await coordinator.CheckAndStageAsync(
             "0.2.0",
             "0.3.0",
+            runningProcessObserved: true,
             CancellationToken.None);
 
         Assert.Equal(1, state.StagedCount);
@@ -169,6 +191,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
         var state = await coordinator.CheckAndStageAsync(
             "0.1.0",
             "0.1.0",
+            runningProcessObserved: true,
             CancellationToken.None);
 
         Assert.Equal(1, state.ObservedCount);
@@ -190,6 +213,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
         var state = await coordinator.CheckAndStageAsync(
             "0.1.0",
             "0.1.0",
+            runningProcessObserved: true,
             CancellationToken.None);
 
         Assert.NotNull(state.LastError);
