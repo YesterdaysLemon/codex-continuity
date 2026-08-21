@@ -143,7 +143,7 @@ internal sealed class ContinuityTrayContext : ApplicationContext
     }
 
     private static void OpenProductSite() => OpenUrl(
-        "https://codex-continuity.alirezaafshan4.chatgpt.site");
+        "https://continuity.alirezaafshan.com");
 
     private static void OpenLatestRelease(object? sender, EventArgs eventArgs) => OpenUrl(
         "https://github.com/YesterdaysLemon/codex-continuity/releases/latest");
