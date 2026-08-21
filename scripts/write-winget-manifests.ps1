@@ -48,7 +48,7 @@ PublisherUrl: https://alirezaafshan.com
 PublisherSupportUrl: https://github.com/YesterdaysLemon/codex-continuity/issues
 Author: Alireza Afshan
 PackageName: Codex Continuity
-PackageUrl: https://codex-continuity.alirezaafshan4.chatgpt.site
+PackageUrl: https://continuity.alirezaafshan.com
 License: MIT
 LicenseUrl: https://github.com/YesterdaysLemon/codex-continuity/blob/main/LICENSE
 Copyright: Copyright (c) 2026 Alireza Afshan
