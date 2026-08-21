@@ -107,7 +107,7 @@ internal sealed class AutomaticUpdateCoordinator(
 {
     internal async Task<ContinuityUpdateState> CheckAndStageAsync(
         string runningVersion,
-        string selectedVersion,
+        string? selectedVersion,
         CancellationToken cancellationToken)
     {
         var now = utcNow();
@@ -118,12 +118,12 @@ internal sealed class AutomaticUpdateCoordinator(
                 LastCheckedAtUtc: null,
                 BaselineVersion: runningVersion,
                 RunningVersion: runningVersion,
-                SelectedVersion: selectedVersion,
+                SelectedVersion: selectedVersion ?? "0.0.0",
                 LatestVersion: null,
                 LastError: null,
                 Releases: []),
             runningVersion,
-            selectedVersion,
+            selectedVersion ?? "0.0.0",
             now);
         try
         {
@@ -134,7 +134,7 @@ internal sealed class AutomaticUpdateCoordinator(
             if (latest is not null && CompareVersions(latest.Version, runningVersion) > 0)
             {
                 var tracked = state.Releases.Single(release => release.Version == latest.Version);
-                if (tracked.StagedAtUtc is null)
+                if (tracked.StagedAtUtc is null || selectedVersion is null)
                 {
                     if (!string.Equals(
                             selectedVersion,
@@ -365,21 +365,23 @@ internal static class AutomaticUpdateRunner
             "0.0.0";
     }
 
-    internal static string ResolveSelectedVersion(string executable)
+    internal static string? ResolveSelectedVersion(string executable)
     {
         if (!File.Exists(executable))
         {
-            return "0.0.0";
+            return null;
         }
         try
         {
             var version = FileVersionInfo.GetVersionInfo(executable);
-            return $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}";
+            return version.FileMajorPart == 0 && version.FileMinorPart == 0 && version.FileBuildPart == 0
+                ? null
+                : $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}";
         }
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
         {
-            return "0.0.0";
+            return null;
         }
     }
 }

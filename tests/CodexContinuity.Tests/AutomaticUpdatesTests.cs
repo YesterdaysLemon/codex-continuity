@@ -12,9 +12,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
     [Fact]
     public void MissingSelectedExecutableIsTreatedAsUnselected()
     {
-        Assert.Equal(
-            "0.0.0",
-            AutomaticUpdateRunner.ResolveSelectedVersion(Path.Combine(root, "missing.exe")));
+        Assert.Null(AutomaticUpdateRunner.ResolveSelectedVersion(Path.Combine(root, "missing.exe")));
     }
 
     [Fact]
@@ -88,6 +86,25 @@ public sealed class AutomaticUpdatesTests : IDisposable
         Assert.Equal("staged", first.LatestState);
 
         now = now.AddMinutes(1);
+        var repaired = new AutomaticUpdateCoordinator(
+            store,
+            _ => Task.FromResult<IReadOnlyList<PublishedContinuityRelease>>(releases),
+            release =>
+            {
+                staged.Add(release.Version);
+                return Task.CompletedTask;
+            },
+            () => now);
+
+        var restaged = await repaired.CheckAndStageAsync(
+            "0.1.0",
+            selectedVersion: null,
+            CancellationToken.None);
+
+        Assert.Equal(["0.3.0", "0.3.0"], staged);
+        Assert.Equal("staged", restaged.LatestState);
+
+        now = now.AddMinutes(1);
         var rolledBack = new AutomaticUpdateCoordinator(
             store,
             _ => Task.FromResult<IReadOnlyList<PublishedContinuityRelease>>(releases),
@@ -118,6 +135,27 @@ public sealed class AutomaticUpdatesTests : IDisposable
         Assert.Equal(1, second.AppliedCount);
         Assert.Equal("active", second.LatestState);
         Assert.Null(second.LastError);
+    }
+
+    [Fact]
+    public async Task AdoptsAlreadySelectedLatestReleaseWithoutDownloadingAgain()
+    {
+        var coordinator = new AutomaticUpdateCoordinator(
+            Store(),
+            _ => Task.FromResult<IReadOnlyList<PublishedContinuityRelease>>(
+                [Release("0.3.0", "2026-08-21T12:00:00Z")]),
+            _ => throw new InvalidOperationException("The selected release must not redownload."),
+            () => DateTimeOffset.Parse("2026-08-21T13:00:00Z"));
+
+        var state = await coordinator.CheckAndStageAsync(
+            "0.2.0",
+            "0.3.0",
+            CancellationToken.None);
+
+        Assert.Equal(1, state.StagedCount);
+        Assert.Equal("0.3.0", state.SelectedVersion);
+        Assert.Equal("staged", state.LatestState);
+        Assert.Null(state.LastError);
     }
 
     [Fact]
