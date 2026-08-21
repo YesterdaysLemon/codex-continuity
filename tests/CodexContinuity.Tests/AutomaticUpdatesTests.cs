@@ -10,6 +10,14 @@ public sealed class AutomaticUpdatesTests : IDisposable
         $"codex-continuity-update-tests-{Guid.NewGuid():N}");
 
     [Fact]
+    public void MissingSelectedExecutableIsTreatedAsUnselected()
+    {
+        Assert.Equal(
+            "0.0.0",
+            AutomaticUpdateRunner.ResolveSelectedVersion(Path.Combine(root, "missing.exe")));
+    }
+
+    [Fact]
     public void ReleaseFeedFiltersNonStableReleasesAndRetainsRequiredAssets()
     {
         const string json =
@@ -157,40 +165,6 @@ public sealed class AutomaticUpdatesTests : IDisposable
         Assert.DoesNotContain('\r', state.LastError);
         Assert.DoesNotContain('\n', state.LastError);
         Assert.EndsWith("…", state.LastError);
-    }
-
-    [Fact]
-    public void UpdateStoreBoundsHistoryAndToleratesMalformedState()
-    {
-        var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
-        var releases = Enumerable.Range(1, 40).Select(index =>
-            new TrackedContinuityRelease(
-                $"1.0.{index}",
-                now.AddMinutes(index),
-                now.AddMinutes(index),
-                StagedAtUtc: null,
-                AppliedAtUtc: null,
-                LastError: null)).ToList();
-        var store = Store();
-        store.Save(new ContinuityUpdateState(
-            1,
-            now,
-            now,
-            "1.0.0",
-            "1.0.0",
-            "1.0.0",
-            "1.0.40",
-            null,
-            releases));
-
-        var loaded = store.Load();
-
-        Assert.NotNull(loaded);
-        Assert.Equal(32, loaded.ObservedCount);
-        Assert.Equal("1.0.40", loaded.Releases[0].Version);
-
-        File.WriteAllText(Path.Combine(root, "update-status.json"), "not json");
-        Assert.Null(store.Load());
     }
 
     public void Dispose()

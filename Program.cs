@@ -28,7 +28,7 @@ internal static class Program
                 "help" or "--help" or "-h" => PrintHelp(),
                 "probe" => await ProbeAsync(port),
                 "status" => await PrintStatusAsync(port),
-                "update" => await UpdateAsync(port),
+                "update" => await UpdateAsync(),
                 "serve" => await ServeAsync(port),
                 "install" => await InstallAsync(
                     port,
@@ -241,7 +241,6 @@ internal static class Program
         var codexHome = FutureProcessEnvironment.ResolveCodexHome();
         var consecutiveFailures = 0;
         var updateTask = AutomaticUpdateRunner.RunAsync(
-            port,
             stateDirectory,
             ProductVersion(),
             shutdown.Token);
@@ -344,10 +343,9 @@ internal static class Program
         return 0;
     }
 
-    private static async Task<int> UpdateAsync(int port)
+    private static async Task<int> UpdateAsync()
     {
         var state = await AutomaticUpdateRunner.CheckOnceAsync(
-            port,
             ContinuityPaths.StateDirectory,
             runningVersion: null,
             CancellationToken.None);

@@ -9,126 +9,6 @@ internal sealed record PublishedContinuityRelease(
     string? ArchiveUrl,
     string? ChecksumUrl);
 
-internal sealed record TrackedContinuityRelease(
-    string Version,
-    DateTimeOffset PublishedAtUtc,
-    DateTimeOffset FirstObservedAtUtc,
-    DateTimeOffset? StagedAtUtc,
-    DateTimeOffset? AppliedAtUtc,
-    string? LastError);
-
-internal sealed record ContinuityUpdateState(
-    int SchemaVersion,
-    DateTimeOffset TrackingStartedAtUtc,
-    DateTimeOffset? LastCheckedAtUtc,
-    string BaselineVersion,
-    string RunningVersion,
-    string SelectedVersion,
-    string? LatestVersion,
-    string? LastError,
-    IReadOnlyList<TrackedContinuityRelease> Releases)
-{
-    public int ObservedCount => Releases.Count;
-    public int StagedCount => Releases.Count(release => release.StagedAtUtc is not null);
-    public int AppliedCount => Releases.Count(release => release.AppliedAtUtc is not null);
-
-    public string LatestState
-    {
-        get
-        {
-            var latest = Releases.FirstOrDefault(release =>
-                string.Equals(release.Version, LatestVersion, StringComparison.OrdinalIgnoreCase));
-            return latest is not null && string.Equals(
-                latest.Version,
-                RunningVersion,
-                StringComparison.OrdinalIgnoreCase)
-                ? "active"
-                : latest?.StagedAtUtc is not null && string.Equals(
-                    latest.Version,
-                    SelectedVersion,
-                    StringComparison.OrdinalIgnoreCase)
-                    ? "staged"
-                    : latest?.StagedAtUtc is not null
-                        ? "deferred"
-                    : latest?.LastError is not null || LastError is not null
-                        ? "failed"
-                        : LatestVersion is null
-                            ? "unknown"
-                            : CompareVersions(RunningVersion, LatestVersion) >= 0
-                                ? "active"
-                                : "observed";
-        }
-    }
-
-    private static int CompareVersions(string first, string second) =>
-        System.Version.TryParse(first, out var firstVersion) &&
-        System.Version.TryParse(second, out var secondVersion)
-            ? firstVersion.CompareTo(secondVersion)
-            : string.Compare(first, second, StringComparison.OrdinalIgnoreCase);
-}
-
-internal sealed class ContinuityUpdateStateStore(string path, int retainedReleases = 32)
-{
-    private static readonly JsonSerializerOptions SerializerOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = true,
-    };
-
-    internal ContinuityUpdateState? Load()
-    {
-        try
-        {
-            return File.Exists(path)
-                ? JsonSerializer.Deserialize<ContinuityUpdateState>(
-                    File.ReadAllText(path),
-                    SerializerOptions)
-                : null;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-        catch (IOException)
-        {
-            return null;
-        }
-    }
-
-    internal void Save(ContinuityUpdateState state)
-    {
-        var bounded = state with
-        {
-            Releases = state.Releases
-                .OrderByDescending(release => ParseVersion(release.Version))
-                .ThenByDescending(release => release.FirstObservedAtUtc)
-                .Take(retainedReleases)
-                .ToList(),
-        };
-        var directory = Path.GetDirectoryName(path)
-            ?? throw new InvalidOperationException($"Update state path has no directory: {path}");
-        Directory.CreateDirectory(directory);
-        var temporaryPath = $"{path}.tmp-{Guid.NewGuid():N}";
-        try
-        {
-            File.WriteAllText(
-                temporaryPath,
-                JsonSerializer.Serialize(bounded, SerializerOptions));
-            File.Move(temporaryPath, path, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-        }
-    }
-
-    private static System.Version ParseVersion(string version) =>
-        System.Version.TryParse(version, out var parsed) ? parsed : new System.Version();
-}
-
 internal static class GitHubReleaseFeed
 {
     private const string ReleasesUrl =
@@ -370,7 +250,6 @@ internal static class AutomaticUpdateRunner
     internal static readonly TimeSpan CheckInterval = TimeSpan.FromHours(4);
 
     internal static async Task RunAsync(
-        int port,
         string stateDirectory,
         string runningVersion,
         CancellationToken cancellationToken)
@@ -380,7 +259,6 @@ internal static class AutomaticUpdateRunner
             try
             {
                 await CheckOnceAsync(
-                    port,
                     stateDirectory,
                     runningVersion,
                     cancellationToken);
@@ -405,7 +283,6 @@ internal static class AutomaticUpdateRunner
     }
 
     internal static async Task<ContinuityUpdateState?> CheckOnceAsync(
-        int port,
         string stateDirectory,
         string? runningVersion,
         CancellationToken cancellationToken)
@@ -447,7 +324,7 @@ internal static class AutomaticUpdateRunner
                         release.Version,
                         release.ArchiveUrl!,
                         release.ChecksumUrl!),
-                    port,
+                    installState.Port,
                     trayMode,
                     startNow: false,
                     skipSelfTest: false,
@@ -455,7 +332,7 @@ internal static class AutomaticUpdateRunner
                 () => DateTimeOffset.UtcNow);
             return await coordinator.CheckAndStageAsync(
                 runningVersion ?? ResolveRunningVersion(stateDirectory),
-                ProductVersion(installState.InstalledExecutable),
+                ResolveSelectedVersion(installState.InstalledExecutable),
                 cancellationToken);
         }
     }
@@ -488,15 +365,21 @@ internal static class AutomaticUpdateRunner
             "0.0.0";
     }
 
-    private static string ProductVersion(string executable)
+    internal static string ResolveSelectedVersion(string executable)
     {
         if (!File.Exists(executable))
         {
-            throw new FileNotFoundException(
-                "The selected Continuity supervisor executable was not found.",
-                executable);
+            return "0.0.0";
         }
-        var version = FileVersionInfo.GetVersionInfo(executable);
-        return $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}";
+        try
+        {
+            var version = FileVersionInfo.GetVersionInfo(executable);
+            return $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}";
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            return "0.0.0";
+        }
     }
 }
