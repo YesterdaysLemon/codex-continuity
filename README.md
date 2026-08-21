@@ -16,6 +16,23 @@ owned by the supervised backend and the new UI reconnects.
 · [Visit the product site](https://codex-continuity.alirezaafshan4.chatgpt.site)
 · [Read the technical evidence](REVERSE_ENGINEERING.md)
 
+## Install in one command
+
+Paste this into PowerShell. The bootstrapper downloads the stable Windows x64
+asset, verifies its published SHA-256 checksum, runs the isolated reconnect
+self-test, and installs it without restarting Codex:
+
+```powershell
+$i="$env:TEMP\codex-continuity-install.ps1"; curl.exe -fsSL https://github.com/YesterdaysLemon/codex-continuity/releases/latest/download/install.ps1 -o $i; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $i -StartNow
+```
+
+Agents and automation can inspect the exact plan without downloading or
+changing anything:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $i -Plan -Json
+```
+
 ## Why a separate executable?
 
 A plugin would share the desktop lifecycle and disappear during the same
@@ -50,9 +67,9 @@ background rather than by this tool.
 - A user-executable Codex CLI installed by the desktop app or available on
   `PATH`.
 
-## Install
+## Manual install
 
-1. Download `CodexContinuity-v0.1.0-win-x64.zip` from the
+1. Download the versioned Windows x64 ZIP from the
    [latest release](https://github.com/YesterdaysLemon/codex-continuity/releases/latest).
 2. Extract it, open PowerShell in that folder, and run:
 
@@ -72,12 +89,13 @@ background rather than by this tool.
 The status should report `ready: true` and show that task as active. From that
 point forward, newly started work belongs to the supervised backend.
 
-Installation makes four user-level changes:
+Installation makes these user-level changes:
 
 - `CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:45123`
 - `CODEX_SPARKLE_ENABLED=false`
 - a `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\CodexContinuity`
   startup entry
+- a repair/uninstall entry named **Codex Continuity** in Windows Installed Apps
 - versioned coordinator builds and owned install state under
   `%LOCALAPPDATA%\OpenAI\CodexContinuity`
 

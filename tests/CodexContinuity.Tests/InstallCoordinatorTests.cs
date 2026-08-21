@@ -29,6 +29,7 @@ public sealed class InstallCoordinatorTests : IDisposable
         Assert.Equal("ws://127.0.0.1:40000", platform.Environment[InstallCoordinator.AppServerUrlVariable]);
         Assert.Equal("true", platform.Environment[InstallCoordinator.DisableUpdaterVariable]);
         Assert.Equal("previous startup", platform.StartupCommand);
+        Assert.Null(platform.InstalledAppRegistration);
     }
 
     [Fact]
@@ -63,6 +64,11 @@ public sealed class InstallCoordinatorTests : IDisposable
         Assert.True(File.Exists(second.State.InstalledExecutable));
         Assert.Equal(first.State.InstalledExecutable, rolledBack.InstalledExecutable);
         Assert.Contains(first.State.InstalledExecutable, platform.StartupCommand);
+        Assert.Equal(
+            first.State.InstalledExecutable,
+            platform.InstalledAppRegistration?.InstallLocation is { } installLocation
+                ? Path.Combine(installLocation, "CodexContinuity.exe")
+                : null);
     }
 
     public void Dispose()
@@ -94,6 +100,7 @@ public sealed class InstallCoordinatorTests : IDisposable
     {
         internal Dictionary<string, string?> Environment { get; } = [];
         internal string? StartupCommand { get; set; }
+        internal InstalledAppRegistration? InstalledAppRegistration { get; set; }
 
         public string? GetUserEnvironmentVariable(string name) =>
             Environment.GetValueOrDefault(name);
@@ -104,6 +111,12 @@ public sealed class InstallCoordinatorTests : IDisposable
         public string? GetStartupCommand() => StartupCommand;
 
         public void SetStartupCommand(string? value) => StartupCommand = value;
+
+        public InstalledAppRegistration? GetInstalledAppRegistration() =>
+            InstalledAppRegistration;
+
+        public void SetInstalledAppRegistration(InstalledAppRegistration? registration) =>
+            InstalledAppRegistration = registration;
 
         public void BroadcastEnvironmentChange()
         {

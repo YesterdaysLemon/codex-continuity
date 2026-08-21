@@ -20,3 +20,12 @@ jobs:
       - run: dotnet build CodexContinuity.csproj --configuration Release --no-restore
       - run: dotnet test tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj --configuration Release --no-restore
       - run: dotnet run --configuration Release --no-build -- help
+      - shell: pwsh
+        run: |
+          $plan = .\install.ps1 -Plan -Json | ConvertFrom-Json
+          if ($plan.assetUrl -ne 'https://github.com/YesterdaysLemon/codex-continuity/releases/latest/download/CodexContinuity-win-x64.zip') {
+            throw "Unexpected stable asset URL: $($plan.assetUrl)"
+          }
+          if ($plan.restartsCodex) {
+            throw 'The bootstrapper must never restart Codex.'
+          }

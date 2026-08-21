@@ -8,6 +8,18 @@ namespace CodexContinuity;
 
 internal sealed record OwnedString(string? PreviousValue, string AppliedValue);
 
+internal sealed record InstalledAppRegistration(
+    string DisplayName,
+    string DisplayVersion,
+    string Publisher,
+    string InstallLocation,
+    string DisplayIcon,
+    string UninstallCommand,
+    string QuietUninstallCommand,
+    string ModifyCommand,
+    string UrlInfoAbout,
+    int EstimatedSizeKilobytes);
+
 internal sealed record InstallState(
     int SchemaVersion,
     int Port,
@@ -17,6 +29,8 @@ internal sealed record InstallState(
     OwnedString AppServerUrl,
     OwnedString UpdaterSetting,
     OwnedString StartupCommand,
+    InstalledAppRegistration? PreviousInstalledAppRegistration,
+    InstalledAppRegistration InstalledAppRegistration,
     DateTimeOffset InstalledAtUtc);
 
 internal sealed record InstallOutcome(
@@ -50,6 +64,8 @@ internal interface IInstallPlatform
     void SetUserEnvironmentVariable(string name, string? value);
     string? GetStartupCommand();
     void SetStartupCommand(string? value);
+    InstalledAppRegistration? GetInstalledAppRegistration();
+    void SetInstalledAppRegistration(InstalledAppRegistration? registration);
     void BroadcastEnvironmentChange();
 }
 
@@ -128,8 +144,10 @@ internal sealed class InstallCoordinator(
         var previousUrl = platform.GetUserEnvironmentVariable(AppServerUrlVariable);
         var previousUpdaterSetting = platform.GetUserEnvironmentVariable(DisableUpdaterVariable);
         var previousStartup = platform.GetStartupCommand();
+        var previousRegistration = platform.GetInstalledAppRegistration();
+        var registration = BuildInstalledAppRegistration(installedExecutable);
         var state = new InstallState(
-            SchemaVersion: 1,
+            SchemaVersion: 2,
             Port: port,
             InstalledExecutable: installedExecutable,
             PreviousInstalledExecutable: PreviousExecutable(
@@ -146,6 +164,11 @@ internal sealed class InstallCoordinator(
                 previousStartup,
                 previousState?.StartupCommand,
                 startupCommand),
+            PreviousInstalledAppRegistration: previousState is not null &&
+                Equals(previousRegistration, previousState.InstalledAppRegistration)
+                ? previousState.PreviousInstalledAppRegistration
+                : previousRegistration,
+            InstalledAppRegistration: registration,
             InstalledAtUtc: DateTimeOffset.UtcNow);
 
         try
@@ -155,6 +178,7 @@ internal sealed class InstallCoordinator(
                 DisableUpdaterVariable,
                 state.UpdaterSetting.AppliedValue);
             platform.SetStartupCommand(state.StartupCommand.AppliedValue);
+            platform.SetInstalledAppRegistration(registration);
             stateStore.Save(state);
             platform.BroadcastEnvironmentChange();
         }
@@ -163,6 +187,7 @@ internal sealed class InstallCoordinator(
             platform.SetUserEnvironmentVariable(AppServerUrlVariable, previousUrl);
             platform.SetUserEnvironmentVariable(DisableUpdaterVariable, previousUpdaterSetting);
             platform.SetStartupCommand(previousStartup);
+            platform.SetInstalledAppRegistration(previousRegistration);
             platform.BroadcastEnvironmentChange();
             throw;
         }
@@ -191,6 +216,10 @@ internal sealed class InstallCoordinator(
         {
             platform.SetStartupCommand(state.StartupCommand.PreviousValue);
         }
+        if (Equals(platform.GetInstalledAppRegistration(), state.InstalledAppRegistration))
+        {
+            platform.SetInstalledAppRegistration(state.PreviousInstalledAppRegistration);
+        }
 
         stateStore.Delete();
         platform.BroadcastEnvironmentChange();
@@ -215,9 +244,11 @@ internal sealed class InstallCoordinator(
             PreviousInstalledExecutable = state.InstalledExecutable,
             BinarySha256 = ComputeSha256(previousExecutable),
             StartupCommand = CaptureOwnedValue(currentStartup, state.StartupCommand, startupCommand),
+            InstalledAppRegistration = BuildInstalledAppRegistration(previousExecutable),
             InstalledAtUtc = DateTimeOffset.UtcNow,
         };
         platform.SetStartupCommand(startupCommand);
+        platform.SetInstalledAppRegistration(rolledBack.InstalledAppRegistration);
         stateStore.Save(rolledBack);
         return rolledBack;
     }
@@ -274,6 +305,13 @@ internal sealed class InstallCoordinator(
         }
 
         platform.SetStartupCommand(null);
+        var registration = platform.GetInstalledAppRegistration();
+        if (registration?.UninstallCommand.Contains(
+                "CodexContinuity",
+                StringComparison.OrdinalIgnoreCase) == true)
+        {
+            platform.SetInstalledAppRegistration(null);
+        }
         var currentUrl = platform.GetUserEnvironmentVariable(AppServerUrlVariable);
         if (Uri.TryCreate(currentUrl, UriKind.Absolute, out var uri) &&
             uri.Scheme == "ws" &&
@@ -344,6 +382,28 @@ internal sealed class InstallCoordinator(
         using var stream = File.OpenRead(path);
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
+
+    private InstalledAppRegistration BuildInstalledAppRegistration(string executable)
+    {
+        var version = typeof(InstallCoordinator).Assembly.GetName().Version;
+        var displayVersion = version is null
+            ? "development"
+            : $"{version.Major}.{version.Minor}.{version.Build}";
+        var quotedExecutable = $"\"{executable}\"";
+        return new InstalledAppRegistration(
+            DisplayName: "Codex Continuity",
+            DisplayVersion: displayVersion,
+            Publisher: "YesterdaysLemon",
+            InstallLocation: Path.GetDirectoryName(executable) ?? stateDirectory,
+            DisplayIcon: $"{quotedExecutable},0",
+            UninstallCommand: $"{quotedExecutable} uninstall",
+            QuietUninstallCommand: $"{quotedExecutable} uninstall",
+            ModifyCommand: $"{quotedExecutable} install",
+            UrlInfoAbout: "https://codex-continuity.alirezaafshan4.chatgpt.site",
+            EstimatedSizeKilobytes: checked((int)Math.Max(
+                1,
+                (new FileInfo(executable).Length + 1023) / 1024)));
+    }
 }
 
 internal static class StartupCommandBuilder
@@ -370,6 +430,8 @@ internal sealed class WindowsInstallPlatform : IInstallPlatform
 {
     private const string RunValueName = "CodexContinuity";
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string UninstallKeyPath =
+        @"Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexContinuity";
 
     public string? GetUserEnvironmentVariable(string name) =>
         Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.User);
@@ -394,6 +456,52 @@ internal sealed class WindowsInstallPlatform : IInstallPlatform
 
         using var writableRunKey = Registry.CurrentUser.CreateSubKey(RunKeyPath);
         writableRunKey.SetValue(RunValueName, value);
+    }
+
+    public InstalledAppRegistration? GetInstalledAppRegistration()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(UninstallKeyPath);
+        if (key?.GetValue("UninstallString") is not string uninstallCommand)
+        {
+            return null;
+        }
+
+        return new InstalledAppRegistration(
+            DisplayName: key.GetValue("DisplayName") as string ?? "Codex Continuity",
+            DisplayVersion: key.GetValue("DisplayVersion") as string ?? "unknown",
+            Publisher: key.GetValue("Publisher") as string ?? "unknown",
+            InstallLocation: key.GetValue("InstallLocation") as string ?? string.Empty,
+            DisplayIcon: key.GetValue("DisplayIcon") as string ?? string.Empty,
+            UninstallCommand: uninstallCommand,
+            QuietUninstallCommand: key.GetValue("QuietUninstallString") as string ?? uninstallCommand,
+            ModifyCommand: key.GetValue("ModifyPath") as string ?? string.Empty,
+            UrlInfoAbout: key.GetValue("URLInfoAbout") as string ?? string.Empty,
+            EstimatedSizeKilobytes: key.GetValue("EstimatedSize") is int estimatedSize
+                ? estimatedSize
+                : 0);
+    }
+
+    public void SetInstalledAppRegistration(InstalledAppRegistration? registration)
+    {
+        if (registration is null)
+        {
+            Registry.CurrentUser.DeleteSubKeyTree(UninstallKeyPath, throwOnMissingSubKey: false);
+            return;
+        }
+
+        using var key = Registry.CurrentUser.CreateSubKey(UninstallKeyPath);
+        key.SetValue("DisplayName", registration.DisplayName);
+        key.SetValue("DisplayVersion", registration.DisplayVersion);
+        key.SetValue("Publisher", registration.Publisher);
+        key.SetValue("InstallLocation", registration.InstallLocation);
+        key.SetValue("DisplayIcon", registration.DisplayIcon);
+        key.SetValue("UninstallString", registration.UninstallCommand);
+        key.SetValue("QuietUninstallString", registration.QuietUninstallCommand);
+        key.SetValue("ModifyPath", registration.ModifyCommand);
+        key.SetValue("URLInfoAbout", registration.UrlInfoAbout);
+        key.SetValue("EstimatedSize", registration.EstimatedSizeKilobytes, RegistryValueKind.DWord);
+        key.SetValue("NoModify", 0, RegistryValueKind.DWord);
+        key.SetValue("NoRepair", 0, RegistryValueKind.DWord);
     }
 
     public void BroadcastEnvironmentChange()
