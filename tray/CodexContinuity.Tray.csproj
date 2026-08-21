@@ -1,24 +1,21 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <AssemblyName>CodexContinuity</AssemblyName>
-    <RootNamespace>CodexContinuity</RootNamespace>
+    <AssemblyName>CodexContinuity.Tray</AssemblyName>
+    <RootNamespace>CodexContinuity.Tray</RootNamespace>
     <Version>0.2.0</Version>
     <Authors>YesterdaysLemon</Authors>
     <Company>YesterdaysLemon</Company>
     <Product>Codex Continuity</Product>
-    <AssemblyTitle>Codex Continuity Supervisor</AssemblyTitle>
+    <AssemblyTitle>Codex Continuity Tray</AssemblyTitle>
     <Copyright>Copyright © 2026 Alireza Afshan</Copyright>
-    <Description>Keep Codex agent threads alive while the Windows desktop UI updates or restarts.</Description>
+    <Description>Optional notification-area status for Codex Continuity.</Description>
     <RepositoryUrl>https://github.com/YesterdaysLemon/codex-continuity</RepositoryUrl>
-    <ApplicationIcon>assets\CodexContinuity.ico</ApplicationIcon>
+    <ApplicationIcon>..\assets\CodexContinuity.ico</ApplicationIcon>
   </PropertyGroup>
-  <ItemGroup>
-    <Compile Remove="tests\**\*.cs" />
-    <Compile Remove="tray\**\*.cs" />
-  </ItemGroup>
 </Project>

@@ -1,30 +1,27 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.WebSockets;
-using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Microsoft.Win32;
 
 namespace CodexContinuity;
 
 internal static class Program
 {
-    private const int DefaultPort = 45123;
-    private const string RunValueName = "CodexContinuity";
-    private const string AppServerUrlVariable = "CODEX_APP_SERVER_WS_URL";
-    private const string DisableUpdaterVariable = "CODEX_SPARKLE_ENABLED";
+    private const int DefaultPort = LoopbackEndpoint.DefaultPort;
     private const string UpdateManifestUrl =
         "https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json";
-    private static readonly SemaphoreSlim LogLock = new(1, 1);
 
     public static async Task<int> Main(string[] args)
     {
         try
         {
-            var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "help";
+            var setupExecutable = Environment.ProcessPath is { } processPath &&
+                Path.GetFileNameWithoutExtension(processPath).EndsWith(
+                    "Setup",
+                    StringComparison.OrdinalIgnoreCase);
+            var command = ResolveCommand(setupExecutable, args);
             var port = ParsePort(args) ?? DefaultPort;
             return command switch
             {
@@ -32,8 +29,30 @@ internal static class Program
                 "probe" => await ProbeAsync(port),
                 "status" => await PrintStatusAsync(port),
                 "serve" => await ServeAsync(port),
-                "install" => Install(port, args.Contains("--start-now", StringComparer.OrdinalIgnoreCase)),
-                "uninstall" => Uninstall(port),
+                "install" => await InstallAsync(
+                    port,
+                    args.Contains("--start-now", StringComparer.OrdinalIgnoreCase),
+                    args.Contains("--no-tray", StringComparer.OrdinalIgnoreCase)
+                        ? TrayInstallMode.Disabled
+                        : TrayInstallMode.Enabled),
+                "repair" => await RepairAsync(
+                    args.Contains("--start-now", StringComparer.OrdinalIgnoreCase)),
+                "uninstall" => Uninstall(),
+                "rollback" => Rollback(),
+                "setup" when args.Contains(
+                    "--uninstall",
+                    StringComparer.OrdinalIgnoreCase) => Uninstall(),
+                "setup" => await BootstrapInstaller.RunAsync(
+                    port,
+                    args.Contains("--no-tray", StringComparer.OrdinalIgnoreCase)
+                        ? TrayInstallMode.Disabled
+                        : TrayInstallMode.Enabled,
+                    startNow: !args.Contains("--no-start", StringComparer.OrdinalIgnoreCase),
+                    skipSelfTest: args.Contains(
+                        "--skip-self-test",
+                        StringComparer.OrdinalIgnoreCase),
+                    quiet: args.Contains("--silent", StringComparer.OrdinalIgnoreCase),
+                    DownloadBaseUrl(args)),
                 "self-test" => await SelfTestAsync(),
                 _ => Fail($"Unknown command '{command}'. Run 'CodexContinuity help'."),
             };
@@ -43,6 +62,19 @@ internal static class Program
             Console.Error.WriteLine($"Codex Continuity: {exception.Message}");
             return 1;
         }
+    }
+
+    internal static string ResolveCommand(bool setupExecutable, string[] args)
+    {
+        var firstArgument = args.FirstOrDefault()?.ToLowerInvariant();
+        if (firstArgument is "--help" or "-h" or "help")
+        {
+            return "help";
+        }
+        return setupExecutable &&
+            (firstArgument is null || firstArgument.StartsWith("--", StringComparison.Ordinal))
+                ? "setup"
+                : firstArgument ?? "help";
     }
 
     private static int PrintHelp()
@@ -56,12 +88,20 @@ internal static class Program
               status      Check backend health and count active threads.
               serve       Supervise a loopback WebSocket app-server.
               install     Configure future desktop launches and start at user logon.
+              repair      Reapply the persisted port and tray choices without restarting agents.
               uninstall   Remove the user-level launch and environment configuration.
+              rollback    Stage the previous known-good build for the next safe start.
+              setup       Download, verify, self-test, and install the matching release bundle.
               self-test   Prove reconnect and persisted-thread behavior in an isolated Codex home.
 
             Options:
               --port N       Loopback port (default: 45123).
               --start-now    With install, start the supervisor without touching the desktop app.
+              --no-tray      With install, omit the disposable notification-area controller.
+              --no-start     With setup, configure startup without launching the supervisor now.
+              --silent       With setup, suppress progress output for unattended installation.
+              --skip-self-test  With setup, omit the isolated reconnect proof.
+              --uninstall   With setup, remove future-launch configuration without stopping agents.
 
             Installation never closes or restarts the running Codex desktop app.
             """);
@@ -77,15 +117,31 @@ internal static class Program
                 continue;
             }
 
-            if (index + 1 >= args.Length || !int.TryParse(args[index + 1], out var port) ||
-                port is < IPEndPoint.MinPort or > IPEndPoint.MaxPort)
+            if (index + 1 >= args.Length || !int.TryParse(args[index + 1], out var port))
             {
                 throw new ArgumentException("--port requires a valid TCP port.");
             }
-
+            LoopbackEndpoint.ValidatePort(port);
             return port;
         }
 
+        return null;
+    }
+
+    private static string? DownloadBaseUrl(string[] args)
+    {
+        for (var index = 0; index < args.Length; index++)
+        {
+            if (!args[index].Equals("--download-base-url", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            if (index + 1 >= args.Length)
+            {
+                throw new ArgumentException("--download-base-url requires a URL.");
+            }
+            return args[index + 1];
+        }
         return null;
     }
 
@@ -95,12 +151,15 @@ internal static class Program
         var package = await ReadInstalledPackageAsync();
         var manifest = await ReadUpdateManifestAsync();
         var configuredUrl = Environment.GetEnvironmentVariable(
-            AppServerUrlVariable,
+            InstallCoordinator.AppServerUrlVariable,
             EnvironmentVariableTarget.User);
         var updaterDisabled = Environment.GetEnvironmentVariable(
-            DisableUpdaterVariable,
+            InstallCoordinator.DisableUpdaterVariable,
             EnvironmentVariableTarget.User);
         var healthy = await IsReadyAsync(port, TimeSpan.FromSeconds(1));
+        var stateDirectory = ContinuityPaths.StateDirectory;
+        var installState = new InstallStateStore(
+            ContinuityPaths.InstallStateFile(stateDirectory)).Load();
 
         var result = new JsonObject
         {
@@ -113,7 +172,10 @@ internal static class Program
             ["appServerUrlForFutureLaunches"] = configuredUrl,
             ["inAppUpdaterDisabledForFutureLaunches"] = updaterDisabled == "false",
             ["continuityBackendReady"] = healthy,
-            ["continuityBackendUrl"] = WebSocketUrl(port),
+            ["continuityBackendUrl"] = LoopbackEndpoint.WebSocketUrl(port),
+            ["continuityInstallState"] = installState is null
+                ? null
+                : JsonSerializer.SerializeToNode(installState, JsonOptions),
         };
         Console.WriteLine(result.ToJsonString(JsonOptions));
         return 0;
@@ -123,10 +185,10 @@ internal static class Program
     {
         if (!await IsReadyAsync(port, TimeSpan.FromSeconds(2)))
         {
-            return Fail($"No ready continuity backend at {WebSocketUrl(port)}.");
+            return Fail($"No ready continuity backend at {LoopbackEndpoint.WebSocketUrl(port)}.");
         }
 
-        await using var client = await RpcClient.ConnectAsync(WebSocketUrl(port));
+        await using var client = await RpcClient.ConnectAsync(LoopbackEndpoint.WebSocketUrl(port));
         var threads = await client.ListThreadsAsync();
         var active = threads.Where(thread =>
             string.Equals(thread.Status, "active", StringComparison.OrdinalIgnoreCase)).ToList();
@@ -141,12 +203,19 @@ internal static class Program
                 ["name"] = thread.Name,
                 ["status"] = thread.Status,
             }).ToArray()),
+            ["supervisor"] = JsonSerializer.SerializeToNode(
+                new SupervisorStatusStore(ContinuityPaths.SupervisorStatusFile(
+                    ContinuityPaths.StateDirectory)).Read(),
+                JsonOptions),
         };
         Console.WriteLine(result.ToJsonString(JsonOptions));
         return 0;
     }
 
-    private static async Task<int> ServeAsync(int port)
+    private static Task<int> ServeAsync(int port) =>
+        ServeAsync(port, ContinuityPaths.StateDirectory);
+
+    internal static async Task<int> ServeAsync(int port, string stateDirectory)
     {
         using var mutex = new Mutex(
             initiallyOwned: true,
@@ -164,23 +233,39 @@ internal static class Program
             shutdown.Cancel();
         };
 
-        var stateDirectory = GetStateDirectory();
         Directory.CreateDirectory(stateDirectory);
-        var logPath = Path.Combine(stateDirectory, "app-server.log");
-        Console.WriteLine($"Supervising {WebSocketUrl(port)} with logs at {logPath}");
+        var logPath = ContinuityPaths.AppServerLogFile(stateDirectory);
+        var logWriter = new RollingLogWriter(logPath);
+        var statusStore = new SupervisorStatusStore(
+            ContinuityPaths.SupervisorStatusFile(stateDirectory));
+        var backoff = new RestartBackoffPolicy();
+        var codexHome = FutureProcessEnvironment.ResolveCodexHome();
+        var consecutiveFailures = 0;
+        Console.WriteLine(
+            $"Supervising {LoopbackEndpoint.WebSocketUrl(port)} with logs at {logPath}");
 
         while (!shutdown.IsCancellationRequested)
         {
             if (await IsReadyAsync(port, TimeSpan.FromMilliseconds(500)))
             {
-                Console.WriteLine("Another ready app-server already owns the configured port.");
-                return 0;
+                statusStore.Write(NewSupervisorStatus(
+                    "foreignEndpoint",
+                    port,
+                    codexHome,
+                    backendProcessId: null,
+                    consecutiveFailures,
+                    lastExitCode: null,
+                    nextRetryAtUtc: null,
+                    "An endpoint not owned by this supervisor already uses the configured port."));
+                return Fail(
+                    "The configured loopback port is already owned by another endpoint; refusing to adopt its thread store.");
             }
 
-            var codexPath = FindCodexExecutable();
+            var codexPath = FindCodexExecutable(persistedEnvironmentOnly: true);
             using var process = StartAppServer(codexPath, port);
-            var stdout = PumpLogAsync(process.StandardOutput, logPath, shutdown.Token);
-            var stderr = PumpLogAsync(process.StandardError, logPath, shutdown.Token);
+            var startedAt = DateTimeOffset.UtcNow;
+            var stdout = PumpLogAsync(process.StandardOutput, logWriter, shutdown.Token);
+            var stderr = PumpLogAsync(process.StandardError, logWriter, shutdown.Token);
 
             if (!await WaitUntilReadyAsync(port, process, TimeSpan.FromSeconds(20), shutdown.Token))
             {
@@ -188,36 +273,107 @@ internal static class Program
                 {
                     process.Kill(entireProcessTree: true);
                 }
-                throw new InvalidOperationException($"App-server did not become ready. See {logPath}.");
+                await process.WaitForExitAsync();
             }
-
-            Console.WriteLine($"Continuity backend ready (PID {process.Id}).");
-            try
+            else
             {
-                await process.WaitForExitAsync(shutdown.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                if (!process.HasExited)
+                statusStore.Write(NewSupervisorStatus(
+                    "running",
+                    port,
+                    codexHome,
+                    process.Id,
+                    consecutiveFailures,
+                    lastExitCode: null,
+                    nextRetryAtUtc: null,
+                    $"Listening on {LoopbackEndpoint.WebSocketUrl(port)}"));
+                Console.WriteLine($"Continuity backend ready (PID {process.Id}).");
+                try
                 {
-                    process.Kill(entireProcessTree: true);
-                    await process.WaitForExitAsync();
+                    await process.WaitForExitAsync(shutdown.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    if (!process.HasExited)
+                    {
+                        process.Kill(entireProcessTree: true);
+                        await process.WaitForExitAsync();
+                    }
                 }
             }
 
-            await Task.WhenAll(stdout, stderr);
+            await AwaitLogPumpsAsync(stdout, stderr);
             if (!shutdown.IsCancellationRequested)
             {
+                var uptime = DateTimeOffset.UtcNow - startedAt;
+                consecutiveFailures = uptime >= TimeSpan.FromMinutes(2)
+                    ? 1
+                    : consecutiveFailures + 1;
+                var delay = backoff.DelayForFailure(
+                    consecutiveFailures,
+                    Random.Shared.NextDouble());
+                var nextRetryAt = DateTimeOffset.UtcNow + delay;
+                statusStore.Write(NewSupervisorStatus(
+                    "backingOff",
+                    port,
+                    codexHome,
+                    backendProcessId: null,
+                    consecutiveFailures,
+                    process.ExitCode,
+                    nextRetryAt,
+                    $"App-server exited after {uptime}."));
                 Console.Error.WriteLine(
-                    $"App-server exited with code {process.ExitCode}; restarting in 2 seconds.");
-                await Task.Delay(TimeSpan.FromSeconds(2), shutdown.Token);
+                    $"App-server exited with code {process.ExitCode}; restarting in {delay.TotalSeconds:F1} seconds.");
+                await Task.Delay(delay, shutdown.Token);
             }
         }
 
+        statusStore.Write(NewSupervisorStatus(
+            "stopped",
+            port,
+            codexHome,
+            backendProcessId: null,
+            consecutiveFailures,
+            lastExitCode: null,
+            nextRetryAtUtc: null,
+            "Supervisor stopped without changing future-launch configuration."));
         return 0;
     }
 
-    private static int Install(int port, bool startNow)
+    private static SupervisorStatus NewSupervisorStatus(
+        string state,
+        int port,
+        string codexHome,
+        int? backendProcessId,
+        int consecutiveFailures,
+        int? lastExitCode,
+        DateTimeOffset? nextRetryAtUtc,
+        string? detail) => new(
+            state,
+            Environment.ProcessId,
+            backendProcessId,
+            port,
+            codexHome,
+            consecutiveFailures,
+            lastExitCode,
+            DateTimeOffset.UtcNow,
+            nextRetryAtUtc,
+            detail);
+
+    private static async Task AwaitLogPumpsAsync(params Task[] pumps)
+    {
+        try
+        {
+            await Task.WhenAll(pumps);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private static async Task<int> InstallAsync(
+        int port,
+        bool startNow,
+        TrayInstallMode trayInstallMode)
     {
         var executable = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(executable) ||
@@ -228,94 +384,119 @@ internal static class Program
                 "Run install from the published CodexContinuity executable, not through dotnet run.");
         }
 
-        var stateDirectory = GetStateDirectory();
-        Directory.CreateDirectory(stateDirectory);
-        var installedExecutable = Path.Combine(stateDirectory, "CodexContinuity.exe");
-        if (!Path.GetFullPath(executable).Equals(
-                Path.GetFullPath(installedExecutable),
-                StringComparison.OrdinalIgnoreCase))
+        var stateDirectory = ContinuityPaths.StateDirectory;
+        var coordinator = CreateInstallCoordinator(stateDirectory);
+        var endpointOwnership = ExistingEndpointOwnership.NotReady;
+        if (startNow && await IsReadyAsync(port, TimeSpan.FromSeconds(1)))
         {
-            if (!File.Exists(installedExecutable) ||
-                !FilesHaveSameContent(executable, installedExecutable))
-            {
-                File.Copy(executable, installedExecutable, overwrite: true);
-            }
+            endpointOwnership = await IsManagedEndpointReadyAsync(port)
+                ? ExistingEndpointOwnership.Managed
+                : coordinator.DetectLegacyInstalledPort() == port
+                    ? ExistingEndpointOwnership.Legacy
+                    : ExistingEndpointOwnership.Foreign;
         }
-
-        var serverUrl = WebSocketUrl(port);
-        Environment.SetEnvironmentVariable(
-            AppServerUrlVariable,
-            serverUrl,
-            EnvironmentVariableTarget.User);
-        Environment.SetEnvironmentVariable(
-            DisableUpdaterVariable,
-            "false",
-            EnvironmentVariableTarget.User);
-
-        using (var runKey = Registry.CurrentUser.CreateSubKey(
-                   @"Software\Microsoft\Windows\CurrentVersion\Run"))
-        {
-            runKey.SetValue(RunValueName, BuildHiddenLaunchCommand(installedExecutable, port));
-        }
-
-        BroadcastEnvironmentChange();
-        Console.WriteLine($"Configured future Codex desktop launches to use {serverUrl}.");
+        var outcome = coordinator.Install(executable, port, trayInstallMode, endpointOwnership);
+        var state = outcome.State;
+        Console.WriteLine(
+            $"Configured future Codex desktop launches to use {state.AppServerUrl.AppliedValue}.");
         Console.WriteLine("Disabled the desktop's in-app updater for future launches.");
         Console.WriteLine("Registered the continuity supervisor to start at user logon.");
-        Console.WriteLine($"Installed the coordinator at {installedExecutable}.");
+        Console.WriteLine(state.InstalledTrayExecutable is null
+            ? "Left the optional notification-area controller disabled."
+            : "Registered the disposable notification-area controller to start at user logon.");
+        Console.WriteLine($"Staged the coordinator at {state.InstalledExecutable}.");
         Console.WriteLine("The currently running Codex desktop process was not changed or restarted.");
+        if (outcome.StagedUpgrade)
+        {
+            Console.WriteLine(
+                "The new build is staged for the next safe supervisor start; the previous build remains available for rollback.");
+        }
 
         if (startNow)
         {
-            var startInfo = new ProcessStartInfo(installedExecutable)
+            if ((endpointOwnership is ExistingEndpointOwnership.Managed or
+                    ExistingEndpointOwnership.Legacy) &&
+                await IsReadyAsync(port, TimeSpan.FromSeconds(1)))
             {
-                UseShellExecute = true,
-                WindowStyle = ProcessWindowStyle.Hidden,
-                WorkingDirectory = stateDirectory,
-            };
-            startInfo.ArgumentList.Add("serve");
-            startInfo.ArgumentList.Add("--port");
-            startInfo.ArgumentList.Add(port.ToString());
-            Process.Start(startInfo);
-            Console.WriteLine("Started the continuity supervisor in the background.");
+                Console.WriteLine(endpointOwnership == ExistingEndpointOwnership.Managed
+                    ? "The running Continuity backend already owns the configured endpoint; it was left untouched."
+                    : "The running v0.1 Continuity backend was left untouched; v0.2 is staged for the next safe start.");
+            }
+            else
+            {
+                using var process = StartSupervisor(state.InstalledExecutable, state.Port);
+                if (!await WaitUntilManagedSupervisorReadyAsync(
+                        state.Port,
+                        process,
+                        TimeSpan.FromSeconds(20),
+                        CancellationToken.None))
+                {
+                    throw new InvalidOperationException(
+                        process.HasExited
+                            ? $"Continuity supervisor exited with code {process.ExitCode}."
+                            : "Continuity supervisor did not become ready within 20 seconds.");
+                }
+                Console.WriteLine(
+                    $"Started the continuity supervisor in the background (PID {process.Id}).");
+            }
+
+            if (state.InstalledTrayExecutable is not null)
+            {
+                using var trayProcess = StartTray(state.InstalledTrayExecutable);
+                Console.WriteLine(
+                    $"Started the optional notification-area controller (PID {trayProcess.Id}).");
+            }
         }
 
         return 0;
     }
 
-    private static int Uninstall(int port)
+    private static int Uninstall()
     {
-        using (var runKey = Registry.CurrentUser.OpenSubKey(
-                   @"Software\Microsoft\Windows\CurrentVersion\Run",
-                   writable: true))
-        {
-            runKey?.DeleteValue(RunValueName, throwOnMissingValue: false);
-        }
+        var removed = CreateInstallCoordinator(ContinuityPaths.StateDirectory).Uninstall();
+        Console.WriteLine(removed
+            ? "Removed owned future-launch configuration. No running process was stopped."
+            : "No owned future-launch configuration was found. No running process was stopped.");
+        return removed ? 0 : 1;
+    }
 
-        var expectedUrl = WebSocketUrl(port);
-        if (Environment.GetEnvironmentVariable(
-                AppServerUrlVariable,
-                EnvironmentVariableTarget.User) == expectedUrl)
-        {
-            Environment.SetEnvironmentVariable(
-                AppServerUrlVariable,
-                null,
-                EnvironmentVariableTarget.User);
-        }
-        if (Environment.GetEnvironmentVariable(
-                DisableUpdaterVariable,
-                EnvironmentVariableTarget.User) == "false")
-        {
-            Environment.SetEnvironmentVariable(
-                DisableUpdaterVariable,
-                null,
-                EnvironmentVariableTarget.User);
-        }
+    private static async Task<int> RepairAsync(bool startNow)
+    {
+        var state = new InstallStateStore(
+            ContinuityPaths.InstallStateFile(ContinuityPaths.StateDirectory)).Load()
+            ?? throw new InvalidOperationException("No installed Continuity state is available.");
+        return await InstallAsync(
+            state.Port,
+            startNow,
+            state.InstalledTrayExecutable is null
+                ? TrayInstallMode.Disabled
+                : TrayInstallMode.Enabled);
+    }
 
-        BroadcastEnvironmentChange();
-        Console.WriteLine("Removed future-launch configuration. No running process was stopped.");
+    private static int Rollback()
+    {
+        var state = CreateInstallCoordinator(ContinuityPaths.StateDirectory).Rollback();
+        Console.WriteLine($"Staged previous build for the next safe start: {state.InstalledExecutable}");
+        Console.WriteLine("The currently running supervisor and active agents were not changed.");
         return 0;
     }
+
+    private static InstallCoordinator CreateInstallCoordinator(string stateDirectory) => new(
+        stateDirectory,
+        new WindowsInstallPlatform(),
+        new InstallStateStore(ContinuityPaths.InstallStateFile(stateDirectory)));
+
+    private static Process StartSupervisor(string executable, int port)
+        => DetachedProcessLauncher.Start(
+            executable,
+            ["serve", "--port", port.ToString()],
+            Path.GetDirectoryName(executable) ?? ContinuityPaths.StateDirectory);
+
+    private static Process StartTray(string executable)
+        => DetachedProcessLauncher.Start(
+            executable,
+            [],
+            Path.GetDirectoryName(executable) ?? ContinuityPaths.StateDirectory);
 
     private static async Task<int> SelfTestAsync()
     {
@@ -344,7 +525,8 @@ internal static class Program
             }
 
             string threadId;
-            await using (var firstConnection = await RpcClient.ConnectAsync(WebSocketUrl(port)))
+            await using (var firstConnection = await RpcClient.ConnectAsync(
+                             LoopbackEndpoint.WebSocketUrl(port)))
             {
                 var response = await firstConnection.RequestAsync("thread/start", new JsonObject
                 {
@@ -361,7 +543,8 @@ internal static class Program
                         $"thread/start returned no thread id: {response.ToJsonString()}");
             }
 
-            await using (var secondConnection = await RpcClient.ConnectAsync(WebSocketUrl(port)))
+            await using (var secondConnection = await RpcClient.ConnectAsync(
+                             LoopbackEndpoint.WebSocketUrl(port)))
             {
                 var response = await secondConnection.RequestAsync(
                     "thread/loaded/list",
@@ -418,11 +601,12 @@ internal static class Program
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
+        FutureProcessEnvironment.ApplyTo(startInfo);
         startInfo.ArgumentList.Add("-c");
         startInfo.ArgumentList.Add("features.code_mode_host=true");
         startInfo.ArgumentList.Add("app-server");
         startInfo.ArgumentList.Add("--listen");
-        startInfo.ArgumentList.Add(WebSocketUrl(port));
+        startInfo.ArgumentList.Add(LoopbackEndpoint.WebSocketUrl(port));
         startInfo.ArgumentList.Add("--analytics-default-enabled");
         if (codexHome is not null)
         {
@@ -451,12 +635,85 @@ internal static class Program
         return false;
     }
 
+    private static async Task<bool> WaitUntilManagedSupervisorReadyAsync(
+        int port,
+        Process supervisor,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline &&
+               !supervisor.HasExited &&
+               !cancellationToken.IsCancellationRequested)
+        {
+            if (await IsManagedEndpointReadyAsync(port, supervisor.Id))
+            {
+                return true;
+            }
+            await Task.Delay(100, cancellationToken);
+        }
+        return false;
+    }
+
+    private static async Task<bool> IsManagedEndpointReadyAsync(
+        int port,
+        int? expectedSupervisorProcessId = null)
+    {
+        if (!await IsReadyAsync(port, TimeSpan.FromMilliseconds(500)))
+        {
+            return false;
+        }
+
+        var status = new SupervisorStatusStore(ContinuityPaths.SupervisorStatusFile(
+            ContinuityPaths.StateDirectory)).Read();
+        if (status is null ||
+            status.State != "running" ||
+            status.Port != port ||
+            status.BackendProcessId is null ||
+            (expectedSupervisorProcessId is not null &&
+             status.SupervisorProcessId != expectedSupervisorProcessId) ||
+            !ProcessIsRunning(status.SupervisorProcessId) ||
+            !ProcessIsRunning(status.BackendProcessId.Value))
+        {
+            return false;
+        }
+
+        try
+        {
+            return status.CodexHome is not null && Path.GetFullPath(status.CodexHome).Equals(
+                Path.GetFullPath(FutureProcessEnvironment.ResolveCodexHome()),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    private static bool ProcessIsRunning(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
     private static async Task<bool> IsReadyAsync(int port, TimeSpan timeout)
     {
         using var client = new HttpClient { Timeout = timeout };
         try
         {
-            using var response = await client.GetAsync($"http://127.0.0.1:{port}/readyz");
+            using var response = await client.GetAsync(LoopbackEndpoint.ReadyUrl(port));
             return response.IsSuccessStatusCode;
         }
         catch (HttpRequestException)
@@ -471,35 +728,34 @@ internal static class Program
 
     private static async Task PumpLogAsync(
         StreamReader reader,
-        string logPath,
+        RollingLogWriter logWriter,
         CancellationToken cancellationToken)
     {
-        while (!cancellationToken.IsCancellationRequested)
+        try
         {
-            var line = await reader.ReadLineAsync(cancellationToken);
-            if (line is null)
+            while (!cancellationToken.IsCancellationRequested)
             {
-                break;
+                var line = await reader.ReadLineAsync(cancellationToken);
+                if (line is null)
+                {
+                    break;
+                }
+                await logWriter.AppendLineAsync(line, cancellationToken);
             }
-
-            await LogLock.WaitAsync(cancellationToken);
-            try
-            {
-                await File.AppendAllTextAsync(
-                    logPath,
-                    $"{DateTimeOffset.UtcNow:O} {line}{Environment.NewLine}",
-                    cancellationToken);
-            }
-            finally
-            {
-                LogLock.Release();
-            }
+        }
+        catch (OperationCanceledException)
+        {
         }
     }
 
-    private static string FindCodexExecutable()
+    private static string FindCodexExecutable(bool persistedEnvironmentOnly = false)
     {
-        var explicitPath = Environment.GetEnvironmentVariable("CODEX_CONTINUITY_CODEX_PATH");
+        var persistedEnvironment = persistedEnvironmentOnly
+            ? FutureProcessEnvironment.Snapshot()
+            : null;
+        var explicitPath = persistedEnvironment is null
+            ? Environment.GetEnvironmentVariable("CODEX_CONTINUITY_CODEX_PATH")
+            : persistedEnvironment.GetValueOrDefault("CODEX_CONTINUITY_CODEX_PATH");
         if (File.Exists(explicitPath))
         {
             return Path.GetFullPath(explicitPath);
@@ -516,7 +772,9 @@ internal static class Program
                 SearchOption.AllDirectories));
         }
 
-        var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+        var path = persistedEnvironment is null
+            ? Environment.GetEnvironmentVariable("PATH") ?? string.Empty
+            : persistedEnvironment.GetValueOrDefault("PATH") ?? string.Empty;
         candidates.AddRange(path.Split(Path.PathSeparator)
             .Where(Directory.Exists)
             .Select(directory => Path.Combine(directory, "codex.exe"))
@@ -570,13 +828,6 @@ internal static class Program
             : 0;
     }
 
-    private static bool FilesHaveSameContent(string first, string second)
-    {
-        using var firstStream = File.OpenRead(first);
-        using var secondStream = File.OpenRead(second);
-        return SHA256.HashData(firstStream).AsSpan().SequenceEqual(SHA256.HashData(secondStream));
-    }
-
     private static async Task<ProcessResult> RunProcessAsync(
         string executable,
         params string[] arguments)
@@ -606,30 +857,6 @@ internal static class Program
         using var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         return ((IPEndPoint)listener.LocalEndpoint).Port;
-    }
-
-    private static string WebSocketUrl(int port) => $"ws://127.0.0.1:{port}";
-
-    private static string GetStateDirectory() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "OpenAI",
-        "CodexContinuity");
-
-    private static string BuildHiddenLaunchCommand(string executable, int port)
-    {
-        var escapedExecutable = executable.Replace("'", "''", StringComparison.Ordinal);
-        var escapedWorkingDirectory = (Path.GetDirectoryName(executable) ?? GetStateDirectory())
-            .Replace("'", "''", StringComparison.Ordinal);
-        var powershell = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
-            "System32",
-            "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe");
-        return $"\"{powershell}\" -NoProfile -WindowStyle Hidden -Command " +
-               $"\"Start-Process -WindowStyle Hidden -FilePath '{escapedExecutable}' " +
-               $"-WorkingDirectory '{escapedWorkingDirectory}' " +
-               $"-ArgumentList 'serve','--port','{port}'\"";
     }
 
     private static async Task DeleteSelfTestDirectoryAsync(string path)
@@ -667,28 +894,12 @@ internal static class Program
         return 1;
     }
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern IntPtr SendMessageTimeout(
-        IntPtr window,
-        uint message,
-        UIntPtr wParam,
-        string lParam,
-        uint flags,
-        uint timeout,
-        out UIntPtr result);
-
-    private static void BroadcastEnvironmentChange()
+    private static string ProductVersion()
     {
-        const uint wmSettingChange = 0x001A;
-        const uint abortIfHung = 0x0002;
-        _ = SendMessageTimeout(
-            new IntPtr(0xffff),
-            wmSettingChange,
-            UIntPtr.Zero,
-            "Environment",
-            abortIfHung,
-            5000,
-            out _);
+        var version = typeof(Program).Assembly.GetName().Version;
+        return version is null
+            ? "development"
+            : $"{version.Major}.{version.Minor}.{version.Build}";
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -719,7 +930,7 @@ internal static class Program
                 {
                     ["name"] = "codex_continuity",
                     ["title"] = "Codex Continuity",
-                    ["version"] = "0.1.0",
+                    ["version"] = ProductVersion(),
                 },
                 ["capabilities"] = new JsonObject(),
             });

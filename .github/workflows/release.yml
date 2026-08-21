@@ -7,22 +7,64 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 jobs:
   release:
+    env:
+      SIGNING_CONFIGURED: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 != '' }}
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
-      - run: dotnet restore
-      - run: dotnet build --configuration Release --no-restore
+      - run: dotnet restore tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj
+      - name: Verify release version
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+            throw "Release tag must use vX.Y.Z syntax: $tag"
+          }
+          $tagVersion = $Matches.version
+          $supervisorVersion = ([xml](Get-Content CodexContinuity.csproj -Raw)).Project.PropertyGroup.Version
+          $trayVersion = ([xml](Get-Content tray/CodexContinuity.Tray.csproj -Raw)).Project.PropertyGroup.Version
+          if ($tagVersion -ne $supervisorVersion -or $tagVersion -ne $trayVersion) {
+            throw "Release version mismatch: tag=$tagVersion supervisor=$supervisorVersion tray=$trayVersion"
+          }
+      - run: dotnet build CodexContinuity.csproj --configuration Release --no-restore
+      - run: dotnet test tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj --configuration Release --no-restore
       - name: Publish single-file executable
         run: >-
           dotnet publish CodexContinuity.csproj --configuration Release
           --runtime win-x64 --self-contained true
-          -p:PublishSingleFile=true --output publish
+          -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
+          --output publish
+      - name: Publish notification-area controller
+        run: >-
+          dotnet publish tray/CodexContinuity.Tray.csproj --configuration Release
+          --runtime win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
+          --output publish-tray
+      - name: Sign release executables
+        if: env.SIGNING_CONFIGURED == 'true'
+        shell: pwsh
+        env:
+          CONTINUITY_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          CONTINUITY_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: .\scripts\sign-release.ps1 -Paths publish/CodexContinuity.exe,publish-tray/CodexContinuity.Tray.exe
+      - name: Verify release signing policy
+        shell: pwsh
+        run: |
+          if ($env:SIGNING_CONFIGURED -eq 'true') {
+            .\scripts\sign-release.ps1 -Paths publish/CodexContinuity.exe,publish-tray/CodexContinuity.Tray.exe -VerifyOnly
+          } else {
+            Write-Warning 'Authenticode certificate is not configured; release artifacts will be unsigned.'
+            .\scripts\sign-release.ps1 -Paths publish/CodexContinuity.exe,publish-tray/CodexContinuity.Tray.exe -VerifyOnly -AllowUnsigned
+          }
       - name: Package release
         shell: pwsh
         run: |
@@ -30,10 +72,39 @@ jobs:
           $folder = "CodexContinuity-$tag-win-x64"
           New-Item -ItemType Directory -Path "release/$folder" | Out-Null
           Copy-Item publish/CodexContinuity.exe "release/$folder/"
+          Copy-Item publish-tray/CodexContinuity.Tray.exe "release/$folder/"
           Copy-Item README.md,LICENSE,SECURITY.md "release/$folder/"
           Compress-Archive -Path "release/$folder" -DestinationPath "release/$folder.zip"
           $hash = (Get-FileHash "release/$folder.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $folder.zip" | Set-Content "release/$folder.zip.sha256"
+          Copy-Item "release/$folder.zip" "release/CodexContinuity-win-x64.zip"
+          $stableHash = (Get-FileHash "release/CodexContinuity-win-x64.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$stableHash  CodexContinuity-win-x64.zip" | Set-Content "release/CodexContinuity-win-x64.zip.sha256"
+          Copy-Item publish/CodexContinuity.exe "release/CodexContinuity-$tag-Setup.exe"
+          $setupHash = (Get-FileHash "release/CodexContinuity-$tag-Setup.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$setupHash  CodexContinuity-$tag-Setup.exe" | Set-Content "release/CodexContinuity-$tag-Setup.exe.sha256"
+          Copy-Item "release/CodexContinuity-$tag-Setup.exe" "release/CodexContinuity-Setup.exe"
+          "$setupHash  CodexContinuity-Setup.exe" | Set-Content "release/CodexContinuity-Setup.exe.sha256"
+          $version = $tag.TrimStart('v')
+          $installerUrl = "https://github.com/YesterdaysLemon/codex-continuity/releases/download/$tag/CodexContinuity-$tag-Setup.exe"
+          .\scripts\write-winget-manifests.ps1 -Version $version -InstallerUrl $installerUrl -InstallerSha256 $setupHash -ReleaseDate (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd') -OutputDirectory release/winget
+          winget --version
+          $validationOutput = winget validate --manifest release/winget --disable-interactivity 2>&1
+          $validationExitCode = $LASTEXITCODE
+          $validationOutput | Write-Host
+          $validationText = $validationOutput -join "`n"
+          if ($validationExitCode -ne 0 -and $validationText -notmatch 'Manifest validation succeeded') {
+            throw "WinGet manifest validation failed with exit code $validationExitCode."
+          }
+          $global:LASTEXITCODE = 0
+          Compress-Archive -Path release/winget/* -DestinationPath "release/CodexContinuity-$tag-winget-manifests.zip"
+      - name: Attest release provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            release/*.exe
+            release/*.zip
+            release/*.sha256
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -41,4 +112,12 @@ jobs:
           gh release create "${{ github.ref_name }}"
           "release/CodexContinuity-${{ github.ref_name }}-win-x64.zip"
           "release/CodexContinuity-${{ github.ref_name }}-win-x64.zip.sha256"
+          "release/CodexContinuity-win-x64.zip"
+          "release/CodexContinuity-win-x64.zip.sha256"
+          "release/CodexContinuity-${{ github.ref_name }}-Setup.exe"
+          "release/CodexContinuity-${{ github.ref_name }}-Setup.exe.sha256"
+          "release/CodexContinuity-Setup.exe"
+          "release/CodexContinuity-Setup.exe.sha256"
+          "release/CodexContinuity-${{ github.ref_name }}-winget-manifests.zip"
+          "install.ps1"
           --generate-notes --title "Codex Continuity ${{ github.ref_name }}"

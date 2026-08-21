@@ -1,3 +1,5 @@
+import CopyInstallCommand from "./CopyInstallCommand";
+
 export default function Home() {
   return (
     <main>
@@ -160,11 +162,11 @@ export default function Home() {
       <section className="section install-section" id="install">
         <div className="install-copy">
           <span className="section-number">02 / INSTALL</span>
-          <h2>Two commands.<br />One clean restart.</h2>
+          <h2>One command.<br />Zero interrupted agents.</h2>
           <p>
-            Run the isolated proof first. Then install the supervisor. Let any
-            old work finish, restart Codex once, and future threads belong to
-            the continuity backend.
+            The bootstrapper verifies the release checksum, proves reconnect
+            in an isolated test, installs per-user, and starts the supervisor.
+            It never restarts the desktop app.
           </p>
           <a
             className="text-link"
@@ -173,13 +175,31 @@ export default function Home() {
             Read the full install guide <span aria-hidden="true">↗</span>
           </a>
         </div>
-        <div className="terminal" aria-label="PowerShell installation commands">
+        <div className="terminal" aria-label="PowerShell installation command">
           <div className="terminal-bar">
             <span>PowerShell</span>
-            <span>win-x64 / v0.1.0</span>
+            <span>win-x64 / latest stable</span>
           </div>
-          <pre><code><span className="prompt">PS›</span> .\CodexContinuity.exe self-test{"\n"}<span className="success">✓ reconnect proof passed</span>{"\n\n"}<span className="prompt">PS›</span> .\CodexContinuity.exe install --start-now{"\n"}<span className="success">✓ backend ready on 127.0.0.1:45123</span></code></pre>
-          <div className="terminal-foot">No admin prompt · No desktop restart during install</div>
+          <CopyInstallCommand />
+          <div className="terminal-foot">
+            <span>No admin prompt · SHA-256 verified</span>
+            <span>Tray optional with -NoTray</span>
+          </div>
+        </div>
+      </section>
+
+      <section className="section agent-section" id="agents">
+        <div>
+          <span className="section-number">03 / AGENT DISCOVERY</span>
+          <h2>Inspect first.<br />Then act.</h2>
+        </div>
+        <div className="agent-copy">
+          <p>
+            Agents and automation can read a mutation-free JSON plan before
+            downloading anything. The machine-readable guide lives at
+            <a href="/llms.txt"> /llms.txt</a>.
+          </p>
+          <pre><code>powershell.exe -NoProfile -ExecutionPolicy Bypass -File $i -Plan -Json</code></pre>
         </div>
       </section>
 
@@ -221,7 +241,7 @@ export default function Home() {
         <h2>Keep the long-running work.</h2>
         <div className="actions">
           <a className="button button-primary" href="https://github.com/YesterdaysLemon/codex-continuity/releases/latest">
-            Download v0.1.0 <span aria-hidden="true">↓</span>
+            Download latest <span aria-hidden="true">↓</span>
           </a>
           <a className="button button-secondary" href="https://github.com/YesterdaysLemon/codex-continuity">
             Star on GitHub <span aria-hidden="true">↗</span>

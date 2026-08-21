@@ -7,13 +7,122 @@ on:
 
 jobs:
   build:
+    permissions:
+      contents: read
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
-      - run: dotnet restore
-      - run: dotnet format --verify-no-changes --no-restore
-      - run: dotnet build --configuration Release --no-restore
+      - run: dotnet restore CodexContinuity.csproj
+      - run: dotnet restore tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj
+      - run: dotnet format CodexContinuity.csproj --verify-no-changes --no-restore
+      - run: dotnet format tray/CodexContinuity.Tray.csproj --verify-no-changes --no-restore
+      - run: dotnet format tests/CodexContinuity.ProcessHarness/CodexContinuity.ProcessHarness.csproj --verify-no-changes --no-restore
+      - run: dotnet format tests/CodexContinuity.InstallerFixture/CodexContinuity.InstallerFixture.csproj --verify-no-changes --no-restore
+      - run: dotnet format tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj --verify-no-changes --no-restore
+      - run: dotnet build CodexContinuity.csproj --configuration Release --no-restore
+      - run: dotnet build tray/CodexContinuity.Tray.csproj --configuration Release --no-restore
+      - run: dotnet test tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj --configuration Release --no-restore
       - run: dotnet run --configuration Release --no-build -- help
+      - shell: pwsh
+        run: .\scripts\build-icons.ps1 -Check -ExecutablePath .\bin\Release\net10.0-windows\CodexContinuity.exe
+      - shell: pwsh
+        run: .\scripts\build-icons.ps1 -Check -ExecutablePath .\tray\bin\Release\net10.0-windows\CodexContinuity.Tray.exe -ExpectedDescription 'Codex Continuity Tray' -ExpectedOriginalFilename 'CodexContinuity.Tray.dll'
+      - shell: pwsh
+        run: .\scripts\build-social-card.ps1 -Check
+      - shell: pwsh
+        run: .\scripts\sign-release.ps1 -Paths .\bin\Release\net10.0-windows\CodexContinuity.exe -VerifyOnly -AllowUnsigned
+      - shell: pwsh
+        run: |
+          $plan = .\install.ps1 -Plan -Json | ConvertFrom-Json
+          if ($plan.assetUrl -ne 'https://github.com/YesterdaysLemon/codex-continuity/releases/latest/download/CodexContinuity-win-x64.zip') {
+            throw "Unexpected stable asset URL: $($plan.assetUrl)"
+          }
+          if ($plan.restartsCodex) {
+            throw 'The bootstrapper must never restart Codex.'
+          }
+      - name: Clean per-user install and uninstall smoke test
+        shell: pwsh
+        run: |
+          dotnet publish CodexContinuity.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true --output artifacts/install-smoke
+          dotnet publish tray/CodexContinuity.Tray.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true --output artifacts/install-smoke
+          Copy-Item .\artifacts\install-smoke\CodexContinuity.exe .\artifacts\install-smoke\CodexContinuity-Setup.exe
+          $setupHelp = & .\artifacts\install-smoke\CodexContinuity-Setup.exe --help 2>&1
+          $setupHelpText = $setupHelp -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $setupHelpText -notmatch 'Codex Continuity keeps') {
+            throw 'Renamed Setup executable did not provide read-only help.'
+          }
+          $statePath = Join-Path $env:LOCALAPPDATA 'OpenAI\CodexContinuity\install-state.json'
+          $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexContinuity'
+          try {
+            & .\artifacts\install-smoke\CodexContinuity.exe install --port 45129
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Per-user install smoke test failed.'
+            }
+            $state = Get-Content $statePath -Raw | ConvertFrom-Json
+            $registration = Get-ItemProperty $uninstallKey
+            $supervisorStartup = Get-ItemPropertyValue $runKey -Name CodexContinuity
+            $trayStartup = Get-ItemPropertyValue $runKey -Name CodexContinuityTray
+            $appServerUrl = [Environment]::GetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', 'User')
+            $updaterSetting = [Environment]::GetEnvironmentVariable('CODEX_SPARKLE_ENABLED', 'User')
+            if ($state.port -ne 45129 -or
+                -not (Test-Path -LiteralPath $state.installedExecutable) -or
+                -not (Test-Path -LiteralPath $state.installedTrayExecutable) -or
+                $state.startupCommand.appliedValue -ne $supervisorStartup -or
+                $state.trayStartupCommand.appliedValue -ne $trayStartup -or
+                $appServerUrl -ne 'ws://127.0.0.1:45129' -or
+                $updaterSetting -ne 'false' -or
+                $registration.DisplayName -ne 'Codex Continuity' -or
+                $registration.DisplayVersion -ne '0.2.0') {
+              throw 'Install smoke state did not match the requested lifecycle configuration.'
+            }
+            & .\artifacts\install-smoke\CodexContinuity.exe repair
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Per-user repair smoke test failed.'
+            }
+          }
+          finally {
+            & .\artifacts\install-smoke\CodexContinuity.exe uninstall
+          }
+          $runValuesAfter = Get-ItemProperty $runKey -ErrorAction SilentlyContinue
+          $supervisorStartupAfter = $runValuesAfter.PSObject.Properties['CodexContinuity'].Value
+          $trayStartupAfter = $runValuesAfter.PSObject.Properties['CodexContinuityTray'].Value
+          if ($LASTEXITCODE -ne 0 -or
+              (Test-Path $uninstallKey) -or
+              (Test-Path $statePath) -or
+              $null -ne $supervisorStartupAfter -or
+              $null -ne $trayStartupAfter -or
+              $null -ne ([Environment]::GetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', 'User')) -or
+              $null -ne ([Environment]::GetEnvironmentVariable('CODEX_SPARKLE_ENABLED', 'User'))) {
+            throw 'Per-user uninstall smoke test failed.'
+          }
+          $setupHash = (Get-FileHash .\artifacts\install-smoke\CodexContinuity.exe -Algorithm SHA256).Hash
+          .\scripts\write-winget-manifests.ps1 -Version 0.2.0 -InstallerUrl https://example.invalid/CodexContinuity-v0.2.0-Setup.exe -InstallerSha256 $setupHash -ReleaseDate 2026-08-20 -OutputDirectory artifacts/winget-smoke
+          winget --version
+          $validationOutput = winget validate --manifest artifacts/winget-smoke --disable-interactivity 2>&1
+          $validationExitCode = $LASTEXITCODE
+          $validationOutput | Write-Host
+          $validationText = $validationOutput -join "`n"
+          if ($validationExitCode -ne 0 -and $validationText -notmatch 'Manifest validation succeeded') {
+            throw "WinGet manifest validation failed with exit code $validationExitCode."
+          }
+          exit 0
+
+  site:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test

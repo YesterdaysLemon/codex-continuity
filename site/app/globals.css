@@ -430,9 +430,42 @@ h1 span {
 
 .terminal-bar { padding: 14px 17px; border-bottom: 1px solid var(--line); text-transform: uppercase; letter-spacing: 0.08em; }
 .terminal pre { margin: 0; padding: 31px 24px 36px; overflow-x: auto; color: #d7e0da; font: 500 12px/1.9 var(--font-geist-mono), monospace; }
+.install-command { position: relative; }
+.install-command pre { padding-right: 132px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.install-command button {
+  position: absolute;
+  top: 18px;
+  right: 17px;
+  padding: 9px 11px;
+  border: 1px solid rgba(102,227,255,0.3);
+  background: rgba(102,227,255,0.06);
+  color: var(--cyan);
+  cursor: pointer;
+  font: 600 10px/1 var(--font-geist-mono), monospace;
+}
+.install-command button:hover { background: rgba(102,227,255,0.13); }
 .prompt { color: var(--cyan); }
 .success { color: var(--acid); }
 .terminal-foot { padding: 14px 17px; border-top: 1px solid var(--line); }
+
+.agent-section {
+  display: grid;
+  grid-template-columns: 0.86fr 1.14fr;
+  gap: clamp(60px, 10vw, 140px);
+  align-items: end;
+}
+.agent-section h2 { margin-top: 20px; font-size: clamp(44px, 5vw, 68px); }
+.agent-copy p { max-width: 660px; }
+.agent-copy a { color: var(--acid); }
+.agent-copy pre {
+  margin: 28px 0 0;
+  padding: 20px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.018);
+  color: var(--cyan);
+  font: 500 11px/1.6 var(--font-geist-mono), monospace;
+}
 
 .proof-section {
   display: grid;
@@ -517,6 +550,7 @@ footer > div a:hover { color: var(--acid); }
   .step-card h3 { margin-top: 54px; }
   .split-section,
   .install-section,
+  .agent-section,
   .proof-section { grid-template-columns: 1fr; }
   .warning-section { grid-template-columns: auto 1fr; }
   .warning-section .button { grid-column: 2; justify-self: start; }
@@ -542,7 +576,8 @@ footer > div a:hover { color: var(--acid); }
   .section { width: min(100% - 32px, 1180px); padding: 100px 0; }
   .boundary-card { min-height: auto; padding: 30px 22px; }
   .boundary-card ul { margin-top: 55px; }
-  .terminal pre { padding: 26px 17px 30px; font-size: 10px; }
+  .terminal pre { padding: 62px 17px 30px; font-size: 10px; }
+  .install-command pre { padding-right: 17px; }
   .proof-quote { padding-left: 31px; }
   .quote-mark { font-size: 50px; }
   .warning-section { grid-template-columns: 1fr; }

@@ -16,6 +16,37 @@ owned by the supervised backend and the new UI reconnects.
 · [Visit the product site](https://codex-continuity.alirezaafshan4.chatgpt.site)
 · [Read the technical evidence](REVERSE_ENGINEERING.md)
 
+## Install in one command
+
+Paste this into PowerShell. The bootstrapper downloads the stable Windows x64
+asset, verifies its published SHA-256 checksum, runs the isolated reconnect
+self-test, and installs it without restarting Codex:
+
+```powershell
+$i="$env:TEMP\codex-continuity-install.ps1"; curl.exe -fsSL https://github.com/YesterdaysLemon/codex-continuity/releases/latest/download/install.ps1 -o $i; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $i -StartNow
+```
+
+Agents and automation can inspect the exact plan without downloading or
+changing anything:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $i -Plan -Json
+```
+
+## Installing from an agent
+
+Agents should download `install.ps1`, run `-Plan -Json`, present the resolved
+asset/checksum URLs and `restartsCodex: false`, then run with `-StartNow` only
+after that plan is accepted. Add `-NoTray` for headless automation. The same
+contract is published at the site's [`/llms.txt`](https://codex-continuity.alirezaafshan4.chatgpt.site/llms.txt).
+
+The prepared WinGet identity is `YesterdaysLemon.CodexContinuity`. After the
+external community-manifest review completes, the standard command will be:
+
+```powershell
+winget install --id YesterdaysLemon.CodexContinuity -e
+```
+
 ## Why a separate executable?
 
 A plugin would share the desktop lifecycle and disappear during the same
@@ -32,6 +63,8 @@ Codex desktop UI  ── reconnectable WebSocket ──  supervised app-server
 ## What it does
 
 - Keeps the app-server in a user-level background supervisor.
+- Shows optional health, active-agent count, and update status in the Windows
+  notification area; the tray is a separate process and can safely exit.
 - Binds only to `127.0.0.1`; it does not expose Codex over the network.
 - Removes the desktop's blue in-app update prompt on future launches.
 - Leaves signed package delivery to Microsoft Store, Intune, or another
@@ -50,9 +83,20 @@ background rather than by this tool.
 - A user-executable Codex CLI installed by the desktop app or available on
   `PATH`.
 
-## Install
+## Manual install
 
-1. Download `CodexContinuity-v0.1.0-win-x64.zip` from the
+For a conventional installer, download `CodexContinuity-Setup.exe` from the
+[latest release](https://github.com/YesterdaysLemon/codex-continuity/releases/latest)
+and run it. It uses the same checksum verification and isolated self-test as
+the PowerShell bootstrap. Unattended installs use:
+
+```powershell
+.\CodexContinuity-Setup.exe --silent
+```
+
+For the advanced portable path:
+
+1. Download the versioned Windows x64 ZIP from the
    [latest release](https://github.com/YesterdaysLemon/codex-continuity/releases/latest).
 2. Extract it, open PowerShell in that folder, and run:
 
@@ -72,16 +116,21 @@ background rather than by this tool.
 The status should report `ready: true` and show that task as active. From that
 point forward, newly started work belongs to the supervised backend.
 
-Installation makes four user-level changes:
+Installation makes these user-level changes:
 
 - `CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:45123`
 - `CODEX_SPARKLE_ENABLED=false`
 - a `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\CodexContinuity`
   startup entry
-- a copy of the coordinator at
-  `%LOCALAPPDATA%\OpenAI\CodexContinuity\CodexContinuity.exe`
+- by default, a separate `CodexContinuityTray` startup entry for the optional
+  notification-area controller
+- a repair/uninstall entry named **Codex Continuity** in Windows Installed Apps
+- versioned coordinator builds and owned install state under
+  `%LOCALAPPDATA%\OpenAI\CodexContinuity`
 
-It never closes or restarts the running desktop app.
+It never closes or restarts the running desktop app. Upgrades stage a new
+version and redirect only the next safe supervisor start; they do not overwrite
+the executable that currently owns active agents.
 
 ## Commands
 
@@ -91,7 +140,10 @@ It never closes or restarts the running desktop app.
 | `probe` | Inspect desktop version, update manifest, and configuration. |
 | `serve` | Run the background supervisor. |
 | `install --start-now` | Configure future launches and start the supervisor. |
+| `install --no-tray` | Install headlessly without the notification-area controller. |
+| `repair` | Reapply the persisted custom port and tray choice without stopping work. |
 | `uninstall` | Remove future-launch and startup configuration without killing work. |
+| `rollback` | Select the previous known-good build for the next safe supervisor start. |
 | `self-test` | Prove reconnect behavior in an isolated temporary Codex home. |
 
 ## Local evidence
@@ -122,18 +174,41 @@ the running desktop client.
 ## Roll back
 
 ```powershell
+.\CodexContinuity.exe rollback
 .\CodexContinuity.exe uninstall
 ```
 
-Uninstall removes only values that match this tool's configuration. It does
-not stop a running backend or restart the desktop. A later desktop restart
+`rollback` changes only the build selected for a future safe start. Uninstall
+restores values captured before installation, and only while their current
+values still match the ones Continuity applied. Neither command stops a running
+backend or restarts the desktop. A later desktop restart after uninstall
 returns to its normal bundled app-server and updater.
+
+## What appears in Windows
+
+- **Task Manager:** `Codex Continuity Supervisor` owns the resilient backend;
+  `Codex Continuity Tray` is the optional, disposable status UI.
+- **Notification area:** the Continuity mark appears beside or inside the
+  collapsible group near Wi-Fi and volume, according to the user's Windows
+  taskbar preferences.
+- **Installed Apps:** `Codex Continuity` exposes repair/modify and uninstall.
+
+Exiting or crashing the tray never stops the supervisor or its agents. The tray
+does not display thread names; it reports only health and aggregate active-agent
+count. Use `--no-tray` for servers, automation, or a completely headless setup.
 
 ## Security and operational boundary
 
-The app-server listens on loopback only. Codex Continuity does not collect
-telemetry, proxy prompts, store credentials, or modify installed Store package
-files. Logs stay under `%LOCALAPPDATA%\OpenAI\CodexContinuity`.
+The app-server listens on loopback only. Loopback prevents remote-network
+exposure, but it is not an authentication boundary: another process on the
+same Windows machine can attempt to connect to the local app-server port.
+Codex Continuity does not add a shared secret because the current desktop
+transport does not provide one to the external backend.
+
+Codex Continuity does not collect telemetry, proxy prompts, store credentials,
+or modify installed Store package files. App-server output stays under
+`%LOCALAPPDATA%\OpenAI\CodexContinuity`; logs rotate at 5 MB with three retained
+history files. Treat those local logs as potentially sensitive diagnostics.
 
 The continuity proof covers UI disconnect/reconnect and durable thread
 ownership. It does not make incompatible app-server protocol versions
@@ -143,6 +218,16 @@ and restart only the supervisor while the desktop is closed.
 
 See [REVERSE_ENGINEERING.md](REVERSE_ENGINEERING.md) for the version-specific
 desktop observations behind the bridge.
+
+## Release trust
+
+Every release retains SHA-256 checksum files and publishes GitHub/Sigstore build
+provenance that can be checked with `gh attestation verify`. The release
+workflow also supports SHA-256 Authenticode signing with an RFC 3161 timestamp
+and fails verification if signing is configured but invalid. A production code
+signing certificate is the remaining external publisher gate; until it is
+configured, Windows may identify the executable as coming from an unknown
+publisher. See [SECURITY.md](SECURITY.md) before bypassing any warning.
 
 ## Unofficial project
 
