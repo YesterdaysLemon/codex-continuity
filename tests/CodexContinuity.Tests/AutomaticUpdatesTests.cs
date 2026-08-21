@@ -15,36 +15,17 @@ public sealed class AutomaticUpdatesTests : IDisposable
         const string json =
             """
             [
-              {
-                "tag_name": "v0.3.0",
-                "draft": false,
-                "prerelease": false,
-                "published_at": "2026-08-21T12:00:00Z",
-                "assets": [
-                  {
-                    "name": "CodexContinuity-win-x64.zip",
-                    "browser_download_url": "https://example.test/v0.3.0/archive"
-                  },
-                  {
-                    "name": "CodexContinuity-win-x64.zip.sha256",
-                    "browser_download_url": "https://example.test/v0.3.0/checksum"
-                  }
-                ]
-              },
-              {
-                "tag_name": "v0.2.1",
-                "draft": false,
-                "prerelease": false,
-                "published_at": "2026-08-20T12:00:00Z",
-                "assets": []
-              },
-              {
-                "tag_name": "v0.4.0",
-                "draft": false,
-                "prerelease": true,
-                "published_at": "2026-08-22T12:00:00Z",
-                "assets": []
-              }
+              { "tag_name": "v0.3.0", "draft": false, "prerelease": false,
+                "published_at": "2026-08-21T12:00:00Z", "assets": [
+                  { "name": "CodexContinuity-win-x64.zip",
+                    "browser_download_url": "https://example.test/v0.3.0/archive" },
+                  { "name": "CodexContinuity-win-x64.zip.sha256",
+                    "browser_download_url": "https://example.test/v0.3.0/checksum" }
+                ] },
+              { "tag_name": "v0.2.1", "draft": false, "prerelease": false,
+                "published_at": "2026-08-20T12:00:00Z", "assets": [] },
+              { "tag_name": "v0.4.0", "draft": false, "prerelease": true,
+                "published_at": "2026-08-22T12:00:00Z", "assets": [] }
             ]
             """;
 
@@ -87,7 +68,10 @@ public sealed class AutomaticUpdatesTests : IDisposable
             },
             () => now);
 
-        var first = await coordinator.CheckAndStageAsync("0.1.0", CancellationToken.None);
+        var first = await coordinator.CheckAndStageAsync(
+            "0.1.0",
+            "0.1.0",
+            CancellationToken.None);
 
         Assert.Equal(["0.3.0"], staged);
         Assert.Equal(2, first.ObservedCount);
@@ -96,13 +80,31 @@ public sealed class AutomaticUpdatesTests : IDisposable
         Assert.Equal("staged", first.LatestState);
 
         now = now.AddMinutes(1);
+        var rolledBack = new AutomaticUpdateCoordinator(
+            store,
+            _ => Task.FromResult<IReadOnlyList<PublishedContinuityRelease>>(releases),
+            _ => throw new InvalidOperationException("A rolled-back release must not restage."),
+            () => now);
+
+        var deferred = await rolledBack.CheckAndStageAsync(
+            "0.1.0",
+            "0.1.0",
+            CancellationToken.None);
+
+        Assert.Equal("0.1.0", deferred.SelectedVersion);
+        Assert.Equal("deferred", deferred.LatestState);
+
+        now = now.AddMinutes(1);
         var restarted = new AutomaticUpdateCoordinator(
             store,
             _ => Task.FromResult<IReadOnlyList<PublishedContinuityRelease>>(releases),
             _ => throw new InvalidOperationException("An already staged release must not restage."),
             () => now);
 
-        var second = await restarted.CheckAndStageAsync("0.3.0", CancellationToken.None);
+        var second = await restarted.CheckAndStageAsync(
+            "0.3.0",
+            "0.3.0",
+            CancellationToken.None);
 
         Assert.Equal(1, second.StagedCount);
         Assert.Equal(1, second.AppliedCount);
@@ -124,7 +126,10 @@ public sealed class AutomaticUpdatesTests : IDisposable
             _ => throw new InvalidOperationException("Staging should not run without assets."),
             () => DateTimeOffset.Parse("2026-08-21T13:00:00Z"));
 
-        var state = await coordinator.CheckAndStageAsync("0.1.0", CancellationToken.None);
+        var state = await coordinator.CheckAndStageAsync(
+            "0.1.0",
+            "0.1.0",
+            CancellationToken.None);
 
         Assert.Equal(1, state.ObservedCount);
         Assert.Equal(0, state.StagedCount);
@@ -142,7 +147,10 @@ public sealed class AutomaticUpdatesTests : IDisposable
             _ => throw new InvalidOperationException($"failure\r\n{new string('x', 2_000)}"),
             () => DateTimeOffset.Parse("2026-08-21T13:00:00Z"));
 
-        var state = await coordinator.CheckAndStageAsync("0.1.0", CancellationToken.None);
+        var state = await coordinator.CheckAndStageAsync(
+            "0.1.0",
+            "0.1.0",
+            CancellationToken.None);
 
         Assert.NotNull(state.LastError);
         Assert.Equal(1_001, state.LastError.Length);
@@ -168,6 +176,7 @@ public sealed class AutomaticUpdatesTests : IDisposable
             1,
             now,
             now,
+            "1.0.0",
             "1.0.0",
             "1.0.0",
             "1.0.40",

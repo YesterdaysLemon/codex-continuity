@@ -23,6 +23,7 @@ internal sealed record ContinuityUpdateState(
     DateTimeOffset? LastCheckedAtUtc,
     string BaselineVersion,
     string RunningVersion,
+    string SelectedVersion,
     string? LatestVersion,
     string? LastError,
     IReadOnlyList<TrackedContinuityRelease> Releases)
@@ -37,10 +38,18 @@ internal sealed record ContinuityUpdateState(
         {
             var latest = Releases.FirstOrDefault(release =>
                 string.Equals(release.Version, LatestVersion, StringComparison.OrdinalIgnoreCase));
-            return latest?.AppliedAtUtc is not null
+            return latest is not null && string.Equals(
+                latest.Version,
+                RunningVersion,
+                StringComparison.OrdinalIgnoreCase)
                 ? "active"
-                : latest?.StagedAtUtc is not null
+                : latest?.StagedAtUtc is not null && string.Equals(
+                    latest.Version,
+                    SelectedVersion,
+                    StringComparison.OrdinalIgnoreCase)
                     ? "staged"
+                    : latest?.StagedAtUtc is not null
+                        ? "deferred"
                     : latest?.LastError is not null || LastError is not null
                         ? "failed"
                         : LatestVersion is null
@@ -218,6 +227,7 @@ internal sealed class AutomaticUpdateCoordinator(
 {
     internal async Task<ContinuityUpdateState> CheckAndStageAsync(
         string runningVersion,
+        string selectedVersion,
         CancellationToken cancellationToken)
     {
         var now = utcNow();
@@ -228,10 +238,12 @@ internal sealed class AutomaticUpdateCoordinator(
                 LastCheckedAtUtc: null,
                 BaselineVersion: runningVersion,
                 RunningVersion: runningVersion,
+                SelectedVersion: selectedVersion,
                 LatestVersion: null,
                 LastError: null,
                 Releases: []),
             runningVersion,
+            selectedVersion,
             now);
         try
         {
@@ -244,13 +256,22 @@ internal sealed class AutomaticUpdateCoordinator(
                 var tracked = state.Releases.Single(release => release.Version == latest.Version);
                 if (tracked.StagedAtUtc is null)
                 {
-                    if (latest.ArchiveUrl is null || latest.ChecksumUrl is null)
+                    if (!string.Equals(
+                            selectedVersion,
+                            latest.Version,
+                            StringComparison.OrdinalIgnoreCase))
                     {
-                        throw new InvalidDataException(
-                            $"Release v{latest.Version} is missing the Windows archive or checksum asset.");
+                        if (latest.ArchiveUrl is null || latest.ChecksumUrl is null)
+                        {
+                            throw new InvalidDataException(
+                                $"Release v{latest.Version} is missing the Windows archive or checksum asset.");
+                        }
+                        await stageRelease(latest);
                     }
-                    await stageRelease(latest);
-                    state = MarkStaged(state, latest.Version, now);
+                    state = MarkStaged(state, latest.Version, now) with
+                    {
+                        SelectedVersion = latest.Version,
+                    };
                 }
             }
             state = state with { LastCheckedAtUtc = now, LastError = null };
@@ -290,13 +311,19 @@ internal sealed class AutomaticUpdateCoordinator(
     private static ContinuityUpdateState MarkRunning(
         ContinuityUpdateState state,
         string runningVersion,
+        string selectedVersion,
         DateTimeOffset appliedAt)
     {
         var releases = state.Releases.Select(release =>
             release.Version == runningVersion && release.StagedAtUtc is not null
                 ? release with { AppliedAtUtc = release.AppliedAtUtc ?? appliedAt, LastError = null }
                 : release).ToList();
-        return state with { RunningVersion = runningVersion, Releases = releases };
+        return state with
+        {
+            RunningVersion = runningVersion,
+            SelectedVersion = selectedVersion,
+            Releases = releases,
+        };
     }
 
     private static ContinuityUpdateState MarkStaged(
@@ -428,6 +455,7 @@ internal static class AutomaticUpdateRunner
                 () => DateTimeOffset.UtcNow);
             return await coordinator.CheckAndStageAsync(
                 runningVersion ?? ResolveRunningVersion(stateDirectory),
+                ProductVersion(installState.InstalledExecutable),
                 cancellationToken);
         }
     }
@@ -458,5 +486,17 @@ internal static class AutomaticUpdateRunner
         return new ContinuityUpdateStateStore(
             ContinuityPaths.UpdateStatusFile(stateDirectory)).Load()?.RunningVersion ??
             "0.0.0";
+    }
+
+    private static string ProductVersion(string executable)
+    {
+        if (!File.Exists(executable))
+        {
+            throw new FileNotFoundException(
+                "The selected Continuity supervisor executable was not found.",
+                executable);
+        }
+        var version = FileVersionInfo.GetVersionInfo(executable);
+        return $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}";
     }
 }
