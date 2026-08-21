@@ -133,6 +133,25 @@ public sealed class AutomaticUpdatesTests : IDisposable
     }
 
     [Fact]
+    public async Task PersistedUpdateErrorsAreSingleLineAndBounded()
+    {
+        var coordinator = new AutomaticUpdateCoordinator(
+            Store(),
+            _ => Task.FromResult<IReadOnlyList<PublishedContinuityRelease>>(
+                [Release("0.2.0", "2026-08-21T12:00:00Z")]),
+            _ => throw new InvalidOperationException($"failure\r\n{new string('x', 2_000)}"),
+            () => DateTimeOffset.Parse("2026-08-21T13:00:00Z"));
+
+        var state = await coordinator.CheckAndStageAsync("0.1.0", CancellationToken.None);
+
+        Assert.NotNull(state.LastError);
+        Assert.Equal(1_001, state.LastError.Length);
+        Assert.DoesNotContain('\r', state.LastError);
+        Assert.DoesNotContain('\n', state.LastError);
+        Assert.EndsWith("…", state.LastError);
+    }
+
+    [Fact]
     public void UpdateStoreBoundsHistoryAndToleratesMalformedState()
     {
         var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");

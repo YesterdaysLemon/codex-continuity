@@ -312,14 +312,27 @@ internal sealed class AutomaticUpdateCoordinator(
     private static ContinuityUpdateState MarkFailure(
         ContinuityUpdateState state,
         string error,
-        DateTimeOffset checkedAt) => state with
+        DateTimeOffset checkedAt)
+    {
+        var boundedError = BoundError(error);
+        return state with
         {
             LastCheckedAtUtc = checkedAt,
-            LastError = error,
+            LastError = boundedError,
             Releases = state.Releases.Select(release => release.Version == state.LatestVersion
-                ? release with { LastError = error }
+                ? release with { LastError = boundedError }
                 : release).ToList(),
         };
+    }
+
+    private static string BoundError(string error)
+    {
+        const int maximumLength = 1000;
+        var singleLine = error.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return singleLine.Length <= maximumLength
+            ? singleLine
+            : $"{singleLine[..maximumLength]}…";
+    }
 
     private static int CompareVersions(string first, string second) =>
         System.Version.Parse(first).CompareTo(System.Version.Parse(second));
@@ -348,6 +361,10 @@ internal static class AutomaticUpdateRunner
             catch (OperationCanceledException)
             {
                 return;
+            }
+            catch (Exception exception)
+            {
+                Console.Error.WriteLine($"Automatic update check failed: {exception.Message}");
             }
             try
             {
