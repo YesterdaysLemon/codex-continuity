@@ -475,18 +475,19 @@ internal static class Program
     private static async Task<int> UninstallAsync()
     {
         var coordinator = CreateInstallCoordinator(ContinuityPaths.StateDirectory);
-        var installedPort = LoadInstallState()?.Port ?? coordinator.DetectLegacyInstalledPort();
+        var installState = LoadInstallState();
+        var legacyInstalledPort = installState is null
+            ? coordinator.DetectLegacyInstalledPort()
+            : null;
         var configuredUrl = Environment.GetEnvironmentVariable(
             InstallCoordinator.AppServerUrlVariable,
             EnvironmentVariableTarget.User);
-        var reconnectPolicy = installedPort is { } port &&
-            string.Equals(
-                configuredUrl,
-                LoopbackEndpoint.WebSocketUrl(port),
-                StringComparison.Ordinal) &&
-            await IsReadyAsync(port, TimeSpan.FromSeconds(1))
-                ? UninstallReconnectPolicy.PreserveUntilNextSignIn
-                : UninstallReconnectPolicy.RestoreImmediately;
+        var reconnectPolicy = await ResolveUninstallReconnectPolicyAsync(
+            installState?.Port,
+            legacyInstalledPort,
+            configuredUrl,
+            port => IsManagedEndpointReadyAsync(port),
+            port => IsReadyAsync(port, TimeSpan.FromSeconds(1)));
         var removed = coordinator.Uninstall(reconnectPolicy);
         if (!removed)
         {
@@ -500,6 +501,30 @@ internal static class Program
                 ? "Removed future startup configuration. Codex reopenings in this Windows session will keep reconnecting to the running backend; the owned reconnect setting and installed files will be removed at the next sign-in. No running process was stopped."
                 : "Removed owned future-launch configuration. Installed files will be removed at the next sign-in; no running process was stopped.");
         return 0;
+    }
+
+    internal static async Task<UninstallReconnectPolicy> ResolveUninstallReconnectPolicyAsync(
+        int? managedInstalledPort,
+        int? legacyInstalledPort,
+        string? configuredUrl,
+        Func<int, Task<bool>> isManagedEndpointReadyAsync,
+        Func<int, Task<bool>> isLegacyEndpointReadyAsync)
+    {
+        var installedPort = managedInstalledPort ?? legacyInstalledPort;
+        if (installedPort is not { } port || !string.Equals(
+                configuredUrl,
+                LoopbackEndpoint.WebSocketUrl(port),
+                StringComparison.Ordinal))
+        {
+            return UninstallReconnectPolicy.RestoreImmediately;
+        }
+
+        var endpointIsOwned = managedInstalledPort is not null
+            ? await isManagedEndpointReadyAsync(port)
+            : await isLegacyEndpointReadyAsync(port);
+        return endpointIsOwned
+            ? UninstallReconnectPolicy.PreserveUntilNextSignIn
+            : UninstallReconnectPolicy.RestoreImmediately;
     }
 
     private static async Task<int> RepairAsync(bool startNow)
