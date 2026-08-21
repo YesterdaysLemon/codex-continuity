@@ -55,6 +55,8 @@ internal static class TrayStatusParser
 
 internal sealed class TrayStatusClient(string supervisorExecutable)
 {
+    internal const int DefaultPort = 45123;
+
     private static readonly HttpClient HttpClient = new()
     {
         Timeout = TimeSpan.FromSeconds(5),
@@ -140,14 +142,27 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
             "install-state.json");
         try
         {
-            using var document = JsonDocument.Parse(File.ReadAllText(statePath));
-            return document.RootElement.TryGetProperty("port", out var port)
-                ? port.GetInt32()
-                : 45123;
+            return ParseInstalledPort(File.ReadAllText(statePath));
         }
-        catch (Exception exception) when (exception is IOException or JsonException)
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or JsonException)
         {
-            return 45123;
+            return DefaultPort;
         }
+    }
+
+    internal static int ParseInstalledPort(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        if (document.RootElement.ValueKind != JsonValueKind.Object ||
+            !document.RootElement.TryGetProperty("port", out var portElement) ||
+            portElement.ValueKind != JsonValueKind.Number ||
+            !portElement.TryGetInt32(out var port) ||
+            port is < 1 or > 65535)
+        {
+            return DefaultPort;
+        }
+
+        return port;
     }
 }
