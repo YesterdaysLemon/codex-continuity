@@ -20,6 +20,7 @@ public sealed class InstallCoordinatorTests : IDisposable
         };
         platform.Environment[InstallCoordinator.AppServerUrlVariable] = "ws://127.0.0.1:40000";
         platform.Environment[InstallCoordinator.DisableUpdaterVariable] = "true";
+        platform.Environment[InstallCoordinator.PathVariable] = @"C:\UserTools";
         var coordinator = CreateCoordinator(platform);
         var source = CreateSource("version-one");
 
@@ -30,8 +31,10 @@ public sealed class InstallCoordinatorTests : IDisposable
         Assert.Equal(installPort, outcome.State.Port);
         Assert.Equal("ws://127.0.0.1:40000", platform.Environment[InstallCoordinator.AppServerUrlVariable]);
         Assert.Equal("true", platform.Environment[InstallCoordinator.DisableUpdaterVariable]);
+        Assert.Equal(@"C:\UserTools", platform.Environment[InstallCoordinator.PathVariable]);
         Assert.Equal("previous startup", platform.StartupCommand);
         Assert.Null(platform.InstalledAppRegistration);
+        Assert.Contains(Path.GetFullPath(root), platform.CleanupCommand);
     }
 
     [Fact]
@@ -42,6 +45,7 @@ public sealed class InstallCoordinatorTests : IDisposable
         coordinator.Install(CreateBundleSource("version-one"), 45123, TrayInstallMode.Enabled);
         platform.Environment[InstallCoordinator.AppServerUrlVariable] = "ws://127.0.0.1:49999";
         platform.Environment[InstallCoordinator.DisableUpdaterVariable] = "true";
+        platform.Environment[InstallCoordinator.PathVariable] = @"C:\ReplacementTools";
         platform.StartupCommand = "replacement supervisor startup";
         platform.TrayStartupCommand = "replacement tray startup";
         var replacementRegistration = platform.InstalledAppRegistration! with
@@ -58,6 +62,9 @@ public sealed class InstallCoordinatorTests : IDisposable
         Assert.Equal(
             "true",
             platform.Environment[InstallCoordinator.DisableUpdaterVariable]);
+        Assert.Equal(
+            @"C:\ReplacementTools",
+            platform.Environment[InstallCoordinator.PathVariable]);
         Assert.Equal("replacement supervisor startup", platform.StartupCommand);
         Assert.Equal("replacement tray startup", platform.TrayStartupCommand);
         Assert.Equal(replacementRegistration, platform.InstalledAppRegistration);
@@ -84,6 +91,7 @@ public sealed class InstallCoordinatorTests : IDisposable
         Assert.Equal("true", platform.Environment[InstallCoordinator.DisableUpdaterVariable]);
         Assert.Equal("user startup", platform.StartupCommand);
         Assert.Null(platform.InstalledAppRegistration);
+        Assert.Null(platform.CleanupCommand);
         Assert.False(File.Exists(ContinuityPaths.InstallStateFile(root)));
     }
 
@@ -138,6 +146,7 @@ public sealed class InstallCoordinatorTests : IDisposable
         Assert.Null(platform.Environment[InstallCoordinator.AppServerUrlVariable]);
         Assert.Null(platform.Environment[InstallCoordinator.DisableUpdaterVariable]);
         Assert.Null(platform.StartupCommand);
+        Assert.Contains(quotedRoot.Replace("'", "''", StringComparison.Ordinal), platform.CleanupCommand);
     }
 
     [Fact]
@@ -210,13 +219,13 @@ public sealed class InstallCoordinatorTests : IDisposable
         Assert.NotEqual(first.State.InstalledExecutable, second.State.InstalledExecutable);
         Assert.True(File.Exists(first.State.InstalledExecutable));
         Assert.True(File.Exists(second.State.InstalledExecutable));
+        Assert.Equal("version-two", File.ReadAllText(ContinuityPaths.CommandExecutable(root)));
         Assert.Equal(first.State.InstalledExecutable, rolledBack.InstalledExecutable);
         Assert.Contains(first.State.InstalledExecutable, platform.StartupCommand);
-        Assert.Equal(
-            first.State.InstalledExecutable,
-            platform.InstalledAppRegistration?.InstallLocation is { } installLocation
-                ? Path.Combine(installLocation, "CodexContinuity.exe")
-                : null);
+        Assert.Equal(root, platform.InstalledAppRegistration?.InstallLocation);
+        Assert.Contains(
+            ContinuityPaths.CommandExecutable(root),
+            platform.InstalledAppRegistration?.UninstallCommand);
     }
 
     [Fact]
@@ -234,6 +243,9 @@ public sealed class InstallCoordinatorTests : IDisposable
         coordinator.Uninstall();
 
         Assert.True(File.Exists(outcome.State.InstalledTrayExecutable));
+        Assert.True(File.Exists(Path.Combine(
+            ContinuityPaths.CommandDirectory(root),
+            "CodexContinuity.Tray.exe")));
         Assert.Contains("CodexContinuity.Tray.exe", platform.AppliedTrayStartupCommand);
         Assert.DoesNotContain("CodexContinuity.Tray", supervisorStartup);
         Assert.Null(platform.TrayStartupCommand);
@@ -261,12 +273,114 @@ public sealed class InstallCoordinatorTests : IDisposable
         Assert.Contains(first.State.InstalledTrayExecutable!, platform.TrayStartupCommand);
     }
 
+    [Fact]
+    public void InstallPublishesStableCommandOnAnOwnedPathAndCancelsPendingCleanup()
+    {
+        var platform = new FakeInstallPlatform
+        {
+            CleanupCommand = "previous deferred cleanup",
+        };
+        platform.Environment[InstallCoordinator.PathVariable] = @"C:\UserTools";
+        var coordinator = CreateCoordinator(platform);
+
+        var outcome = coordinator.Install(
+            CreateSource("version-one"),
+            45123,
+            TrayInstallMode.Disabled);
+
+        var commandExecutable = ContinuityPaths.CommandExecutable(root);
+        Assert.Equal(4, outcome.State.SchemaVersion);
+        Assert.Equal("version-one", File.ReadAllText(commandExecutable));
+        Assert.Equal(
+            $@"C:\UserTools;{ContinuityPaths.CommandDirectory(root)}",
+            platform.Environment[InstallCoordinator.PathVariable]);
+        Assert.Equal(
+            new OwnedString(
+                @"C:\UserTools",
+                $@"C:\UserTools;{ContinuityPaths.CommandDirectory(root)}"),
+            outcome.State.CommandPath);
+        Assert.StartsWith($"\"{commandExecutable}\"", platform.InstalledAppRegistration!.ModifyCommand);
+        Assert.Null(platform.CleanupCommand);
+    }
+
+    [Fact]
+    public void PreexistingCommandPathIsNotClaimedOrRemoved()
+    {
+        var platform = new FakeInstallPlatform();
+        var originalPath = $"C:\\UserTools;\"{ContinuityPaths.CommandDirectory(root)}\"";
+        platform.Environment[InstallCoordinator.PathVariable] = originalPath;
+        var coordinator = CreateCoordinator(platform);
+
+        var outcome = coordinator.Install(
+            CreateSource("version-one"),
+            45123,
+            TrayInstallMode.Disabled);
+        coordinator.Uninstall();
+
+        Assert.Null(outcome.State.CommandPath);
+        Assert.Equal(originalPath, platform.Environment[InstallCoordinator.PathVariable]);
+    }
+
+    [Fact]
+    public void DeferredCleanupRefusesFilesystemRoot()
+    {
+        var filesystemRoot = Path.GetPathRoot(root)!;
+
+        Assert.Throws<InvalidOperationException>(() =>
+            DeferredCleanupCommandBuilder.Build(filesystemRoot));
+    }
+
+    [Fact]
+    public void MigrationLeavesOpenAiInstallOnlyUntilTheNextSignIn()
+    {
+        var legacyRoot = Path.Combine(root, "OpenAI", "CodexContinuity");
+        var currentRoot = Path.Combine(root, "YesterdaysLemon", "CodexContinuity");
+        var platform = new FakeInstallPlatform();
+        var legacyCoordinator = new InstallCoordinator(
+            legacyRoot,
+            platform,
+            new InstallStateStore(ContinuityPaths.InstallStateFile(legacyRoot)));
+        var legacy = legacyCoordinator.Install(
+            CreateBundleSource("version-one"),
+            45123,
+            TrayInstallMode.Enabled);
+        var coordinator = new InstallCoordinator(
+            currentRoot,
+            platform,
+            new InstallStateStore(ContinuityPaths.InstallStateFile(currentRoot)),
+            legacyRoot);
+
+        var migrated = coordinator.Install(
+            CreateBundleSource("version-two"),
+            45123,
+            TrayInstallMode.Enabled);
+
+        Assert.Equal(legacy.State.InstalledExecutable, migrated.State.PreviousInstalledExecutable);
+        Assert.Equal(
+            ContinuityPaths.CommandDirectory(currentRoot),
+            platform.Environment[InstallCoordinator.PathVariable]);
+        Assert.Contains(Path.GetFullPath(legacyRoot), platform.CleanupCommand);
+        Assert.DoesNotContain(Path.GetFullPath(currentRoot), platform.CleanupCommand);
+        Assert.True(File.Exists(ContinuityPaths.InstallStateFile(legacyRoot)));
+        Assert.True(File.Exists(ContinuityPaths.InstallStateFile(currentRoot)));
+
+        coordinator.Uninstall();
+
+        Assert.Null(platform.Environment[InstallCoordinator.PathVariable]);
+        Assert.Contains(Path.GetFullPath(legacyRoot), platform.CleanupCommand);
+        Assert.Contains(Path.GetFullPath(currentRoot), platform.CleanupCommand);
+        Assert.False(File.Exists(ContinuityPaths.InstallStateFile(legacyRoot)));
+        Assert.False(File.Exists(ContinuityPaths.InstallStateFile(currentRoot)));
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(2)]
     [InlineData(3)]
     [InlineData(4)]
     [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
     public void FailedInstallRestoresEveryPlatformValue(int failingMutation)
     {
         var previousRegistration = new InstalledAppRegistration(
@@ -285,9 +399,11 @@ public sealed class InstallCoordinatorTests : IDisposable
             StartupCommand = "previous startup",
             TrayStartupCommand = "previous tray startup",
             InstalledAppRegistration = previousRegistration,
+            CleanupCommand = "previous deferred cleanup",
         };
         platform.Environment[InstallCoordinator.AppServerUrlVariable] = "ws://127.0.0.1:40000";
         platform.Environment[InstallCoordinator.DisableUpdaterVariable] = "true";
+        platform.Environment[InstallCoordinator.PathVariable] = @"C:\PreviousTools";
         var coordinator = CreateCoordinator(platform);
         platform.FailAfterNextMutations(failingMutation);
 
@@ -298,9 +414,11 @@ public sealed class InstallCoordinatorTests : IDisposable
 
         Assert.Equal("ws://127.0.0.1:40000", platform.Environment[InstallCoordinator.AppServerUrlVariable]);
         Assert.Equal("true", platform.Environment[InstallCoordinator.DisableUpdaterVariable]);
+        Assert.Equal(@"C:\PreviousTools", platform.Environment[InstallCoordinator.PathVariable]);
         Assert.Equal("previous startup", platform.StartupCommand);
         Assert.Equal("previous tray startup", platform.TrayStartupCommand);
         Assert.Equal(previousRegistration, platform.InstalledAppRegistration);
+        Assert.Equal("previous deferred cleanup", platform.CleanupCommand);
         Assert.False(File.Exists(ContinuityPaths.InstallStateFile(root)));
     }
 
@@ -374,6 +492,7 @@ public sealed class InstallCoordinatorTests : IDisposable
         internal string? TrayStartupCommand { get; set; }
         internal string? AppliedTrayStartupCommand { get; private set; }
         internal InstalledAppRegistration? InstalledAppRegistration { get; set; }
+        internal string? CleanupCommand { get; set; }
 
         internal void FailAfterNextMutations(int mutationOffset) =>
             failingMutation = mutationCount + mutationOffset;
@@ -414,6 +533,14 @@ public sealed class InstallCoordinatorTests : IDisposable
         {
             ThrowIfRequested();
             InstalledAppRegistration = registration;
+        }
+
+        public string? GetCleanupCommand() => CleanupCommand;
+
+        public void SetCleanupCommand(string? value)
+        {
+            ThrowIfRequested();
+            CleanupCommand = value;
         }
 
         public void BroadcastEnvironmentChange()
