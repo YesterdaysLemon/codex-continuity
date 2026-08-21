@@ -78,11 +78,12 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
     {
         try
         {
-            return File.Exists(path)
+            var state = File.Exists(path)
                 ? JsonSerializer.Deserialize<ContinuityUpdateState>(
                     File.ReadAllText(path),
                     SerializerOptions)
                 : null;
+            return IsUsable(state) ? state : null;
         }
         catch (JsonException)
         {
@@ -126,4 +127,15 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
 
     private static Version ParseVersion(string version) =>
         Version.TryParse(version, out var parsed) ? parsed : new Version();
+
+    private static bool IsUsable(ContinuityUpdateState? state) =>
+        state is
+        {
+            SchemaVersion: 1,
+            BaselineVersion.Length: > 0,
+            RunningVersion.Length: > 0,
+            SelectedVersion.Length: > 0,
+            Releases: not null,
+        } && state.Releases.All(release =>
+            release is not null && !string.IsNullOrWhiteSpace(release.Version));
 }

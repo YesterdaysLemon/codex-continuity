@@ -74,6 +74,9 @@ public sealed class UpdateStateTests : IDisposable
 
         File.WriteAllText(Path.Combine(root, "update-status.json"), "not json");
         Assert.Null(store.Load());
+
+        File.WriteAllText(Path.Combine(root, "update-status.json"), "{}");
+        Assert.Null(store.Load());
     }
 
     public void Dispose()
