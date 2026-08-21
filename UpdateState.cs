@@ -9,7 +9,9 @@ internal sealed record TrackedContinuityRelease(
     DateTimeOffset FirstObservedAtUtc,
     DateTimeOffset? StagedAtUtc,
     DateTimeOffset? AppliedAtUtc,
-    string? LastError);
+    string? LastError,
+    string? StagedExecutableSha256 = null,
+    string? RollbackExecutableSha256 = null);
 
 internal sealed record ContinuityUpdateState(
     int SchemaVersion,
@@ -24,7 +26,8 @@ internal sealed record ContinuityUpdateState(
     int ObservedCount,
     int StagedCount,
     int AppliedCount,
-    IReadOnlyList<TrackedContinuityRelease> Releases)
+    IReadOnlyList<TrackedContinuityRelease> Releases,
+    string? RunningExecutableSha256 = null)
 {
     public string LatestState
     {
@@ -32,7 +35,14 @@ internal sealed record ContinuityUpdateState(
         {
             var latest = Releases.FirstOrDefault(release =>
                 string.Equals(release.Version, LatestVersion, StringComparison.OrdinalIgnoreCase));
-            if (RunningProcessObserved && LatestVersion is not null && string.Equals(
+            if (RunningProcessObserved &&
+                RunningExecutableSha256 is not null &&
+                LatestVersion is not null &&
+                (latest?.StagedExecutableSha256 is null || string.Equals(
+                    latest.StagedExecutableSha256,
+                    RunningExecutableSha256,
+                    StringComparison.OrdinalIgnoreCase)) &&
+                string.Equals(
                     LatestVersion,
                     RunningVersion,
                     StringComparison.OrdinalIgnoreCase))
@@ -276,6 +286,7 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
         IsSemanticVersion(state.SelectedVersion) &&
         (state.LatestVersion is null || IsSemanticVersion(state.LatestVersion)) &&
         IsBoundedOptionalText(state.LastError, MaximumErrorLength) &&
+        IsOptionalSha256(state.RunningExecutableSha256) &&
         state.ObservedCount >= 0 &&
         state.StagedCount >= 0 &&
         state.AppliedCount >= 0 &&
@@ -285,6 +296,8 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
             IsSemanticVersion(release.Version) &&
             release.PublishedAtUtc != default &&
             release.FirstObservedAtUtc != default &&
+            IsOptionalSha256(release.StagedExecutableSha256) &&
+            IsOptionalSha256(release.RollbackExecutableSha256) &&
             IsBoundedOptionalText(release.LastError, MaximumErrorLength));
 
     private static bool IsSemanticVersion(string? value) =>
@@ -292,4 +305,7 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
 
     private static bool IsBoundedOptionalText(string? value, int maximumLength) =>
         value is null || value.Length <= maximumLength;
+
+    private static bool IsOptionalSha256(string? value) =>
+        value is null || value.Length == 64 && value.All(Uri.IsHexDigit);
 }

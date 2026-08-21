@@ -56,7 +56,10 @@ public sealed class UpdateStateTests : IDisposable
                 now,
                 staged ? now : null,
                 AppliedAtUtc: null,
-                LastError: null)]);
+                LastError: null,
+                StagedExecutableSha256: staged ? new string('b', 64) : null,
+                RollbackExecutableSha256: staged ? new string('a', 64) : null)],
+            RunningExecutableSha256: new string('b', 64));
 
         Assert.Equal(expected, state.LatestState);
     }
@@ -78,7 +81,8 @@ public sealed class UpdateStateTests : IDisposable
             0,
             0,
             0,
-            Releases: []);
+            Releases: [],
+            RunningExecutableSha256: new string('a', 64));
 
         Assert.Equal("active", state.LatestState);
     }
