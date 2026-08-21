@@ -17,6 +17,9 @@ export const metadata: Metadata = {
   title: "Codex Continuity — Keep the agents. Replace the window.",
   description:
     "An unofficial Windows utility that keeps Codex agent threads alive while the desktop app updates or restarts.",
+  alternates: {
+    canonical: "/",
+  },
   icons: {
     icon: "/icon.svg",
   },
@@ -28,8 +31,8 @@ export const metadata: Metadata = {
     images: [
       {
         url: "/og.png",
-        width: 1536,
-        height: 1024,
+        width: 1200,
+        height: 630,
         alt: "Codex Continuity — Keep the agents. Replace the window.",
       },
     ],
@@ -56,6 +59,37 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{
+            __html: JSON.stringify({
+              "@context": "https://schema.org",
+              "@type": "SoftwareApplication",
+              name: "Codex Continuity",
+              applicationCategory: "UtilitiesApplication",
+              operatingSystem: "Windows 11",
+              description:
+                "An unofficial Windows utility that keeps Codex agent threads alive while the desktop app updates or restarts.",
+              url: "https://codex-continuity.alirezaafshan4.chatgpt.site",
+              downloadUrl:
+                "https://github.com/YesterdaysLemon/codex-continuity/releases/latest",
+              codeRepository:
+                "https://github.com/YesterdaysLemon/codex-continuity",
+              license:
+                "https://github.com/YesterdaysLemon/codex-continuity/blob/main/LICENSE",
+              author: {
+                "@type": "Person",
+                name: "Alireza Afshan",
+                url: "https://alirezaafshan.com",
+              },
+              offers: {
+                "@type": "Offer",
+                price: "0",
+                priceCurrency: "USD",
+              },
+            }).replace(/</g, "\\u003c"),
+          }}
+        />
         {children}
       </body>
     </html>

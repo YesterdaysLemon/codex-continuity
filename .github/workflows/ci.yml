@@ -25,6 +25,8 @@ jobs:
       - shell: pwsh
         run: .\scripts\build-icons.ps1 -Check -ExecutablePath .\bin\Release\net10.0-windows\CodexContinuity.exe
       - shell: pwsh
+        run: .\scripts\build-social-card.ps1 -Check
+      - shell: pwsh
         run: |
           $plan = .\install.ps1 -Plan -Json | ConvertFrom-Json
           if ($plan.assetUrl -ne 'https://github.com/YesterdaysLemon/codex-continuity/releases/latest/download/CodexContinuity-win-x64.zip') {

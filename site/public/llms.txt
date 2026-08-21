@@ -1,0 +1,43 @@
+# Codex Continuity
+
+Codex Continuity is an unofficial, experimental, open-source Windows utility that keeps Codex agent threads alive while the desktop UI updates or restarts. It runs the official `codex app-server` outside the desktop process tree and reconnects the desktop over `ws://127.0.0.1:45123`.
+
+## Safe install plan
+
+Download the bootstrapper, then inspect its mutation-free JSON plan:
+
+```powershell
+$i="$env:TEMP\codex-continuity-install.ps1"
+curl.exe -fsSL https://github.com/YesterdaysLemon/codex-continuity/releases/latest/download/install.ps1 -o $i
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $i -Plan -Json
+```
+
+The plan reports the exact release asset and checksum URLs, whether the isolated self-test will run, whether the optional tray is enabled, and `restartsCodex: false`.
+
+## Install
+
+After reviewing the plan:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $i -StartNow
+```
+
+Use `-NoTray` for a headless install. The bootstrapper verifies the release SHA-256 before execution and never restarts the Codex desktop app.
+
+## Verify and remove
+
+```powershell
+CodexContinuity.exe status
+CodexContinuity.exe uninstall
+```
+
+Uninstall changes only future launch configuration and never stops a running backend. See the repository README and SECURITY.md before production use.
+
+## Canonical links
+
+- Site: https://codex-continuity.alirezaafshan4.chatgpt.site
+- Repository: https://github.com/YesterdaysLemon/codex-continuity
+- Releases: https://github.com/YesterdaysLemon/codex-continuity/releases/latest
+- Security boundary: https://github.com/YesterdaysLemon/codex-continuity/blob/main/SECURITY.md
+- Author: https://alirezaafshan.com
+- Sponsor: https://github.com/sponsors/YesterdaysLemon

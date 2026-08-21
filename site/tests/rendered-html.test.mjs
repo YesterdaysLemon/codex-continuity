@@ -32,6 +32,10 @@ test("server-renders the Codex Continuity launch page", async () => {
   assert.match(html, /Keep the agents\./);
   assert.match(html, /Replace the window\./);
   assert.match(html, /Download for Windows/);
+  assert.match(html, /curl\.exe -fsSL/);
+  assert.match(html, /-Plan -Json/);
+  assert.match(html, /\/llms\.txt/);
+  assert.match(html, /SoftwareApplication/);
   assert.match(html, /Unofficial · Windows · Experimental/);
   assert.match(html, /github\.com\/YesterdaysLemon\/codex-continuity/);
   assert.match(html, /github\.com\/sponsors\/YesterdaysLemon/);
