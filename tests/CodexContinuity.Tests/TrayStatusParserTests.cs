@@ -123,4 +123,52 @@ public sealed class TrayStatusParserTests
             $"Manual update check failed; {detail}",
             TrayStatusPresentation.ManualCheckResult(succeeded: false, detail));
     }
+
+    [Fact]
+    public void UpdatePresentationDoesNotCallAStoppedSupervisorActive()
+    {
+        var update = new ContinuityUpdateSnapshot(
+            "0.3.0",
+            "0.3.0",
+            1,
+            1,
+            1,
+            "inactive",
+            null);
+
+        Assert.Equal(
+            "Last ran v0.3.0; latest v0.3.0 is not active",
+            TrayStatusPresentation.UpdateDetail(update));
+    }
+
+    [Fact]
+    public void SupervisorResolutionPrefersStableCommandAndFallsBackToBundledCopy()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"continuity-tray-routing-{Guid.NewGuid():N}");
+        var applicationDirectory = Path.Combine(root, "tray");
+        var stateDirectory = Path.Combine(root, "state");
+        var stableExecutable = Path.Combine(stateDirectory, "bin", "CodexContinuity.exe");
+        var bundledExecutable = Path.Combine(applicationDirectory, "CodexContinuity.exe");
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(stableExecutable)!);
+            File.WriteAllText(stableExecutable, "fixture");
+
+            Assert.Equal(
+                stableExecutable,
+                TrayStatusClient.ResolveSupervisorExecutable(applicationDirectory, stateDirectory));
+
+            File.Delete(stableExecutable);
+            Assert.Equal(
+                bundledExecutable,
+                TrayStatusClient.ResolveSupervisorExecutable(applicationDirectory, stateDirectory));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
 }

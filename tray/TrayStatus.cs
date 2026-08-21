@@ -59,6 +59,7 @@ internal static class TrayStatusPresentation
             "active" => $"Running v{update.RunningVersion}; latest is active",
             "staged" => $"v{update.LatestVersion} staged; running v{update.RunningVersion}",
             "deferred" => $"v{update.LatestVersion} deferred by rollback; running v{update.RunningVersion}",
+            "inactive" => $"Last ran v{update.RunningVersion}; latest v{update.LatestVersion} is not active",
             "ahead" => $"Running v{update.RunningVersion}; ahead of stable v{update.LatestVersion}",
             "failed" => $"v{update.LatestVersion} could not be staged; running v{update.RunningVersion}",
             "observed" => $"v{update.LatestVersion} observed; staging pending",
@@ -216,9 +217,14 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
         await RunCommandAsync(["repair", "--start-now"], cancellationToken) == 0;
 
     internal static string ResolveSupervisorExecutable(string applicationDirectory)
+        => ResolveSupervisorExecutable(applicationDirectory, StateDirectory);
+
+    internal static string ResolveSupervisorExecutable(
+        string applicationDirectory,
+        string stateDirectory)
     {
         var stableExecutable = Path.Combine(
-            StateDirectory,
+            stateDirectory,
             "bin",
             "CodexContinuity.exe");
         return File.Exists(stableExecutable)
