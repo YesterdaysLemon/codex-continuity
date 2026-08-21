@@ -228,6 +228,9 @@ public sealed class InstallCoordinatorTests : IDisposable
 
         var outcome = coordinator.Install(source, 45123, TrayInstallMode.Enabled);
         var supervisorStartup = platform.StartupCommand;
+        Assert.Equal(
+            "https://continuity.alirezaafshan.com",
+            platform.InstalledAppRegistration?.UrlInfoAbout);
         coordinator.Uninstall();
 
         Assert.True(File.Exists(outcome.State.InstalledTrayExecutable));

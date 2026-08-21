@@ -612,7 +612,7 @@ internal sealed class InstallCoordinator(
             UninstallCommand: $"{quotedExecutable} uninstall",
             QuietUninstallCommand: $"{quotedExecutable} uninstall",
             ModifyCommand: $"{quotedExecutable} repair",
-            UrlInfoAbout: "https://codex-continuity.alirezaafshan4.chatgpt.site",
+            UrlInfoAbout: "https://continuity.alirezaafshan.com",
             EstimatedSizeKilobytes: checked((int)Math.Max(
                 1,
                 (new FileInfo(executable).Length +
