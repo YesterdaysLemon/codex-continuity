@@ -83,6 +83,9 @@ internal static class ContinuityPaths
     internal static string SupervisorStatusFile(string stateDirectory) =>
         Path.Combine(stateDirectory, "supervisor-status.json");
 
+    internal static string UpdateStatusFile(string stateDirectory) =>
+        Path.Combine(stateDirectory, "update-status.json");
+
     internal static string AppServerLogFile(string stateDirectory) =>
         Path.Combine(stateDirectory, "app-server.log");
 }
