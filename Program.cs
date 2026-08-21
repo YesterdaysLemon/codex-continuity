@@ -89,7 +89,7 @@ internal static class Program
               serve       Supervise a loopback WebSocket app-server.
               install     Configure future desktop launches and start at user logon.
               repair      Reapply the persisted port and tray choices without restarting agents.
-              uninstall   Remove the user-level launch and environment configuration.
+              uninstall   Remove owned configuration and schedule installed files for cleanup.
               rollback    Stage the previous known-good build for the next safe start.
               setup       Download, verify, self-test, and install the matching release bundle.
               self-test   Prove reconnect and persisted-thread behavior in an isolated Codex home.
@@ -101,7 +101,7 @@ internal static class Program
               --no-start     With setup, configure startup without launching the supervisor now.
               --silent       With setup, suppress progress output for unattended installation.
               --skip-self-test  With setup, omit the isolated reconnect proof.
-              --uninstall   With setup, remove future-launch configuration without stopping agents.
+              --uninstall   With setup, uninstall without stopping agents; files leave next sign-in.
 
             Installation never closes or restarts the running Codex desktop app.
             """);
@@ -480,7 +480,7 @@ internal static class Program
     {
         var removed = CreateInstallCoordinator(ContinuityPaths.StateDirectory).Uninstall();
         Console.WriteLine(removed
-            ? "Removed owned future-launch configuration. No running process was stopped."
+            ? "Removed owned future-launch configuration. Installed files will be removed at the next sign-in; no running process was stopped."
             : "No owned future-launch configuration was found. No running process was stopped.");
         return removed ? 0 : 1;
     }

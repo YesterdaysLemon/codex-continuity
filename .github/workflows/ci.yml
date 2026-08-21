@@ -54,50 +54,87 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $setupHelpText -notmatch 'Codex Continuity keeps') {
             throw 'Renamed Setup executable did not provide read-only help.'
           }
-          $statePath = Join-Path $env:LOCALAPPDATA 'OpenAI\CodexContinuity\install-state.json'
+          $stateDirectory = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'OpenAI\CodexContinuity'))
+          $statePath = Join-Path $stateDirectory 'install-state.json'
+          $commandDirectory = Join-Path $stateDirectory 'bin'
+          $commandExecutable = Join-Path $commandDirectory 'CodexContinuity.exe'
           $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $runOnceKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
           $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexContinuity'
+          $pathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
           try {
-            & .\artifacts\install-smoke\CodexContinuity.exe install --port 45129
-            if ($LASTEXITCODE -ne 0) {
-              throw 'Per-user install smoke test failed.'
+            try {
+              & .\artifacts\install-smoke\CodexContinuity.exe install --port 45129
+              if ($LASTEXITCODE -ne 0) {
+                throw 'Per-user install smoke test failed.'
+              }
+              $state = Get-Content $statePath -Raw | ConvertFrom-Json
+              $registration = Get-ItemProperty $uninstallKey
+              $supervisorStartup = Get-ItemPropertyValue $runKey -Name CodexContinuity
+              $trayStartup = Get-ItemPropertyValue $runKey -Name CodexContinuityTray
+              $appServerUrl = [Environment]::GetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', 'User')
+              $updaterSetting = [Environment]::GetEnvironmentVariable('CODEX_SPARKLE_ENABLED', 'User')
+              $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+              if ($state.schemaVersion -ne 4 -or
+                  $state.port -ne 45129 -or
+                  -not (Test-Path -LiteralPath $state.installedExecutable) -or
+                  -not (Test-Path -LiteralPath $state.installedTrayExecutable) -or
+                  -not (Test-Path -LiteralPath $commandExecutable) -or
+                  $state.commandPath.appliedValue -ne $userPath -or
+                  ($userPath -split ';') -notcontains $commandDirectory -or
+                  $state.startupCommand.appliedValue -ne $supervisorStartup -or
+                  $state.trayStartupCommand.appliedValue -ne $trayStartup -or
+                  $appServerUrl -ne 'ws://127.0.0.1:45129' -or
+                  $updaterSetting -ne 'false' -or
+                  $registration.DisplayName -ne 'Codex Continuity' -or
+                  $registration.DisplayVersion -ne '0.2.0' -or
+                  $registration.UninstallString -notlike "*$commandExecutable*") {
+                throw 'Install smoke state did not match the requested lifecycle configuration.'
+              }
+              & $commandExecutable --help
+              if ($LASTEXITCODE -ne 0) {
+                throw 'Installed PATH command smoke test failed.'
+              }
+              & $commandExecutable repair
+              if ($LASTEXITCODE -ne 0) {
+                throw 'Per-user repair smoke test failed.'
+              }
             }
-            $state = Get-Content $statePath -Raw | ConvertFrom-Json
-            $registration = Get-ItemProperty $uninstallKey
-            $supervisorStartup = Get-ItemPropertyValue $runKey -Name CodexContinuity
-            $trayStartup = Get-ItemPropertyValue $runKey -Name CodexContinuityTray
-            $appServerUrl = [Environment]::GetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', 'User')
-            $updaterSetting = [Environment]::GetEnvironmentVariable('CODEX_SPARKLE_ENABLED', 'User')
-            if ($state.port -ne 45129 -or
-                -not (Test-Path -LiteralPath $state.installedExecutable) -or
-                -not (Test-Path -LiteralPath $state.installedTrayExecutable) -or
-                $state.startupCommand.appliedValue -ne $supervisorStartup -or
-                $state.trayStartupCommand.appliedValue -ne $trayStartup -or
-                $appServerUrl -ne 'ws://127.0.0.1:45129' -or
-                $updaterSetting -ne 'false' -or
-                $registration.DisplayName -ne 'Codex Continuity' -or
-                $registration.DisplayVersion -ne '0.2.0') {
-              throw 'Install smoke state did not match the requested lifecycle configuration.'
+            finally {
+              $uninstallExecutable = if (Test-Path -LiteralPath $commandExecutable) {
+                $commandExecutable
+              } else {
+                '.\artifacts\install-smoke\CodexContinuity.exe'
+              }
+              & $uninstallExecutable uninstall
             }
-            & .\artifacts\install-smoke\CodexContinuity.exe repair
-            if ($LASTEXITCODE -ne 0) {
-              throw 'Per-user repair smoke test failed.'
+            $uninstallExitCode = $LASTEXITCODE
+            $runValuesAfter = Get-ItemProperty $runKey -ErrorAction SilentlyContinue
+            $supervisorStartupAfter = $runValuesAfter.PSObject.Properties['CodexContinuity'].Value
+            $trayStartupAfter = $runValuesAfter.PSObject.Properties['CodexContinuityTray'].Value
+            $cleanupCommand = Get-ItemPropertyValue $runOnceKey -Name '!CodexContinuityCleanup'
+            if ($uninstallExitCode -ne 0 -or
+                (Test-Path $uninstallKey) -or
+                (Test-Path $statePath) -or
+                -not (Test-Path -LiteralPath $commandExecutable) -or
+                $cleanupCommand -notlike "*$stateDirectory*" -or
+                $pathBefore -ne ([Environment]::GetEnvironmentVariable('Path', 'User')) -or
+                $null -ne $supervisorStartupAfter -or
+                $null -ne $trayStartupAfter -or
+                $null -ne ([Environment]::GetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', 'User')) -or
+                $null -ne ([Environment]::GetEnvironmentVariable('CODEX_SPARKLE_ENABLED', 'User'))) {
+              throw 'Per-user uninstall smoke test failed.'
             }
           }
           finally {
-            & .\artifacts\install-smoke\CodexContinuity.exe uninstall
-          }
-          $runValuesAfter = Get-ItemProperty $runKey -ErrorAction SilentlyContinue
-          $supervisorStartupAfter = $runValuesAfter.PSObject.Properties['CodexContinuity'].Value
-          $trayStartupAfter = $runValuesAfter.PSObject.Properties['CodexContinuityTray'].Value
-          if ($LASTEXITCODE -ne 0 -or
-              (Test-Path $uninstallKey) -or
-              (Test-Path $statePath) -or
-              $null -ne $supervisorStartupAfter -or
-              $null -ne $trayStartupAfter -or
-              $null -ne ([Environment]::GetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', 'User')) -or
-              $null -ne ([Environment]::GetEnvironmentVariable('CODEX_SPARKLE_ENABLED', 'User'))) {
-            throw 'Per-user uninstall smoke test failed.'
+            Remove-ItemProperty $runOnceKey -Name '!CodexContinuityCleanup' -ErrorAction SilentlyContinue
+            [Environment]::SetEnvironmentVariable('Path', $pathBefore, 'User')
+            $stateLeaf = Split-Path -Leaf $stateDirectory
+            $stateParentLeaf = Split-Path -Leaf (Split-Path -Parent $stateDirectory)
+            if ($stateLeaf -ne 'CodexContinuity' -or $stateParentLeaf -ne 'OpenAI') {
+              throw "Refusing CI cleanup for unexpected state directory: $stateDirectory"
+            }
+            Remove-Item -LiteralPath $stateDirectory -Recurse -Force -ErrorAction SilentlyContinue
           }
           $setupHash = (Get-FileHash .\artifacts\install-smoke\CodexContinuity.exe -Algorithm SHA256).Hash
           .\scripts\write-winget-manifests.ps1 -Version 0.2.0 -InstallerUrl https://example.invalid/CodexContinuity-v0.2.0-Setup.exe -InstallerSha256 $setupHash -ReleaseDate 2026-08-20 -OutputDirectory artifacts/winget-smoke
