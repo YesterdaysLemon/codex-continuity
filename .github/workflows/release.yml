@@ -16,13 +16,20 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - run: dotnet restore
-      - run: dotnet build --configuration Release --no-restore
+      - run: dotnet restore tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj
+      - run: dotnet build CodexContinuity.csproj --configuration Release --no-restore
       - name: Publish single-file executable
         run: >-
           dotnet publish CodexContinuity.csproj --configuration Release
           --runtime win-x64 --self-contained true
-          -p:PublishSingleFile=true --output publish
+          -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
+          --output publish
+      - name: Publish notification-area controller
+        run: >-
+          dotnet publish tray/CodexContinuity.Tray.csproj --configuration Release
+          --runtime win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
+          --output publish-tray
       - name: Package release
         shell: pwsh
         run: |
@@ -30,6 +37,7 @@ jobs:
           $folder = "CodexContinuity-$tag-win-x64"
           New-Item -ItemType Directory -Path "release/$folder" | Out-Null
           Copy-Item publish/CodexContinuity.exe "release/$folder/"
+          Copy-Item publish-tray/CodexContinuity.Tray.exe "release/$folder/"
           Copy-Item README.md,LICENSE,SECURITY.md "release/$folder/"
           Compress-Archive -Path "release/$folder" -DestinationPath "release/$folder.zip"
           $hash = (Get-FileHash "release/$folder.zip" -Algorithm SHA256).Hash.ToLowerInvariant()

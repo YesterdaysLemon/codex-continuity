@@ -27,7 +27,10 @@ internal static class Program
                 "serve" => await ServeAsync(port),
                 "install" => await InstallAsync(
                     port,
-                    args.Contains("--start-now", StringComparer.OrdinalIgnoreCase)),
+                    args.Contains("--start-now", StringComparer.OrdinalIgnoreCase),
+                    args.Contains("--no-tray", StringComparer.OrdinalIgnoreCase)
+                        ? TrayInstallMode.Disabled
+                        : TrayInstallMode.Enabled),
                 "uninstall" => Uninstall(),
                 "rollback" => Rollback(),
                 "self-test" => await SelfTestAsync(),
@@ -59,6 +62,7 @@ internal static class Program
             Options:
               --port N       Loopback port (default: 45123).
               --start-now    With install, start the supervisor without touching the desktop app.
+              --no-tray      With install, omit the disposable notification-area controller.
 
             Installation never closes or restarts the running Codex desktop app.
             """);
@@ -307,7 +311,10 @@ internal static class Program
         }
     }
 
-    private static async Task<int> InstallAsync(int port, bool startNow)
+    private static async Task<int> InstallAsync(
+        int port,
+        bool startNow,
+        TrayInstallMode trayInstallMode)
     {
         var executable = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(executable) ||
@@ -320,12 +327,15 @@ internal static class Program
 
         var stateDirectory = ContinuityPaths.StateDirectory;
         var coordinator = CreateInstallCoordinator(stateDirectory);
-        var outcome = coordinator.Install(executable, port);
+        var outcome = coordinator.Install(executable, port, trayInstallMode);
         var state = outcome.State;
         Console.WriteLine(
             $"Configured future Codex desktop launches to use {state.AppServerUrl.AppliedValue}.");
         Console.WriteLine("Disabled the desktop's in-app updater for future launches.");
         Console.WriteLine("Registered the continuity supervisor to start at user logon.");
+        Console.WriteLine(state.InstalledTrayExecutable is null
+            ? "Left the optional notification-area controller disabled."
+            : "Registered the disposable notification-area controller to start at user logon.");
         Console.WriteLine($"Staged the coordinator at {state.InstalledExecutable}.");
         Console.WriteLine("The currently running Codex desktop process was not changed or restarted.");
         if (outcome.StagedUpgrade)
@@ -357,6 +367,13 @@ internal static class Program
                 }
                 Console.WriteLine(
                     $"Started the continuity supervisor in the background (PID {process.Id}).");
+            }
+
+            if (state.InstalledTrayExecutable is not null)
+            {
+                using var trayProcess = StartTray(state.InstalledTrayExecutable);
+                Console.WriteLine(
+                    $"Started the optional notification-area controller (PID {trayProcess.Id}).");
             }
         }
 
@@ -396,6 +413,17 @@ internal static class Program
         startInfo.ArgumentList.Add("serve");
         startInfo.ArgumentList.Add("--port");
         startInfo.ArgumentList.Add(port.ToString());
+        return Process.Start(startInfo)
+            ?? throw new InvalidOperationException($"Could not start {executable}.");
+    }
+
+    private static Process StartTray(string executable)
+    {
+        var startInfo = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = false,
+            WorkingDirectory = Path.GetDirectoryName(executable) ?? ContinuityPaths.StateDirectory,
+        };
         return Process.Start(startInfo)
             ?? throw new InvalidOperationException($"Could not start {executable}.");
     }

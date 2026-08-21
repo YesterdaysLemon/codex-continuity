@@ -16,8 +16,10 @@ jobs:
       - run: dotnet restore CodexContinuity.csproj
       - run: dotnet restore tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj
       - run: dotnet format CodexContinuity.csproj --verify-no-changes --no-restore
+      - run: dotnet format tray/CodexContinuity.Tray.csproj --verify-no-changes --no-restore
       - run: dotnet format tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj --verify-no-changes --no-restore
       - run: dotnet build CodexContinuity.csproj --configuration Release --no-restore
+      - run: dotnet build tray/CodexContinuity.Tray.csproj --configuration Release --no-restore
       - run: dotnet test tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj --configuration Release --no-restore
       - run: dotnet run --configuration Release --no-build -- help
       - shell: pwsh
@@ -30,4 +32,24 @@ jobs:
           }
           if ($plan.restartsCodex) {
             throw 'The bootstrapper must never restart Codex.'
+          }
+      - name: Clean per-user install and uninstall smoke test
+        shell: pwsh
+        run: |
+          dotnet publish CodexContinuity.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true --output artifacts/install-smoke
+          try {
+            & .\artifacts\install-smoke\CodexContinuity.exe install --no-tray --port 45129
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Per-user install smoke test failed.'
+            }
+            $registration = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexContinuity'
+            if ($registration.DisplayName -ne 'Codex Continuity') {
+              throw 'Installed Apps registration was not created.'
+            }
+          }
+          finally {
+            & .\artifacts\install-smoke\CodexContinuity.exe uninstall
+          }
+          if ($LASTEXITCODE -ne 0 -or (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexContinuity')) {
+            throw 'Per-user uninstall smoke test failed.'
           }

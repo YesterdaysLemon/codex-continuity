@@ -49,6 +49,8 @@ Codex desktop UI  ── reconnectable WebSocket ──  supervised app-server
 ## What it does
 
 - Keeps the app-server in a user-level background supervisor.
+- Shows optional health, active-agent count, and update status in the Windows
+  notification area; the tray is a separate process and can safely exit.
 - Binds only to `127.0.0.1`; it does not expose Codex over the network.
 - Removes the desktop's blue in-app update prompt on future launches.
 - Leaves signed package delivery to Microsoft Store, Intune, or another
@@ -95,6 +97,8 @@ Installation makes these user-level changes:
 - `CODEX_SPARKLE_ENABLED=false`
 - a `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\CodexContinuity`
   startup entry
+- by default, a separate `CodexContinuityTray` startup entry for the optional
+  notification-area controller
 - a repair/uninstall entry named **Codex Continuity** in Windows Installed Apps
 - versioned coordinator builds and owned install state under
   `%LOCALAPPDATA%\OpenAI\CodexContinuity`
@@ -111,6 +115,7 @@ the executable that currently owns active agents.
 | `probe` | Inspect desktop version, update manifest, and configuration. |
 | `serve` | Run the background supervisor. |
 | `install --start-now` | Configure future launches and start the supervisor. |
+| `install --no-tray` | Install headlessly without the notification-area controller. |
 | `uninstall` | Remove future-launch and startup configuration without killing work. |
 | `rollback` | Select the previous known-good build for the next safe supervisor start. |
 | `self-test` | Prove reconnect behavior in an isolated temporary Codex home. |
@@ -152,6 +157,19 @@ restores values captured before installation, and only while their current
 values still match the ones Continuity applied. Neither command stops a running
 backend or restarts the desktop. A later desktop restart after uninstall
 returns to its normal bundled app-server and updater.
+
+## What appears in Windows
+
+- **Task Manager:** `Codex Continuity Supervisor` owns the resilient backend;
+  `Codex Continuity Tray` is the optional, disposable status UI.
+- **Notification area:** the Continuity mark appears beside or inside the
+  collapsible group near Wi-Fi and volume, according to the user's Windows
+  taskbar preferences.
+- **Installed Apps:** `Codex Continuity` exposes repair/modify and uninstall.
+
+Exiting or crashing the tray never stops the supervisor or its agents. The tray
+does not display thread names; it reports only health and aggregate active-agent
+count. Use `--no-tray` for servers, automation, or a completely headless setup.
 
 ## Security and operational boundary
 

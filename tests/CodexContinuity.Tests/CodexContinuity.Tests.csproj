@@ -15,5 +15,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\CodexContinuity.csproj" />
+    <ProjectReference Include="..\..\tray\CodexContinuity.Tray.csproj" />
   </ItemGroup>
 </Project>

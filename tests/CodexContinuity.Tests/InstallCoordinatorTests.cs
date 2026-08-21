@@ -21,7 +21,7 @@ public sealed class InstallCoordinatorTests : IDisposable
         var coordinator = CreateCoordinator(platform);
         var source = CreateSource("version-one");
 
-        var outcome = coordinator.Install(source, 45124);
+        var outcome = coordinator.Install(source, 45124, TrayInstallMode.Disabled);
         var removed = coordinator.Uninstall();
 
         Assert.True(removed);
@@ -37,7 +37,7 @@ public sealed class InstallCoordinatorTests : IDisposable
     {
         var platform = new FakeInstallPlatform();
         var coordinator = CreateCoordinator(platform);
-        coordinator.Install(CreateSource("version-one"), 45123);
+        coordinator.Install(CreateSource("version-one"), 45123, TrayInstallMode.Disabled);
         platform.Environment[InstallCoordinator.AppServerUrlVariable] = "ws://127.0.0.1:49999";
 
         coordinator.Uninstall();
@@ -52,8 +52,14 @@ public sealed class InstallCoordinatorTests : IDisposable
     {
         var platform = new FakeInstallPlatform();
         var coordinator = CreateCoordinator(platform);
-        var first = coordinator.Install(CreateSource("version-one"), 45123);
-        var second = coordinator.Install(CreateSource("version-two"), 45123);
+        var first = coordinator.Install(
+            CreateSource("version-one"),
+            45123,
+            TrayInstallMode.Disabled);
+        var second = coordinator.Install(
+            CreateSource("version-two"),
+            45123,
+            TrayInstallMode.Disabled);
 
         var rolledBack = coordinator.Rollback();
 
@@ -69,6 +75,23 @@ public sealed class InstallCoordinatorTests : IDisposable
             platform.InstalledAppRegistration?.InstallLocation is { } installLocation
                 ? Path.Combine(installLocation, "CodexContinuity.exe")
                 : null);
+    }
+
+    [Fact]
+    public void DefaultBundleStagesDisposableTrayWithIndependentStartup()
+    {
+        var platform = new FakeInstallPlatform();
+        var coordinator = CreateCoordinator(platform);
+        var source = CreateBundleSource("version-with-tray");
+
+        var outcome = coordinator.Install(source, 45123, TrayInstallMode.Enabled);
+        var supervisorStartup = platform.StartupCommand;
+        coordinator.Uninstall();
+
+        Assert.True(File.Exists(outcome.State.InstalledTrayExecutable));
+        Assert.Contains("CodexContinuity.Tray.exe", platform.AppliedTrayStartupCommand);
+        Assert.DoesNotContain("CodexContinuity.Tray", supervisorStartup);
+        Assert.Null(platform.TrayStartupCommand);
     }
 
     public void Dispose()
@@ -96,10 +119,22 @@ public sealed class InstallCoordinatorTests : IDisposable
         return path;
     }
 
+    private string CreateBundleSource(string content)
+    {
+        var directory = Path.Combine(root, Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var supervisor = Path.Combine(directory, "CodexContinuity.exe");
+        File.WriteAllText(supervisor, content);
+        File.WriteAllText(Path.Combine(directory, "CodexContinuity.Tray.exe"), $"{content}-tray");
+        return supervisor;
+    }
+
     private sealed class FakeInstallPlatform : IInstallPlatform
     {
         internal Dictionary<string, string?> Environment { get; } = [];
         internal string? StartupCommand { get; set; }
+        internal string? TrayStartupCommand { get; set; }
+        internal string? AppliedTrayStartupCommand { get; private set; }
         internal InstalledAppRegistration? InstalledAppRegistration { get; set; }
 
         public string? GetUserEnvironmentVariable(string name) =>
@@ -111,6 +146,17 @@ public sealed class InstallCoordinatorTests : IDisposable
         public string? GetStartupCommand() => StartupCommand;
 
         public void SetStartupCommand(string? value) => StartupCommand = value;
+
+        public string? GetTrayStartupCommand() => TrayStartupCommand;
+
+        public void SetTrayStartupCommand(string? value)
+        {
+            TrayStartupCommand = value;
+            if (value is not null)
+            {
+                AppliedTrayStartupCommand = value;
+            }
+        }
 
         public InstalledAppRegistration? GetInstalledAppRegistration() =>
             InstalledAppRegistration;

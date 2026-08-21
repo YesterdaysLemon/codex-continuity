@@ -8,6 +8,12 @@ namespace CodexContinuity;
 
 internal sealed record OwnedString(string? PreviousValue, string AppliedValue);
 
+internal enum TrayInstallMode
+{
+    Enabled,
+    Disabled,
+}
+
 internal sealed record InstalledAppRegistration(
     string DisplayName,
     string DisplayVersion,
@@ -25,10 +31,13 @@ internal sealed record InstallState(
     int Port,
     string InstalledExecutable,
     string? PreviousInstalledExecutable,
+    string? InstalledTrayExecutable,
+    string? PreviousInstalledTrayExecutable,
     string BinarySha256,
     OwnedString AppServerUrl,
     OwnedString UpdaterSetting,
     OwnedString StartupCommand,
+    OwnedString? TrayStartupCommand,
     InstalledAppRegistration? PreviousInstalledAppRegistration,
     InstalledAppRegistration InstalledAppRegistration,
     DateTimeOffset InstalledAtUtc);
@@ -64,6 +73,8 @@ internal interface IInstallPlatform
     void SetUserEnvironmentVariable(string name, string? value);
     string? GetStartupCommand();
     void SetStartupCommand(string? value);
+    string? GetTrayStartupCommand();
+    void SetTrayStartupCommand(string? value);
     InstalledAppRegistration? GetInstalledAppRegistration();
     void SetInstalledAppRegistration(InstalledAppRegistration? registration);
     void BroadcastEnvironmentChange();
@@ -125,7 +136,10 @@ internal sealed class InstallCoordinator(
     internal const string AppServerUrlVariable = "CODEX_APP_SERVER_WS_URL";
     internal const string DisableUpdaterVariable = "CODEX_SPARKLE_ENABLED";
 
-    internal InstallOutcome Install(string sourceExecutable, int port)
+    internal InstallOutcome Install(
+        string sourceExecutable,
+        int port,
+        TrayInstallMode trayInstallMode)
     {
         LoopbackEndpoint.ValidatePort(port);
         var sourcePath = Path.GetFullPath(sourceExecutable);
@@ -136,24 +150,46 @@ internal sealed class InstallCoordinator(
 
         Directory.CreateDirectory(stateDirectory);
         var previousState = stateStore.Load();
+        var sourceTrayExecutable = Path.Combine(
+            Path.GetDirectoryName(sourcePath) ?? string.Empty,
+            "CodexContinuity.Tray.exe");
+        if (trayInstallMode == TrayInstallMode.Enabled && !File.Exists(sourceTrayExecutable))
+        {
+            throw new FileNotFoundException(
+                "The optional tray executable is missing. Use the complete release bundle or install with --no-tray.",
+                sourceTrayExecutable);
+        }
+
         var hash = ComputeSha256(sourcePath);
-        var installedExecutable = StageVersion(sourcePath, hash);
+        var stagedVersion = StageVersion(
+            sourcePath,
+            trayInstallMode == TrayInstallMode.Enabled ? sourceTrayExecutable : null,
+            hash);
+        var installedExecutable = stagedVersion.SupervisorExecutable;
         var serverUrl = LoopbackEndpoint.WebSocketUrl(port);
         var startupCommand = StartupCommandBuilder.Build(installedExecutable, port);
+        var trayStartupCommand = stagedVersion.TrayExecutable is null
+            ? null
+            : StartupCommandBuilder.BuildTray(stagedVersion.TrayExecutable);
 
         var previousUrl = platform.GetUserEnvironmentVariable(AppServerUrlVariable);
         var previousUpdaterSetting = platform.GetUserEnvironmentVariable(DisableUpdaterVariable);
         var previousStartup = platform.GetStartupCommand();
+        var previousTrayStartup = platform.GetTrayStartupCommand();
         var previousRegistration = platform.GetInstalledAppRegistration();
         var registration = BuildInstalledAppRegistration(installedExecutable);
         var state = new InstallState(
-            SchemaVersion: 2,
+            SchemaVersion: 3,
             Port: port,
             InstalledExecutable: installedExecutable,
             PreviousInstalledExecutable: PreviousExecutable(
                 previousState,
                 installedExecutable,
                 stateDirectory),
+            InstalledTrayExecutable: stagedVersion.TrayExecutable,
+            PreviousInstalledTrayExecutable: PreviousTrayExecutable(
+                previousState,
+                stagedVersion.TrayExecutable),
             BinarySha256: hash,
             AppServerUrl: CaptureOwnedValue(previousUrl, previousState?.AppServerUrl, serverUrl),
             UpdaterSetting: CaptureOwnedValue(
@@ -164,6 +200,12 @@ internal sealed class InstallCoordinator(
                 previousStartup,
                 previousState?.StartupCommand,
                 startupCommand),
+            TrayStartupCommand: trayStartupCommand is null
+                ? null
+                : CaptureOwnedValue(
+                    previousTrayStartup,
+                    previousState?.TrayStartupCommand,
+                    trayStartupCommand),
             PreviousInstalledAppRegistration: previousState is not null &&
                 Equals(previousRegistration, previousState.InstalledAppRegistration)
                 ? previousState.PreviousInstalledAppRegistration
@@ -178,6 +220,18 @@ internal sealed class InstallCoordinator(
                 DisableUpdaterVariable,
                 state.UpdaterSetting.AppliedValue);
             platform.SetStartupCommand(state.StartupCommand.AppliedValue);
+            if (state.TrayStartupCommand is not null)
+            {
+                platform.SetTrayStartupCommand(state.TrayStartupCommand.AppliedValue);
+            }
+            else if (previousState?.TrayStartupCommand is not null &&
+                     string.Equals(
+                         previousTrayStartup,
+                         previousState.TrayStartupCommand.AppliedValue,
+                         StringComparison.Ordinal))
+            {
+                platform.SetTrayStartupCommand(previousState.TrayStartupCommand.PreviousValue);
+            }
             platform.SetInstalledAppRegistration(registration);
             stateStore.Save(state);
             platform.BroadcastEnvironmentChange();
@@ -187,6 +241,7 @@ internal sealed class InstallCoordinator(
             platform.SetUserEnvironmentVariable(AppServerUrlVariable, previousUrl);
             platform.SetUserEnvironmentVariable(DisableUpdaterVariable, previousUpdaterSetting);
             platform.SetStartupCommand(previousStartup);
+            platform.SetTrayStartupCommand(previousTrayStartup);
             platform.SetInstalledAppRegistration(previousRegistration);
             platform.BroadcastEnvironmentChange();
             throw;
@@ -216,6 +271,13 @@ internal sealed class InstallCoordinator(
         {
             platform.SetStartupCommand(state.StartupCommand.PreviousValue);
         }
+        if (state.TrayStartupCommand is not null && string.Equals(
+                platform.GetTrayStartupCommand(),
+                state.TrayStartupCommand.AppliedValue,
+                StringComparison.Ordinal))
+        {
+            platform.SetTrayStartupCommand(state.TrayStartupCommand.PreviousValue);
+        }
         if (Equals(platform.GetInstalledAppRegistration(), state.InstalledAppRegistration))
         {
             platform.SetInstalledAppRegistration(state.PreviousInstalledAppRegistration);
@@ -237,47 +299,71 @@ internal sealed class InstallCoordinator(
         }
 
         var startupCommand = StartupCommandBuilder.Build(previousExecutable, state.Port);
+        var previousTrayExecutable = state.PreviousInstalledTrayExecutable;
+        var trayStartupCommand = previousTrayExecutable is null
+            ? null
+            : StartupCommandBuilder.BuildTray(previousTrayExecutable);
         var currentStartup = platform.GetStartupCommand();
+        var currentTrayStartup = platform.GetTrayStartupCommand();
         var rolledBack = state with
         {
             InstalledExecutable = previousExecutable,
             PreviousInstalledExecutable = state.InstalledExecutable,
+            InstalledTrayExecutable = previousTrayExecutable,
+            PreviousInstalledTrayExecutable = state.InstalledTrayExecutable,
             BinarySha256 = ComputeSha256(previousExecutable),
             StartupCommand = CaptureOwnedValue(currentStartup, state.StartupCommand, startupCommand),
+            TrayStartupCommand = trayStartupCommand is null
+                ? null
+                : CaptureOwnedValue(
+                    currentTrayStartup,
+                    state.TrayStartupCommand,
+                    trayStartupCommand),
             InstalledAppRegistration = BuildInstalledAppRegistration(previousExecutable),
             InstalledAtUtc = DateTimeOffset.UtcNow,
         };
         platform.SetStartupCommand(startupCommand);
+        if (rolledBack.TrayStartupCommand is not null)
+        {
+            platform.SetTrayStartupCommand(rolledBack.TrayStartupCommand.AppliedValue);
+        }
+        else if (state.TrayStartupCommand is not null && string.Equals(
+                     currentTrayStartup,
+                     state.TrayStartupCommand.AppliedValue,
+                     StringComparison.Ordinal))
+        {
+            platform.SetTrayStartupCommand(state.TrayStartupCommand.PreviousValue);
+        }
         platform.SetInstalledAppRegistration(rolledBack.InstalledAppRegistration);
         stateStore.Save(rolledBack);
         return rolledBack;
     }
 
-    private string StageVersion(string sourceExecutable, string hash)
+    private sealed record StagedVersion(string SupervisorExecutable, string? TrayExecutable);
+
+    private string StageExecutable(string sourceExecutable, string destination)
     {
-        var assemblyVersion = typeof(InstallCoordinator).Assembly.GetName().Version;
-        var version = assemblyVersion is null
-            ? "dev"
-            : $"{assemblyVersion.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}";
-        var versionDirectory = Path.Combine(
-            ContinuityPaths.VersionsDirectory(stateDirectory),
-            $"{version}-{hash[..12].ToLowerInvariant()}");
-        Directory.CreateDirectory(versionDirectory);
-        var destination = Path.Combine(versionDirectory, "CodexContinuity.exe");
+        var sourceHash = ComputeSha256(sourceExecutable);
         if (File.Exists(destination))
         {
-            if (!string.Equals(ComputeSha256(destination), hash, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(
+                    ComputeSha256(destination),
+                    sourceHash,
+                    StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidDataException($"Staged executable hash mismatch at {destination}.");
             }
             return destination;
         }
 
-        var temporaryPath = Path.Combine(versionDirectory, $"CodexContinuity-{Guid.NewGuid():N}.tmp");
+        var temporaryPath = $"{destination}.{Guid.NewGuid():N}.tmp";
         try
         {
             File.Copy(sourceExecutable, temporaryPath, overwrite: false);
-            if (!string.Equals(ComputeSha256(temporaryPath), hash, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(
+                    ComputeSha256(temporaryPath),
+                    sourceHash,
+                    StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidDataException("Staged executable failed its SHA-256 verification.");
             }
@@ -293,6 +379,29 @@ internal sealed class InstallCoordinator(
         return destination;
     }
 
+    private StagedVersion StageVersion(
+        string sourceExecutable,
+        string? sourceTrayExecutable,
+        string hash)
+    {
+        var assemblyVersion = typeof(InstallCoordinator).Assembly.GetName().Version;
+        var version = assemblyVersion is null
+            ? "dev"
+            : $"{assemblyVersion.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}";
+        var versionDirectory = Path.Combine(
+            ContinuityPaths.VersionsDirectory(stateDirectory),
+            $"{version}-{hash[..12].ToLowerInvariant()}");
+        Directory.CreateDirectory(versionDirectory);
+        var destination = Path.Combine(versionDirectory, "CodexContinuity.exe");
+        var supervisor = StageExecutable(sourceExecutable, destination);
+        var tray = sourceTrayExecutable is null
+            ? null
+            : StageExecutable(
+                sourceTrayExecutable,
+                Path.Combine(versionDirectory, "CodexContinuity.Tray.exe"));
+        return new StagedVersion(supervisor, tray);
+    }
+
     private bool UninstallLegacyConfiguration()
     {
         var startup = platform.GetStartupCommand();
@@ -305,6 +414,11 @@ internal sealed class InstallCoordinator(
         }
 
         platform.SetStartupCommand(null);
+        var trayStartup = platform.GetTrayStartupCommand();
+        if (trayStartup?.Contains("CodexContinuity.Tray", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            platform.SetTrayStartupCommand(null);
+        }
         var registration = platform.GetInstalledAppRegistration();
         if (registration?.UninstallCommand.Contains(
                 "CodexContinuity",
@@ -374,6 +488,23 @@ internal sealed class InstallCoordinator(
             : previousState.InstalledExecutable;
     }
 
+    private static string? PreviousTrayExecutable(
+        InstallState? previousState,
+        string? installedTrayExecutable)
+    {
+        if (previousState is null)
+        {
+            return null;
+        }
+        if (installedTrayExecutable is not null &&
+            previousState.InstalledTrayExecutable is not null &&
+            PathsEqual(previousState.InstalledTrayExecutable, installedTrayExecutable))
+        {
+            return previousState.PreviousInstalledTrayExecutable;
+        }
+        return previousState.InstalledTrayExecutable;
+    }
+
     private static bool PathsEqual(string first, string second) =>
         Path.GetFullPath(first).Equals(Path.GetFullPath(second), StringComparison.OrdinalIgnoreCase);
 
@@ -402,7 +533,15 @@ internal sealed class InstallCoordinator(
             UrlInfoAbout: "https://codex-continuity.alirezaafshan4.chatgpt.site",
             EstimatedSizeKilobytes: checked((int)Math.Max(
                 1,
-                (new FileInfo(executable).Length + 1023) / 1024)));
+                (new FileInfo(executable).Length +
+                 (File.Exists(Path.Combine(
+                     Path.GetDirectoryName(executable) ?? stateDirectory,
+                     "CodexContinuity.Tray.exe"))
+                     ? new FileInfo(Path.Combine(
+                         Path.GetDirectoryName(executable) ?? stateDirectory,
+                         "CodexContinuity.Tray.exe")).Length
+                     : 0) +
+                 1023) / 1024)));
     }
 }
 
@@ -424,11 +563,14 @@ internal static class StartupCommandBuilder
                $"-WorkingDirectory '{escapedWorkingDirectory}' " +
                $"-ArgumentList 'serve','--port','{port}'\"";
     }
+
+    internal static string BuildTray(string executable) => $"\"{executable}\"";
 }
 
 internal sealed class WindowsInstallPlatform : IInstallPlatform
 {
     private const string RunValueName = "CodexContinuity";
+    private const string TrayRunValueName = "CodexContinuityTray";
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string UninstallKeyPath =
         @"Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexContinuity";
@@ -456,6 +598,25 @@ internal sealed class WindowsInstallPlatform : IInstallPlatform
 
         using var writableRunKey = Registry.CurrentUser.CreateSubKey(RunKeyPath);
         writableRunKey.SetValue(RunValueName, value);
+    }
+
+    public string? GetTrayStartupCommand()
+    {
+        using var runKey = Registry.CurrentUser.OpenSubKey(RunKeyPath);
+        return runKey?.GetValue(TrayRunValueName) as string;
+    }
+
+    public void SetTrayStartupCommand(string? value)
+    {
+        if (value is null)
+        {
+            using var runKey = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
+            runKey?.DeleteValue(TrayRunValueName, throwOnMissingValue: false);
+            return;
+        }
+
+        using var writableRunKey = Registry.CurrentUser.CreateSubKey(RunKeyPath);
+        writableRunKey.SetValue(TrayRunValueName, value);
     }
 
     public InstalledAppRegistration? GetInstalledAppRegistration()

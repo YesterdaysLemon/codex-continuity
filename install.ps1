@@ -9,6 +9,8 @@ param(
 
     [switch]$SkipSelfTest,
 
+    [switch]$NoTray,
+
     [switch]$Json,
 
     [switch]$Plan,
@@ -86,6 +88,7 @@ if ($Plan) {
         assetUrl = $assetUrl
         checksumUrl = $checksumUrl
         selfTest = -not $SkipSelfTest
+        tray = -not $NoTray
         startNow = [bool]$StartNow
         restartsCodex = $false
     }
@@ -137,6 +140,9 @@ try {
     }
 
     $installArguments = @("install")
+    if ($NoTray) {
+        $installArguments += "--no-tray"
+    }
     if ($StartNow) {
         $installArguments += "--start-now"
     }
