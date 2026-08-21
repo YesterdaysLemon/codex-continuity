@@ -10,6 +10,19 @@ public sealed class UpdateStateTests : IDisposable
         $"codex-continuity-update-state-tests-{Guid.NewGuid():N}");
 
     [Theory]
+    [InlineData("1.0.0", "1.0.0-rc.1", 1)]
+    [InlineData("1.0.0-rc.10", "1.0.0-rc.2", 1)]
+    [InlineData("1.0.0-alpha", "1.0.0-1", 1)]
+    [InlineData("1.0.0+windows", "1.0.0+linux", 0)]
+    public void SemanticVersionComparisonUsesPrecedenceRules(
+        string first,
+        string second,
+        int expectedSign)
+    {
+        Assert.Equal(expectedSign, Math.Sign(ContinuitySemanticVersion.Compare(first, second)));
+    }
+
+    [Theory]
     [InlineData("0.3.0", "0.3.0", true, true, "active")]
     [InlineData("0.3.0", "0.3.0", false, false, "inactive")]
     [InlineData("0.2.0", "0.3.0", true, true, "staged")]
@@ -98,8 +111,10 @@ public sealed class UpdateStateTests : IDisposable
             34,
             releases));
 
-        var loaded = store.Load();
+        var loadResult = store.Load();
+        var loaded = loadResult.State;
 
+        Assert.Equal(ContinuityUpdateStateLoadKind.Loaded, loadResult.Kind);
         Assert.NotNull(loaded);
         Assert.Equal(32, loaded.Releases.Count);
         Assert.Equal(40, loaded.ObservedCount);
@@ -108,10 +123,117 @@ public sealed class UpdateStateTests : IDisposable
         Assert.Equal("1.0.40", loaded.Releases[0].Version);
 
         File.WriteAllText(Path.Combine(root, "update-status.json"), "not json");
-        Assert.Null(store.Load());
+        Assert.Equal(ContinuityUpdateStateLoadKind.Invalid, store.Load().Kind);
 
         File.WriteAllText(Path.Combine(root, "update-status.json"), "{}");
-        Assert.Null(store.Load());
+        Assert.Equal(ContinuityUpdateStateLoadKind.Invalid, store.Load().Kind);
+    }
+
+    [Fact]
+    public void StoreDistinguishesMissingInvalidAndUnsupportedState()
+    {
+        var store = Store();
+        var statePath = Path.Combine(root, "update-status.json");
+
+        Assert.Equal(ContinuityUpdateStateLoadKind.Missing, store.Load().Kind);
+
+        File.WriteAllText(statePath, "{\"schemaVersion\":2}");
+        Assert.Equal(ContinuityUpdateStateLoadKind.UnsupportedSchema, store.Load().Kind);
+
+        File.WriteAllText(statePath, new string('x', 1024 * 1024 + 1));
+        Assert.Equal(ContinuityUpdateStateLoadKind.Invalid, store.Load().Kind);
+    }
+
+    [Fact]
+    public void StoreRoundTripsValidSemanticVersionsAndHistoricalDefaults()
+    {
+        var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
+        var state = new ContinuityUpdateState(
+            1,
+            now,
+            now,
+            "1.0.0",
+            "1.1.0-rc.1",
+            "1.1.0-rc.1",
+            true,
+            "1.1.0-rc.1+windows",
+            null,
+            1,
+            1,
+            0,
+            [new TrackedContinuityRelease(
+                "1.1.0-rc.1+windows",
+                now,
+                now,
+                now,
+                AppliedAtUtc: null,
+                LastError: null)]);
+        var store = Store();
+
+        store.Save(state);
+        var loaded = store.Load();
+
+        Assert.Equal(ContinuityUpdateStateLoadKind.Loaded, loaded.Kind);
+        Assert.Equivalent(state, loaded.State, strict: true);
+
+        var statePath = Path.Combine(root, "update-status.json");
+        File.WriteAllText(
+            statePath,
+            File.ReadAllText(statePath).Replace(
+                "  \"runningProcessObserved\": true," + Environment.NewLine,
+                string.Empty,
+                StringComparison.Ordinal));
+        var migrated = store.Load();
+        Assert.Equal(ContinuityUpdateStateLoadKind.Loaded, migrated.Kind);
+        Assert.False(migrated.State!.RunningProcessObserved);
+    }
+
+    [Theory]
+    [InlineData("01.2.3")]
+    [InlineData("1.2")]
+    [InlineData("1.2.3-01")]
+    [InlineData("1.2.3+")]
+    public void StoreRejectsInvalidSemanticVersions(string invalidVersion)
+    {
+        var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
+        var state = new ContinuityUpdateState(
+            1,
+            now,
+            now,
+            invalidVersion,
+            "1.0.0",
+            "1.0.0",
+            true,
+            null,
+            null,
+            0,
+            0,
+            0,
+            Releases: []);
+
+        Assert.Throws<ArgumentException>(() => Store().Save(state));
+    }
+
+    [Fact]
+    public void StoreRejectsUnboundedErrorText()
+    {
+        var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
+        var state = new ContinuityUpdateState(
+            1,
+            now,
+            now,
+            "1.0.0",
+            "1.0.0",
+            "1.0.0",
+            true,
+            null,
+            new string('x', 2049),
+            0,
+            0,
+            0,
+            Releases: []);
+
+        Assert.Throws<ArgumentException>(() => Store().Save(state));
     }
 
     public void Dispose()

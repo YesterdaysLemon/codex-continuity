@@ -1,4 +1,6 @@
 using CodexContinuity;
+using System.Diagnostics;
+using System.Text;
 using Xunit;
 
 namespace CodexContinuity.Tests;
@@ -34,7 +36,156 @@ public sealed class InstallCoordinatorTests : IDisposable
         Assert.Equal(@"C:\UserTools", platform.Environment[InstallCoordinator.PathVariable]);
         Assert.Equal("previous startup", platform.StartupCommand);
         Assert.Null(platform.InstalledAppRegistration);
-        Assert.Contains(Path.GetFullPath(root), platform.CleanupCommand);
+        Assert.Contains(Path.GetFullPath(root), ReadCleanupScript(platform.CleanupCommand));
+    }
+
+    [Fact]
+    public void UninstallKeepsOwnedReconnectUrlUntilNextSignInWhenBackendIsStillRunning()
+    {
+        var platform = new FakeInstallPlatform
+        {
+            StartupCommand = "previous startup",
+        };
+        platform.Environment[InstallCoordinator.AppServerUrlVariable] = "ws://127.0.0.1:40000";
+        platform.Environment[InstallCoordinator.DisableUpdaterVariable] = "true";
+        var coordinator = CreateCoordinator(platform);
+        coordinator.Install(CreateSource("version-one"), 45123, TrayInstallMode.Disabled);
+
+        var removed = coordinator.Uninstall(
+            UninstallReconnectPolicy.PreserveUntilNextSignIn);
+
+        Assert.True(removed);
+        Assert.Equal(
+            LoopbackEndpoint.WebSocketUrl(45123),
+            platform.Environment[InstallCoordinator.AppServerUrlVariable]);
+        Assert.Equal("true", platform.Environment[InstallCoordinator.DisableUpdaterVariable]);
+        Assert.Equal("previous startup", platform.StartupCommand);
+        Assert.Null(platform.InstalledAppRegistration);
+        Assert.True(File.Exists(ContinuityPaths.InstallStateFile(root)));
+        Assert.Equal(
+            InstallLifecycle.DeferredUninstall,
+            new InstallStateStore(ContinuityPaths.InstallStateFile(root)).Load()!.Lifecycle);
+
+        var cleanupScript = ReadCleanupScript(platform.CleanupCommand);
+        Assert.Contains(InstallCoordinator.AppServerUrlVariable, cleanupScript);
+        Assert.Contains(LoopbackEndpoint.WebSocketUrl(45123), cleanupScript);
+        Assert.Contains("ws://127.0.0.1:40000", cleanupScript);
+        Assert.Contains("[string]::Equals", cleanupScript);
+        Assert.Contains(Path.GetFullPath(root), cleanupScript);
+    }
+
+    [Fact]
+    public void ReinstallBeforeDeferredCleanupRetainsTheOriginalReconnectValue()
+    {
+        var platform = new FakeInstallPlatform();
+        platform.Environment[InstallCoordinator.AppServerUrlVariable] = "ws://127.0.0.1:40000";
+        var coordinator = CreateCoordinator(platform);
+        coordinator.Install(CreateSource("version-one"), 45123, TrayInstallMode.Disabled);
+        coordinator.Uninstall(UninstallReconnectPolicy.PreserveUntilNextSignIn);
+
+        var reinstalled = coordinator.Install(
+            CreateSource("version-two"),
+            45123,
+            TrayInstallMode.Disabled);
+        coordinator.Uninstall();
+
+        Assert.Equal(
+            "ws://127.0.0.1:40000",
+            reinstalled.State.AppServerUrl.PreviousValue);
+        Assert.Equal(InstallLifecycle.Installed, reinstalled.State.Lifecycle);
+        Assert.Equal(
+            "ws://127.0.0.1:40000",
+            platform.Environment[InstallCoordinator.AppServerUrlVariable]);
+    }
+
+    [Fact]
+    public void DeferredUninstallCannotBeRolledBackIntoAnInstalledState()
+    {
+        var platform = new FakeInstallPlatform();
+        var coordinator = CreateCoordinator(platform);
+        coordinator.Install(CreateSource("version-one"), 45123, TrayInstallMode.Disabled);
+        coordinator.Uninstall(UninstallReconnectPolicy.PreserveUntilNextSignIn);
+
+        var exception = Assert.Throws<InvalidOperationException>(coordinator.Rollback);
+
+        Assert.Contains("pending deferred uninstall", exception.Message);
+    }
+
+    [Fact]
+    public void DeferredReconnectRestoreDoesNotClaimUrlChangedAfterInstall()
+    {
+        var platform = new FakeInstallPlatform();
+        var coordinator = CreateCoordinator(platform);
+        coordinator.Install(CreateSource("version-one"), 45123, TrayInstallMode.Disabled);
+        platform.Environment[InstallCoordinator.AppServerUrlVariable] = "ws://127.0.0.1:49999";
+
+        coordinator.Uninstall(UninstallReconnectPolicy.PreserveUntilNextSignIn);
+
+        Assert.Equal(
+            "ws://127.0.0.1:49999",
+            platform.Environment[InstallCoordinator.AppServerUrlVariable]);
+        Assert.InRange(
+            platform.CleanupCommand!.Length,
+            1,
+            DeferredCleanupCommandBuilder.MaximumRunOnceCommandLength);
+    }
+
+    [Theory]
+    [InlineData("continuity's live endpoint", "previous endpoint")]
+    [InlineData("replacement endpoint", "replacement endpoint")]
+    public async Task DeferredReconnectCleanupExecutesWithoutOverwritingANewerValue(
+        string processValue,
+        string expectedValue)
+    {
+        var cleanupRoot = Path.Combine(root, "deferred-cleanup");
+        Directory.CreateDirectory(cleanupRoot);
+        const string variableName = "CODEX_CONTINUITY_TEST_RECONNECT";
+        const string appliedValue = "continuity's live endpoint";
+        const string previousValue = "previous endpoint";
+        var command = DeferredCleanupCommandBuilder.Build(
+            [cleanupRoot],
+            [
+                new DeferredEnvironmentRestore(
+                    variableName,
+                    new OwnedString(previousValue, appliedValue)),
+            ]);
+        Assert.InRange(command.Length, 1, DeferredCleanupCommandBuilder.MaximumRunOnceCommandLength);
+        var scriptPath = CleanupScriptPath(command);
+        var script = File.ReadAllText(scriptPath).Replace(
+            "[System.EnvironmentVariableTarget]::User",
+            "[System.EnvironmentVariableTarget]::Process",
+            StringComparison.Ordinal);
+        script +=
+            $"; Write-Output ([Environment]::GetEnvironmentVariable('{variableName}', " +
+            "[System.EnvironmentVariableTarget]::Process))";
+        File.WriteAllText(
+            scriptPath,
+            script,
+            new UnicodeEncoding(bigEndian: false, byteOrderMark: true));
+        var startInfo = new ProcessStartInfo(Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe")
+        {
+            Arguments = $"/d /s /c \"{command}\"",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        startInfo.Environment[variableName] = processValue;
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Could not start Windows PowerShell.");
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+
+        var standardOutput = await output;
+        var standardError = await error;
+        Assert.True(
+            process.ExitCode == 0,
+            $"Cleanup command exited with {process.ExitCode}: {standardError}");
+        Assert.Equal(expectedValue, standardOutput.Trim());
+        Assert.False(Directory.Exists(cleanupRoot));
+        Assert.False(File.Exists(scriptPath));
     }
 
     [Fact]
@@ -146,7 +297,9 @@ public sealed class InstallCoordinatorTests : IDisposable
         Assert.Null(platform.Environment[InstallCoordinator.AppServerUrlVariable]);
         Assert.Null(platform.Environment[InstallCoordinator.DisableUpdaterVariable]);
         Assert.Null(platform.StartupCommand);
-        Assert.Contains(quotedRoot.Replace("'", "''", StringComparison.Ordinal), platform.CleanupCommand);
+        Assert.Contains(
+            quotedRoot.Replace("'", "''", StringComparison.Ordinal),
+            ReadCleanupScript(platform.CleanupCommand));
     }
 
     [Fact]
@@ -171,6 +324,65 @@ public sealed class InstallCoordinatorTests : IDisposable
             LoopbackEndpoint.WebSocketUrl(45125),
             platform.Environment[InstallCoordinator.AppServerUrlVariable]);
         Assert.Null(platform.StartupCommand);
+    }
+
+    [Fact]
+    public void LegacyUninstallKeepsLiveReconnectUrlUntilNextSignIn()
+    {
+        const int legacyPort = 45124;
+        Directory.CreateDirectory(root);
+        var legacyExecutable = Path.Combine(root, "CodexContinuity.exe");
+        File.WriteAllText(legacyExecutable, "legacy-version");
+        var platform = new FakeInstallPlatform
+        {
+            StartupCommand = StartupCommandBuilder.Build(legacyExecutable, legacyPort),
+        };
+        platform.Environment[InstallCoordinator.AppServerUrlVariable] =
+            LoopbackEndpoint.WebSocketUrl(legacyPort);
+        var coordinator = CreateCoordinator(platform);
+
+        coordinator.Uninstall(UninstallReconnectPolicy.PreserveUntilNextSignIn);
+
+        Assert.Equal(
+            LoopbackEndpoint.WebSocketUrl(legacyPort),
+            platform.Environment[InstallCoordinator.AppServerUrlVariable]);
+        Assert.Null(platform.StartupCommand);
+        var cleanupScript = ReadCleanupScript(platform.CleanupCommand);
+        Assert.Contains(InstallCoordinator.AppServerUrlVariable, cleanupScript);
+        Assert.Contains("$null", cleanupScript);
+        Assert.Equal(
+            InstallLifecycle.DeferredUninstall,
+            new InstallStateStore(ContinuityPaths.InstallStateFile(root)).Load()!.Lifecycle);
+    }
+
+    [Theory]
+    [InlineData(45124)]
+    [InlineData(45125)]
+    public void LegacyReinstallBeforeDeferredCleanupDoesNotClaimItsReconnectUrl(int reinstallPort)
+    {
+        const int legacyPort = 45124;
+        Directory.CreateDirectory(root);
+        var legacyExecutable = Path.Combine(root, "CodexContinuity.exe");
+        File.WriteAllText(legacyExecutable, "legacy-version");
+        var platform = new FakeInstallPlatform
+        {
+            StartupCommand = StartupCommandBuilder.Build(legacyExecutable, legacyPort),
+        };
+        platform.Environment[InstallCoordinator.AppServerUrlVariable] =
+            LoopbackEndpoint.WebSocketUrl(legacyPort);
+        platform.Environment[InstallCoordinator.DisableUpdaterVariable] = "false";
+        var coordinator = CreateCoordinator(platform);
+        coordinator.Uninstall(UninstallReconnectPolicy.PreserveUntilNextSignIn);
+
+        var reinstalled = coordinator.Install(
+            CreateSource("version-two"),
+            reinstallPort,
+            TrayInstallMode.Disabled);
+        coordinator.Uninstall();
+
+        Assert.Null(reinstalled.State.AppServerUrl.PreviousValue);
+        Assert.Null(platform.Environment[InstallCoordinator.AppServerUrlVariable]);
+        Assert.Null(platform.Environment[InstallCoordinator.DisableUpdaterVariable]);
     }
 
     [Fact]
@@ -359,16 +571,18 @@ public sealed class InstallCoordinatorTests : IDisposable
         Assert.Equal(
             ContinuityPaths.CommandDirectory(currentRoot),
             platform.Environment[InstallCoordinator.PathVariable]);
-        Assert.Contains(Path.GetFullPath(legacyRoot), platform.CleanupCommand);
-        Assert.DoesNotContain(Path.GetFullPath(currentRoot), platform.CleanupCommand);
+        var migrationCleanupScript = ReadCleanupScript(platform.CleanupCommand);
+        Assert.Contains(Path.GetFullPath(legacyRoot), migrationCleanupScript);
+        Assert.DoesNotContain(Path.GetFullPath(currentRoot), migrationCleanupScript);
         Assert.True(File.Exists(ContinuityPaths.InstallStateFile(legacyRoot)));
         Assert.True(File.Exists(ContinuityPaths.InstallStateFile(currentRoot)));
 
         coordinator.Uninstall();
 
         Assert.Null(platform.Environment[InstallCoordinator.PathVariable]);
-        Assert.Contains(Path.GetFullPath(legacyRoot), platform.CleanupCommand);
-        Assert.Contains(Path.GetFullPath(currentRoot), platform.CleanupCommand);
+        var uninstallCleanupScript = ReadCleanupScript(platform.CleanupCommand);
+        Assert.Contains(Path.GetFullPath(legacyRoot), uninstallCleanupScript);
+        Assert.Contains(Path.GetFullPath(currentRoot), uninstallCleanupScript);
         Assert.False(File.Exists(ContinuityPaths.InstallStateFile(legacyRoot)));
         Assert.False(File.Exists(ContinuityPaths.InstallStateFile(currentRoot)));
     }
@@ -480,6 +694,21 @@ public sealed class InstallCoordinatorTests : IDisposable
         File.WriteAllText(supervisor, content);
         File.WriteAllText(Path.Combine(directory, "CodexContinuity.Tray.exe"), $"{content}-tray");
         return supervisor;
+    }
+
+    private static string ReadCleanupScript(string? cleanupCommand) =>
+        File.ReadAllText(CleanupScriptPath(cleanupCommand));
+
+    private static string CleanupScriptPath(string? cleanupCommand)
+    {
+        Assert.NotNull(cleanupCommand);
+        const string marker = "-File \"";
+        var markerIndex = cleanupCommand.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(markerIndex >= 0, $"Expected a file-backed cleanup command: {cleanupCommand}");
+        var pathStart = markerIndex + marker.Length;
+        var pathEnd = cleanupCommand.IndexOf('"', pathStart);
+        Assert.True(pathEnd > pathStart, $"Expected a quoted cleanup script path: {cleanupCommand}");
+        return cleanupCommand[pathStart..pathEnd];
     }
 
     private sealed class FakeInstallPlatform : IInstallPlatform

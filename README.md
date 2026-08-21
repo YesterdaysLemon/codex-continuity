@@ -62,8 +62,9 @@ CodexContinuity uninstall
 
 `uninstall` restores only the environment, startup, `PATH`, and Installed Apps
 values still owned by Continuity. It never stops the running backend or active
-agents. The app's files and logs are removed at the next Windows sign-in, when
-they are no longer in use.
+agents. When that backend is still reachable, Codex reopenings in the current
+Windows session keep reconnecting to it; the owned reconnect setting, app files,
+and logs are removed at the next sign-in, when they are no longer in use.
 
 ## Why a separate executable?
 
@@ -216,9 +217,11 @@ CodexContinuity uninstall
 `rollback` changes only the build selected for a future safe start. Uninstall
 restores values captured before installation, and only while their current
 values still match the ones Continuity applied. Neither command stops a running
-backend or restarts the desktop. A later desktop restart after uninstall
-returns to its normal bundled app-server and updater. Continuity's installed
-files and logs are deleted at the next Windows sign-in.
+backend or restarts the desktop. If the backend is still reachable, desktop
+restarts in the current Windows session continue reconnecting to it so a second
+app-server cannot contend for the same threads. The next sign-in returns Codex
+to its normal bundled app-server and updater, then deletes Continuity's installed
+files and logs.
 
 ## What appears in Windows
 
