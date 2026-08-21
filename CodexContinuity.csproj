@@ -7,5 +7,10 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <AssemblyName>CodexContinuity</AssemblyName>
     <RootNamespace>CodexContinuity</RootNamespace>
+    <Version>0.1.0</Version>
+    <Authors>YesterdaysLemon</Authors>
+    <Product>Codex Continuity</Product>
+    <Description>Keep Codex agent threads alive while the Windows desktop UI updates or restarts.</Description>
+    <RepositoryUrl>https://github.com/YesterdaysLemon/codex-continuity</RepositoryUrl>
   </PropertyGroup>
 </Project>

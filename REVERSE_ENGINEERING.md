@@ -50,6 +50,12 @@ alongside the original desktop backend, and the original desktop and app-server
 PIDs remained unchanged. The Microsoft Store's visible **App updates** setting
 was also inspected read-only and was On.
 
+After the one-time desktop restart, the same pre-existing conversation appeared
+as `active` through the continuity backend. The restarted desktop had no bundled
+`codex.exe app-server` child; its only agent backend was the separately
+supervised WebSocket server. That is the end-to-end continuity result this
+project is intended to create.
+
 ## Stability boundary
 
 The public app-server README labels WebSocket transport experimental and
