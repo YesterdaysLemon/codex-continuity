@@ -83,6 +83,18 @@ background rather than by this tool.
 - A user-executable Codex CLI installed by the desktop app or available on
   `PATH`.
 
+## Platform support
+
+| Platform | Current status |
+| --- | --- |
+| Windows 11 x64 | Supported by the current release and covered by the reconnect, installer, tray, and lifecycle tests. |
+| macOS | Not supported yet. A credible port requires fresh validation of the desktop reconnect seam, then `launchd`, environment, packaging, and menu-bar adapters. |
+| Linux | No desktop-parity claim. The supervisor core is plausibly portable for headless use, but a supported Codex desktop and reconnect seam have not been verified. |
+
+macOS is the next meaningful validation target. Linux work should begin with a
+headless supervisor only; presenting it as equivalent to the Windows desktop
+utility would outrun the available evidence.
+
 ## Manual install
 
 For a conventional installer, download `CodexContinuity-Setup.exe` from the

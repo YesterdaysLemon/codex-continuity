@@ -3,6 +3,7 @@ import CopyInstallCommand from "./CopyInstallCommand";
 export default function Home() {
   return (
     <main>
+      <a className="skip-link" href="#top">Skip to content</a>
       <nav className="nav" aria-label="Primary navigation">
         <a className="brand" href="#top" aria-label="Codex Continuity home">
           <span className="brand-mark" aria-hidden="true">
@@ -58,7 +59,7 @@ export default function Home() {
         <div className="continuity-card" aria-label="Continuity architecture">
           <div className="card-meta">
             <span>LIVE CONTINUITY TRACE</span>
-            <span className="live-pill">PROVEN</span>
+            <span className="live-pill">WIN11 VERIFIED</span>
           </div>
           <div className="node desktop-node">
             <span className="node-index">01</span>
@@ -132,8 +133,8 @@ export default function Home() {
           </article>
           <article className="step-card">
             <span>03</span>
-            <h3>Update freely</h3>
-            <p>Microsoft Store can replace the UI while the agent process and thread state remain.</p>
+            <h3>Update the UI</h3>
+            <p>Microsoft Store can replace the window while the externally supervised backend keeps running.</p>
           </article>
         </div>
       </section>
@@ -162,11 +163,11 @@ export default function Home() {
       <section className="section install-section" id="install">
         <div className="install-copy">
           <span className="section-number">02 / INSTALL</span>
-          <h2>One command.<br />Zero interrupted agents.</h2>
+          <h2>One command.<br />No forced restart.</h2>
           <p>
-            The bootstrapper verifies the release checksum, proves reconnect
-            in an isolated test, installs per-user, and starts the supervisor.
-            It never restarts the desktop app.
+            The bootstrapper verifies the release checksum, runs an isolated
+            reconnect check, installs per-user, and starts the supervisor. It
+            never restarts the desktop app.
           </p>
           <a
             className="text-link"
@@ -210,7 +211,7 @@ export default function Home() {
             This page and the first public release were built inside the same
             Codex thread after its desktop window restarted.
           </blockquote>
-          <p>End-to-end migration proof · Windows 11 · August 20, 2026</p>
+          <p>Verified migration run · Windows 11 · August 20, 2026</p>
         </div>
         <div className="proof-details">
           <div><span>Desktop backend child</span><strong>none</strong></div>
