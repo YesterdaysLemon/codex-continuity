@@ -529,7 +529,7 @@ internal sealed class InstallCoordinator(
             DisplayIcon: $"{quotedExecutable},0",
             UninstallCommand: $"{quotedExecutable} uninstall",
             QuietUninstallCommand: $"{quotedExecutable} uninstall",
-            ModifyCommand: $"{quotedExecutable} install",
+            ModifyCommand: $"{quotedExecutable} repair",
             UrlInfoAbout: "https://codex-continuity.alirezaafshan4.chatgpt.site",
             EstimatedSizeKilobytes: checked((int)Math.Max(
                 1,

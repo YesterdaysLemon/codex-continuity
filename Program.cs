@@ -17,7 +17,15 @@ internal static class Program
     {
         try
         {
-            var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "help";
+            var setupExecutable = Environment.ProcessPath is { } processPath &&
+                Path.GetFileNameWithoutExtension(processPath).EndsWith(
+                    "Setup",
+                    StringComparison.OrdinalIgnoreCase);
+            var command = setupExecutable &&
+                args.FirstOrDefault()?.StartsWith("--", StringComparison.Ordinal) == true
+                    ? "setup"
+                    : args.FirstOrDefault()?.ToLowerInvariant() ??
+                        (setupExecutable ? "setup" : "help");
             var port = ParsePort(args) ?? DefaultPort;
             return command switch
             {
@@ -31,8 +39,23 @@ internal static class Program
                     args.Contains("--no-tray", StringComparer.OrdinalIgnoreCase)
                         ? TrayInstallMode.Disabled
                         : TrayInstallMode.Enabled),
+                "repair" => await RepairAsync(
+                    args.Contains("--start-now", StringComparer.OrdinalIgnoreCase)),
                 "uninstall" => Uninstall(),
                 "rollback" => Rollback(),
+                "setup" when args.Contains(
+                    "--uninstall",
+                    StringComparer.OrdinalIgnoreCase) => Uninstall(),
+                "setup" => await BootstrapInstaller.RunAsync(
+                    args.Contains("--no-tray", StringComparer.OrdinalIgnoreCase)
+                        ? TrayInstallMode.Disabled
+                        : TrayInstallMode.Enabled,
+                    startNow: !args.Contains("--no-start", StringComparer.OrdinalIgnoreCase),
+                    skipSelfTest: args.Contains(
+                        "--skip-self-test",
+                        StringComparer.OrdinalIgnoreCase),
+                    quiet: args.Contains("--silent", StringComparer.OrdinalIgnoreCase),
+                    DownloadBaseUrl(args)),
                 "self-test" => await SelfTestAsync(),
                 _ => Fail($"Unknown command '{command}'. Run 'CodexContinuity help'."),
             };
@@ -55,14 +78,20 @@ internal static class Program
               status      Check backend health and count active threads.
               serve       Supervise a loopback WebSocket app-server.
               install     Configure future desktop launches and start at user logon.
+              repair      Reapply the persisted port and tray choices without restarting agents.
               uninstall   Remove the user-level launch and environment configuration.
               rollback    Stage the previous known-good build for the next safe start.
+              setup       Download, verify, self-test, and install the matching release bundle.
               self-test   Prove reconnect and persisted-thread behavior in an isolated Codex home.
 
             Options:
               --port N       Loopback port (default: 45123).
               --start-now    With install, start the supervisor without touching the desktop app.
               --no-tray      With install, omit the disposable notification-area controller.
+              --no-start     With setup, configure startup without launching the supervisor now.
+              --silent       With setup, suppress progress output for unattended installation.
+              --skip-self-test  With setup, omit the isolated reconnect proof.
+              --uninstall   With setup, remove future-launch configuration without stopping agents.
 
             Installation never closes or restarts the running Codex desktop app.
             """);
@@ -86,6 +115,23 @@ internal static class Program
             return port;
         }
 
+        return null;
+    }
+
+    private static string? DownloadBaseUrl(string[] args)
+    {
+        for (var index = 0; index < args.Length; index++)
+        {
+            if (!args[index].Equals("--download-base-url", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            if (index + 1 >= args.Length)
+            {
+                throw new ArgumentException("--download-base-url requires a URL.");
+            }
+            return args[index + 1];
+        }
         return null;
     }
 
@@ -387,6 +433,19 @@ internal static class Program
             ? "Removed owned future-launch configuration. No running process was stopped."
             : "No owned future-launch configuration was found. No running process was stopped.");
         return removed ? 0 : 1;
+    }
+
+    private static async Task<int> RepairAsync(bool startNow)
+    {
+        var state = new InstallStateStore(
+            ContinuityPaths.InstallStateFile(ContinuityPaths.StateDirectory)).Load()
+            ?? throw new InvalidOperationException("No installed Continuity state is available.");
+        return await InstallAsync(
+            state.Port,
+            startNow,
+            state.InstalledTrayExecutable is null
+                ? TrayInstallMode.Disabled
+                : TrayInstallMode.Enabled);
     }
 
     private static int Rollback()
@@ -743,6 +802,14 @@ internal static class Program
         return 1;
     }
 
+    private static string ProductVersion()
+    {
+        var version = typeof(Program).Assembly.GetName().Version;
+        return version is null
+            ? "development"
+            : $"{version.Major}.{version.Minor}.{version.Build}";
+    }
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -771,7 +838,7 @@ internal static class Program
                 {
                     ["name"] = "codex_continuity",
                     ["title"] = "Codex Continuity",
-                    ["version"] = "0.1.0",
+                    ["version"] = ProductVersion(),
                 },
                 ["capabilities"] = new JsonObject(),
             });

@@ -33,6 +33,20 @@ changing anything:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $i -Plan -Json
 ```
 
+## Installing from an agent
+
+Agents should download `install.ps1`, run `-Plan -Json`, present the resolved
+asset/checksum URLs and `restartsCodex: false`, then run with `-StartNow` only
+after that plan is accepted. Add `-NoTray` for headless automation. The same
+contract is published at the site's [`/llms.txt`](https://codex-continuity.alirezaafshan4.chatgpt.site/llms.txt).
+
+The prepared WinGet identity is `YesterdaysLemon.CodexContinuity`. After the
+external community-manifest review completes, the standard command will be:
+
+```powershell
+winget install --id YesterdaysLemon.CodexContinuity -e
+```
+
 ## Why a separate executable?
 
 A plugin would share the desktop lifecycle and disappear during the same
@@ -70,6 +84,17 @@ background rather than by this tool.
   `PATH`.
 
 ## Manual install
+
+For a conventional installer, download `CodexContinuity-Setup.exe` from the
+[latest release](https://github.com/YesterdaysLemon/codex-continuity/releases/latest)
+and run it. It uses the same checksum verification and isolated self-test as
+the PowerShell bootstrap. Unattended installs use:
+
+```powershell
+.\CodexContinuity-Setup.exe --silent
+```
+
+For the advanced portable path:
 
 1. Download the versioned Windows x64 ZIP from the
    [latest release](https://github.com/YesterdaysLemon/codex-continuity/releases/latest).
@@ -116,6 +141,7 @@ the executable that currently owns active agents.
 | `serve` | Run the background supervisor. |
 | `install --start-now` | Configure future launches and start the supervisor. |
 | `install --no-tray` | Install headlessly without the notification-area controller. |
+| `repair` | Reapply the persisted custom port and tray choice without stopping work. |
 | `uninstall` | Remove future-launch and startup configuration without killing work. |
 | `rollback` | Select the previous known-good build for the next safe supervisor start. |
 | `self-test` | Prove reconnect behavior in an isolated temporary Codex home. |
@@ -192,6 +218,16 @@ and restart only the supervisor while the desktop is closed.
 
 See [REVERSE_ENGINEERING.md](REVERSE_ENGINEERING.md) for the version-specific
 desktop observations behind the bridge.
+
+## Release trust
+
+Every release retains SHA-256 checksum files and publishes GitHub/Sigstore build
+provenance that can be checked with `gh attestation verify`. The release
+workflow also supports SHA-256 Authenticode signing with an RFC 3161 timestamp
+and fails verification if signing is configured but invalid. A production code
+signing certificate is the remaining external publisher gate; until it is
+configured, Windows may identify the executable as coming from an unknown
+publisher. See [SECURITY.md](SECURITY.md) before bypassing any warning.
 
 ## Unofficial project
 

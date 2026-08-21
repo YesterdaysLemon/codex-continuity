@@ -60,7 +60,7 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
         Timeout = TimeSpan.FromSeconds(5),
         DefaultRequestHeaders =
         {
-            UserAgent = { new("CodexContinuity.Tray", "0.1") },
+            UserAgent = { new("CodexContinuity.Tray", "0.2") },
         },
     };
 
