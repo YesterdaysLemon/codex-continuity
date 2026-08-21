@@ -145,24 +145,36 @@ internal sealed class ContinuityTrayContext : ApplicationContext
 
     private async Task CheckForUpdatesAsync()
     {
-        updateDetailItem.Text = "Checking for verified releases…";
-        await statusClient.CheckForUpdatesAsync(shutdown.Token);
-        await RefreshAsync();
+        try
+        {
+            updateDetailItem.Text = "Checking for verified releases…";
+            await statusClient.CheckForUpdatesAsync(shutdown.Token);
+            await RefreshAsync();
+        }
+        catch (OperationCanceledException)
+        {
+        }
     }
 
     private async Task RestartSupervisorAsync()
     {
-        healthItem.Text = "Starting Continuity backend…";
-        await statusClient.RestartSupervisorAsync(shutdown.Token);
-        await Task.Delay(TimeSpan.FromSeconds(2), shutdown.Token);
-        await RefreshAsync();
+        try
+        {
+            healthItem.Text = "Starting Continuity backend…";
+            await statusClient.RestartSupervisorAsync(shutdown.Token);
+            await Task.Delay(TimeSpan.FromSeconds(2), shutdown.Token);
+            await RefreshAsync();
+        }
+        catch (OperationCanceledException)
+        {
+        }
     }
 
     private static string UpdateDetail(ContinuityUpdateSnapshot update)
     {
         if (update.LastError is not null)
         {
-            return $"Last update failed: {update.LastError}";
+            return $"Last update failed: {Compact(update.LastError)}";
         }
         if (update.RunningVersion is null)
         {
@@ -179,6 +191,15 @@ internal sealed class ContinuityTrayContext : ApplicationContext
                 "unknown" => $"Running v{update.RunningVersion}; update state unknown",
                 _ => $"Running v{update.RunningVersion}; update state {update.LatestState}",
             };
+    }
+
+    private static string Compact(string text)
+    {
+        const int maximumLength = 160;
+        var singleLine = text.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return singleLine.Length <= maximumLength
+            ? singleLine
+            : $"{singleLine[..maximumLength]}…";
     }
 
     private static void OpenDiagnostics()
