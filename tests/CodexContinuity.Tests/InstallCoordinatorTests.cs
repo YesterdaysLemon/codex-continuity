@@ -243,6 +243,9 @@ public sealed class InstallCoordinatorTests : IDisposable
         coordinator.Uninstall();
 
         Assert.True(File.Exists(outcome.State.InstalledTrayExecutable));
+        Assert.True(File.Exists(Path.Combine(
+            ContinuityPaths.CommandDirectory(root),
+            "CodexContinuity.Tray.exe")));
         Assert.Contains("CodexContinuity.Tray.exe", platform.AppliedTrayStartupCommand);
         Assert.DoesNotContain("CodexContinuity.Tray", supervisorStartup);
         Assert.Null(platform.TrayStartupCommand);
@@ -325,6 +328,49 @@ public sealed class InstallCoordinatorTests : IDisposable
 
         Assert.Throws<InvalidOperationException>(() =>
             DeferredCleanupCommandBuilder.Build(filesystemRoot));
+    }
+
+    [Fact]
+    public void MigrationLeavesOpenAiInstallOnlyUntilTheNextSignIn()
+    {
+        var legacyRoot = Path.Combine(root, "OpenAI", "CodexContinuity");
+        var currentRoot = Path.Combine(root, "YesterdaysLemon", "CodexContinuity");
+        var platform = new FakeInstallPlatform();
+        var legacyCoordinator = new InstallCoordinator(
+            legacyRoot,
+            platform,
+            new InstallStateStore(ContinuityPaths.InstallStateFile(legacyRoot)));
+        var legacy = legacyCoordinator.Install(
+            CreateBundleSource("version-one"),
+            45123,
+            TrayInstallMode.Enabled);
+        var coordinator = new InstallCoordinator(
+            currentRoot,
+            platform,
+            new InstallStateStore(ContinuityPaths.InstallStateFile(currentRoot)),
+            legacyRoot);
+
+        var migrated = coordinator.Install(
+            CreateBundleSource("version-two"),
+            45123,
+            TrayInstallMode.Enabled);
+
+        Assert.Equal(legacy.State.InstalledExecutable, migrated.State.PreviousInstalledExecutable);
+        Assert.Equal(
+            ContinuityPaths.CommandDirectory(currentRoot),
+            platform.Environment[InstallCoordinator.PathVariable]);
+        Assert.Contains(Path.GetFullPath(legacyRoot), platform.CleanupCommand);
+        Assert.DoesNotContain(Path.GetFullPath(currentRoot), platform.CleanupCommand);
+        Assert.True(File.Exists(ContinuityPaths.InstallStateFile(legacyRoot)));
+        Assert.True(File.Exists(ContinuityPaths.InstallStateFile(currentRoot)));
+
+        coordinator.Uninstall();
+
+        Assert.Null(platform.Environment[InstallCoordinator.PathVariable]);
+        Assert.Contains(Path.GetFullPath(legacyRoot), platform.CleanupCommand);
+        Assert.Contains(Path.GetFullPath(currentRoot), platform.CleanupCommand);
+        Assert.False(File.Exists(ContinuityPaths.InstallStateFile(legacyRoot)));
+        Assert.False(File.Exists(ContinuityPaths.InstallStateFile(currentRoot)));
     }
 
     [Theory]

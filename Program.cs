@@ -157,9 +157,7 @@ internal static class Program
             InstallCoordinator.DisableUpdaterVariable,
             EnvironmentVariableTarget.User);
         var healthy = await IsReadyAsync(port, TimeSpan.FromSeconds(1));
-        var stateDirectory = ContinuityPaths.StateDirectory;
-        var installState = new InstallStateStore(
-            ContinuityPaths.InstallStateFile(stateDirectory)).Load();
+        var installState = LoadInstallState();
 
         var result = new JsonObject
         {
@@ -204,8 +202,7 @@ internal static class Program
                 ["status"] = thread.Status,
             }).ToArray()),
             ["supervisor"] = JsonSerializer.SerializeToNode(
-                new SupervisorStatusStore(ContinuityPaths.SupervisorStatusFile(
-                    ContinuityPaths.StateDirectory)).Read(),
+                LoadSupervisorStatus(),
                 JsonOptions),
         };
         Console.WriteLine(result.ToJsonString(JsonOptions));
@@ -385,8 +382,7 @@ internal static class Program
         }
 
         var stateDirectory = ContinuityPaths.StateDirectory;
-        var existingState = new InstallStateStore(
-            ContinuityPaths.InstallStateFile(stateDirectory)).Load();
+        var existingState = LoadInstallState();
         await EnsurePortChangeIsSafeAsync(
             existingState?.Port,
             port,
@@ -426,7 +422,7 @@ internal static class Program
             {
                 Console.WriteLine(endpointOwnership == ExistingEndpointOwnership.Managed
                     ? "The running Continuity backend already owns the configured endpoint; it was left untouched."
-                    : "The running v0.1 Continuity backend was left untouched; v0.2 is staged for the next safe start.");
+                    : "The running previous Continuity backend was left untouched; the new build is staged for the next safe start.");
             }
             else
             {
@@ -487,8 +483,7 @@ internal static class Program
 
     private static async Task<int> RepairAsync(bool startNow)
     {
-        var state = new InstallStateStore(
-            ContinuityPaths.InstallStateFile(ContinuityPaths.StateDirectory)).Load()
+        var state = LoadInstallState()
             ?? throw new InvalidOperationException("No installed Continuity state is available.");
         return await InstallAsync(
             state.Port,
@@ -509,7 +504,21 @@ internal static class Program
     private static InstallCoordinator CreateInstallCoordinator(string stateDirectory) => new(
         stateDirectory,
         new WindowsInstallPlatform(),
-        new InstallStateStore(ContinuityPaths.InstallStateFile(stateDirectory)));
+        new InstallStateStore(ContinuityPaths.InstallStateFile(stateDirectory)),
+        ContinuityPaths.LegacyOpenAiStateDirectory);
+
+    private static InstallState? LoadInstallState() =>
+        new InstallStateStore(
+            ContinuityPaths.InstallStateFile(ContinuityPaths.StateDirectory)).Load() ??
+        new InstallStateStore(
+            ContinuityPaths.InstallStateFile(ContinuityPaths.LegacyOpenAiStateDirectory)).Load();
+
+    private static SupervisorStatus? LoadSupervisorStatus() =>
+        new SupervisorStatusStore(
+            ContinuityPaths.SupervisorStatusFile(ContinuityPaths.StateDirectory)).Read() ??
+        new SupervisorStatusStore(
+            ContinuityPaths.SupervisorStatusFile(
+                ContinuityPaths.LegacyOpenAiStateDirectory)).Read();
 
     private static Process StartSupervisor(string executable, int port)
         => DetachedProcessLauncher.Start(
@@ -689,8 +698,7 @@ internal static class Program
             return false;
         }
 
-        var status = new SupervisorStatusStore(ContinuityPaths.SupervisorStatusFile(
-            ContinuityPaths.StateDirectory)).Read();
+        var status = LoadSupervisorStatus();
         if (status is null ||
             status.State != "running" ||
             status.Port != port ||

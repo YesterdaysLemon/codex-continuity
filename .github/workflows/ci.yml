@@ -54,7 +54,7 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $setupHelpText -notmatch 'Codex Continuity keeps') {
             throw 'Renamed Setup executable did not provide read-only help.'
           }
-          $stateDirectory = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'OpenAI\CodexContinuity'))
+          $stateDirectory = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'YesterdaysLemon\CodexContinuity'))
           $statePath = Join-Path $stateDirectory 'install-state.json'
           $commandDirectory = Join-Path $stateDirectory 'bin'
           $commandExecutable = Join-Path $commandDirectory 'CodexContinuity.exe'
@@ -131,7 +131,7 @@ jobs:
             [Environment]::SetEnvironmentVariable('Path', $pathBefore, 'User')
             $stateLeaf = Split-Path -Leaf $stateDirectory
             $stateParentLeaf = Split-Path -Leaf (Split-Path -Parent $stateDirectory)
-            if ($stateLeaf -ne 'CodexContinuity' -or $stateParentLeaf -ne 'OpenAI') {
+            if ($stateLeaf -ne 'CodexContinuity' -or $stateParentLeaf -ne 'YesterdaysLemon') {
               throw "Refusing CI cleanup for unexpected state directory: $stateDirectory"
             }
             Remove-Item -LiteralPath $stateDirectory -Recurse -Force -ErrorAction SilentlyContinue
