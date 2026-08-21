@@ -5,6 +5,20 @@ namespace CodexContinuity.Tests;
 
 public sealed class TrayStatusParserTests
 {
+    [Theory]
+    [InlineData("{\"port\":45124}", 45124)]
+    [InlineData("{}", TrayStatusClient.DefaultPort)]
+    [InlineData("[]", TrayStatusClient.DefaultPort)]
+    [InlineData("{\"port\":\"45124\"}", TrayStatusClient.DefaultPort)]
+    [InlineData("{\"port\":0}", TrayStatusClient.DefaultPort)]
+    [InlineData("{\"port\":-1}", TrayStatusClient.DefaultPort)]
+    [InlineData("{\"port\":65536}", TrayStatusClient.DefaultPort)]
+    [InlineData("{\"port\":2147483648}", TrayStatusClient.DefaultPort)]
+    public void InstalledPortFallsBackForMissingOrInvalidValues(string json, int expected)
+    {
+        Assert.Equal(expected, TrayStatusClient.ParseInstalledPort(json));
+    }
+
     [Fact]
     public void ParsesHealthyStatusWithoutReadingThreadNames()
     {
