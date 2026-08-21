@@ -1,6 +1,7 @@
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Win32;
 
@@ -21,6 +22,20 @@ internal enum ExistingEndpointOwnership
     Legacy,
     Foreign,
 }
+
+internal enum UninstallReconnectPolicy
+{
+    RestoreImmediately,
+    PreserveUntilNextSignIn,
+}
+
+internal enum InstallLifecycle
+{
+    Installed,
+    DeferredUninstall,
+}
+
+internal sealed record DeferredEnvironmentRestore(string Name, OwnedString Value);
 
 internal sealed record InstalledAppRegistration(
     string DisplayName,
@@ -49,7 +64,8 @@ internal sealed record InstallState(
     OwnedString? TrayStartupCommand,
     InstalledAppRegistration? PreviousInstalledAppRegistration,
     InstalledAppRegistration? InstalledAppRegistration,
-    DateTimeOffset InstalledAtUtc);
+    DateTimeOffset InstalledAtUtc,
+    InstallLifecycle Lifecycle = InstallLifecycle.Installed);
 
 internal sealed record InstallOutcome(
     InstallState State,
@@ -281,7 +297,8 @@ internal sealed class InstallCoordinator(
                 ? previousState.PreviousInstalledAppRegistration
                 : previousRegistration,
             InstalledAppRegistration: registration,
-            InstalledAtUtc: DateTimeOffset.UtcNow);
+            InstalledAtUtc: DateTimeOffset.UtcNow,
+            Lifecycle: InstallLifecycle.Installed);
 
         try
         {
@@ -334,15 +351,35 @@ internal sealed class InstallCoordinator(
             CurrentBackendUnchanged: true);
     }
 
-    internal bool Uninstall()
+    internal bool Uninstall(
+        UninstallReconnectPolicy reconnectPolicy = UninstallReconnectPolicy.RestoreImmediately)
     {
         var state = stateStore.Load() ?? LoadLegacyState();
         if (state is null)
         {
-            return UninstallLegacyConfiguration();
+            return UninstallLegacyConfiguration(reconnectPolicy);
         }
 
-        RestoreOwnedEnvironmentValue(AppServerUrlVariable, state.AppServerUrl);
+        var deferredEnvironmentRestores = new List<DeferredEnvironmentRestore>();
+        var shouldDeferReconnectRestore =
+            reconnectPolicy == UninstallReconnectPolicy.PreserveUntilNextSignIn &&
+            string.Equals(
+                platform.GetUserEnvironmentVariable(AppServerUrlVariable),
+                state.AppServerUrl.AppliedValue,
+                StringComparison.Ordinal);
+        if (shouldDeferReconnectRestore)
+        {
+            deferredEnvironmentRestores.Add(
+                new DeferredEnvironmentRestore(AppServerUrlVariable, state.AppServerUrl));
+        }
+        var cleanupCommand = DeferredCleanupCommandBuilder.Build(
+            UninstallCleanupDirectories(),
+            deferredEnvironmentRestores);
+
+        if (!shouldDeferReconnectRestore)
+        {
+            RestoreOwnedEnvironmentValue(AppServerUrlVariable, state.AppServerUrl);
+        }
         RestoreOwnedEnvironmentValue(DisableUpdaterVariable, state.UpdaterSetting);
         if (state.CommandPath is not null)
         {
@@ -367,9 +404,17 @@ internal sealed class InstallCoordinator(
             platform.SetInstalledAppRegistration(state.PreviousInstalledAppRegistration);
         }
 
-        platform.SetCleanupCommand(DeferredCleanupCommandBuilder.Build(UninstallCleanupDirectories()));
-        stateStore.Delete();
-        LegacyStateStore()?.Delete();
+        platform.SetCleanupCommand(cleanupCommand);
+        if (deferredEnvironmentRestores.Count == 0)
+        {
+            stateStore.Delete();
+            LegacyStateStore()?.Delete();
+        }
+        else
+        {
+            stateStore.Save(state with { Lifecycle = InstallLifecycle.DeferredUninstall });
+            LegacyStateStore()?.Delete();
+        }
         platform.BroadcastEnvironmentChange();
         return true;
     }
@@ -378,6 +423,11 @@ internal sealed class InstallCoordinator(
     {
         var state = (stateStore.Load() ?? LoadLegacyState())
             ?? throw new InvalidOperationException("No installed Continuity state is available.");
+        if (state.Lifecycle != InstallLifecycle.Installed)
+        {
+            throw new InvalidOperationException(
+                "Continuity is pending deferred uninstall and cannot be rolled back.");
+        }
         var previousExecutable = state.PreviousInstalledExecutable;
         if (string.IsNullOrWhiteSpace(previousExecutable) || !File.Exists(previousExecutable))
         {
@@ -561,7 +611,7 @@ internal sealed class InstallCoordinator(
         }
     }
 
-    private bool UninstallLegacyConfiguration()
+    private bool UninstallLegacyConfiguration(UninstallReconnectPolicy reconnectPolicy)
     {
         var startup = platform.GetStartupCommand();
         var legacyPort = LegacyInstalledPort(startup);
@@ -570,21 +620,80 @@ internal sealed class InstallCoordinator(
             return false;
         }
 
-        platform.SetStartupCommand(null);
         var trayStartup = platform.GetTrayStartupCommand();
+        var registration = platform.GetInstalledAppRegistration();
+        var currentUrl = platform.GetUserEnvironmentVariable(AppServerUrlVariable);
+        var currentUpdaterSetting = platform.GetUserEnvironmentVariable(DisableUpdaterVariable);
+        var shouldDeferReconnectRestore =
+            reconnectPolicy == UninstallReconnectPolicy.PreserveUntilNextSignIn &&
+            string.Equals(
+                currentUrl,
+                LoopbackEndpoint.WebSocketUrl(legacyPort.Value),
+                StringComparison.Ordinal);
+        var deferredEnvironmentRestores = shouldDeferReconnectRestore
+            ? new DeferredEnvironmentRestore[]
+            {
+                new(
+                    AppServerUrlVariable,
+                    new OwnedString(
+                        PreviousValue: null,
+                        AppliedValue: LoopbackEndpoint.WebSocketUrl(legacyPort.Value))),
+            }
+            : [];
+        var cleanupCommand = DeferredCleanupCommandBuilder.Build(
+            UninstallCleanupDirectories(),
+            deferredEnvironmentRestores);
+        if (shouldDeferReconnectRestore)
+        {
+            var legacyExecutable = LegacyInstalledExecutable(startup)
+                ?? throw new InvalidDataException(
+                    "The legacy Continuity startup command did not identify its executable.");
+            stateStore.Save(new InstallState(
+                SchemaVersion: 4,
+                Port: legacyPort.Value,
+                InstalledExecutable: legacyExecutable,
+                PreviousInstalledExecutable: null,
+                InstalledTrayExecutable: LegacyTrayExecutable(trayStartup),
+                PreviousInstalledTrayExecutable: null,
+                BinarySha256: File.Exists(legacyExecutable)
+                    ? ComputeSha256(legacyExecutable)
+                    : string.Empty,
+                AppServerUrl: new OwnedString(
+                    PreviousValue: null,
+                    AppliedValue: LoopbackEndpoint.WebSocketUrl(legacyPort.Value)),
+                UpdaterSetting: new OwnedString(
+                    PreviousValue: null,
+                    AppliedValue: "false"),
+                CommandPath: null,
+                StartupCommand: new OwnedString(PreviousValue: null, AppliedValue: startup!),
+                TrayStartupCommand: trayStartup?.Contains(
+                    "CodexContinuity.Tray",
+                    StringComparison.OrdinalIgnoreCase) == true
+                        ? new OwnedString(PreviousValue: null, AppliedValue: trayStartup)
+                        : null,
+                PreviousInstalledAppRegistration: null,
+                InstalledAppRegistration: registration?.UninstallCommand.Contains(
+                    "CodexContinuity",
+                    StringComparison.OrdinalIgnoreCase) == true
+                        ? registration
+                        : null,
+                InstalledAtUtc: DateTimeOffset.UtcNow,
+                Lifecycle: InstallLifecycle.DeferredUninstall));
+        }
+
+        platform.SetStartupCommand(null);
         if (trayStartup?.Contains("CodexContinuity.Tray", StringComparison.OrdinalIgnoreCase) == true)
         {
             platform.SetTrayStartupCommand(null);
         }
-        var registration = platform.GetInstalledAppRegistration();
         if (registration?.UninstallCommand.Contains(
                 "CodexContinuity",
                 StringComparison.OrdinalIgnoreCase) == true)
         {
             platform.SetInstalledAppRegistration(null);
         }
-        var currentUrl = platform.GetUserEnvironmentVariable(AppServerUrlVariable);
-        if (string.Equals(
+        if (reconnectPolicy == UninstallReconnectPolicy.RestoreImmediately &&
+            string.Equals(
                 currentUrl,
                 LoopbackEndpoint.WebSocketUrl(legacyPort.Value),
                 StringComparison.Ordinal))
@@ -592,13 +701,13 @@ internal sealed class InstallCoordinator(
             platform.SetUserEnvironmentVariable(AppServerUrlVariable, null);
         }
         if (string.Equals(
-                platform.GetUserEnvironmentVariable(DisableUpdaterVariable),
+                currentUpdaterSetting,
                 "false",
                 StringComparison.Ordinal))
         {
             platform.SetUserEnvironmentVariable(DisableUpdaterVariable, null);
         }
-        platform.SetCleanupCommand(DeferredCleanupCommandBuilder.Build(UninstallCleanupDirectories()));
+        platform.SetCleanupCommand(cleanupCommand);
         platform.BroadcastEnvironmentChange();
         return true;
     }
@@ -712,36 +821,44 @@ internal sealed class InstallCoordinator(
 
     private int? LegacyInstalledPort(string? startupCommand)
     {
-        if (startupCommand is null)
+        if (startupCommand is null || LegacyInstalledExecutable(startupCommand) is null)
         {
             return null;
         }
 
-        foreach (var legacyExecutable in LegacyExecutableCandidates())
+        const string portMarker = "'--port','";
+        var portStart = startupCommand.IndexOf(portMarker, StringComparison.OrdinalIgnoreCase);
+        if (portStart < 0)
         {
-            var escapedLegacyExecutable = legacyExecutable.Replace("'", "''", StringComparison.Ordinal);
-            if (!startupCommand.Contains(escapedLegacyExecutable, StringComparison.OrdinalIgnoreCase) ||
-                !startupCommand.Contains("serve", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            const string portMarker = "'--port','";
-            var portStart = startupCommand.IndexOf(portMarker, StringComparison.OrdinalIgnoreCase);
-            if (portStart < 0)
-            {
-                return null;
-            }
-            portStart += portMarker.Length;
-            var portEnd = startupCommand.IndexOf('\'', portStart);
-            return portEnd > portStart && int.TryParse(
-                startupCommand.AsSpan(portStart, portEnd - portStart),
-                out var port) &&
-                port is >= 1 and <= IPEndPoint.MaxPort
-                    ? port
-                    : null;
+            return null;
         }
-        return null;
+        portStart += portMarker.Length;
+        var portEnd = startupCommand.IndexOf('\'', portStart);
+        return portEnd > portStart && int.TryParse(
+            startupCommand.AsSpan(portStart, portEnd - portStart),
+            out var port) &&
+            port is >= 1 and <= IPEndPoint.MaxPort
+                ? port
+                : null;
+    }
+
+    private string? LegacyInstalledExecutable(string? startupCommand) => startupCommand is null ||
+        !startupCommand.Contains("serve", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : LegacyExecutableCandidates().FirstOrDefault(legacyExecutable =>
+                startupCommand.Contains(
+                    legacyExecutable.Replace("'", "''", StringComparison.Ordinal),
+                    StringComparison.OrdinalIgnoreCase));
+
+    private static string? LegacyTrayExecutable(string? trayStartupCommand)
+    {
+        if (string.IsNullOrWhiteSpace(trayStartupCommand) ||
+            !trayStartupCommand.Contains("CodexContinuity.Tray", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return trayStartupCommand.Trim().Trim('"');
     }
 
     private static bool PathsEqual(string first, string second) =>
@@ -824,9 +941,91 @@ internal sealed class InstallCoordinator(
 
 internal static class DeferredCleanupCommandBuilder
 {
+    internal const int MaximumRunOnceCommandLength = 260;
+
     internal static string Build(string stateDirectory) => Build([stateDirectory]);
 
-    internal static string Build(IReadOnlyList<string> stateDirectories)
+    internal static string Build(IReadOnlyList<string> stateDirectories) =>
+        WriteScriptAndBuildCommand(
+            BuildDirectoryCleanupScript(stateDirectories),
+            stateDirectories[0]);
+
+    internal static string Build(
+        IReadOnlyList<string> stateDirectories,
+        IReadOnlyList<DeferredEnvironmentRestore> environmentRestores)
+    {
+        if (environmentRestores.Count == 0)
+        {
+            return Build(stateDirectories);
+        }
+
+        if (environmentRestores.Any(restore => string.IsNullOrWhiteSpace(restore.Name)))
+        {
+            throw new ArgumentException(
+                "Deferred environment variable names cannot be empty.",
+                nameof(environmentRestores));
+        }
+
+        var restoreEntries = string.Join(
+            ", ",
+            environmentRestores.Select(restore =>
+                $"[pscustomobject]@{{ Name = {PowerShellLiteral(restore.Name)}; " +
+                $"AppliedValue = {PowerShellLiteral(restore.Value.AppliedValue)}; " +
+                $"PreviousValue = {PowerShellLiteral(restore.Value.PreviousValue)} }}"));
+        const string memberDefinition =
+            "[System.Runtime.InteropServices.DllImport(\"user32.dll\", " +
+            "CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)] " +
+            "public static extern System.IntPtr SendMessageTimeout(" +
+            "System.IntPtr window, uint message, System.UIntPtr wParam, string lParam, " +
+            "uint flags, uint timeout, out System.UIntPtr result);";
+        var environmentScript =
+            $"$environmentRestores = @({restoreEntries}); $environmentChanged = $false; " +
+            "foreach ($entry in $environmentRestores) { " +
+            "$current = [Environment]::GetEnvironmentVariable(" +
+            "$entry.Name, [System.EnvironmentVariableTarget]::User); " +
+            "if ([string]::Equals(" +
+            "$current, $entry.AppliedValue, [System.StringComparison]::Ordinal)) { " +
+            "[Environment]::SetEnvironmentVariable(" +
+            "$entry.Name, $entry.PreviousValue, [System.EnvironmentVariableTarget]::User); " +
+            "$environmentChanged = $true } } " +
+            "if ($environmentChanged) { try { " +
+            $"Add-Type -Namespace CodexContinuity -Name EnvironmentChangeNative -MemberDefinition {PowerShellLiteral(memberDefinition)}; " +
+            "$broadcastResult = [UIntPtr]::Zero; " +
+            "[void][CodexContinuity.EnvironmentChangeNative]::SendMessageTimeout(" +
+            "[IntPtr]0xffff, 0x001a, [UIntPtr]::Zero, 'Environment', " +
+            "0x0002, 5000, [ref]$broadcastResult) } catch { } }";
+        return WriteScriptAndBuildCommand(
+            $"{environmentScript} {BuildDirectoryCleanupScript(stateDirectories)}",
+            stateDirectories[0]);
+    }
+
+    private static string WriteScriptAndBuildCommand(string cleanupScript, string scriptDirectory)
+    {
+        scriptDirectory = Path.GetFullPath(scriptDirectory);
+        Directory.CreateDirectory(scriptDirectory);
+        var scriptPath = Path.Combine(scriptDirectory, ".continuity-cleanup.ps1");
+        var script = "try { " + cleanupScript + " } finally { " +
+                     "$scriptPath = $MyInvocation.MyCommand.Path; " +
+                     "$scriptDirectory = Split-Path -Parent $scriptPath; " +
+                     "Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue; " +
+                     "Remove-Item -LiteralPath $scriptDirectory -Force -ErrorAction SilentlyContinue }";
+        File.WriteAllText(
+            scriptPath,
+            script,
+            new UnicodeEncoding(bigEndian: false, byteOrderMark: true));
+        var command = $"\"{WindowsPowerShellPath()}\" -NoP -NonI -EP Bypass " +
+                      $"-W Hidden -File \"{scriptPath}\"";
+        if (command.Length > MaximumRunOnceCommandLength)
+        {
+            File.Delete(scriptPath);
+            throw new PathTooLongException(
+                $"The deferred cleanup command is {command.Length} characters; " +
+                $"Windows RunOnce allows at most {MaximumRunOnceCommandLength}.");
+        }
+        return command;
+    }
+
+    private static string BuildDirectoryCleanupScript(IReadOnlyList<string> stateDirectories)
     {
         if (stateDirectories.Count == 0)
         {
@@ -853,18 +1052,22 @@ internal static class DeferredCleanupCommandBuilder
             ", ",
             targets.Select(target =>
                 $"'{target.Replace("'", "''", StringComparison.Ordinal)}'"));
-        var powershell = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
-            "System32",
-            "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe");
-        return $"\"{powershell}\" -NoProfile -WindowStyle Hidden -Command " +
-               $"\"& {{ $targets = @({targetArray}); foreach ($target in $targets) {{ " +
+        return $"$targets = @({targetArray}); foreach ($target in $targets) {{ " +
                "for ($attempt = 0; $attempt -lt 20; $attempt++) { " +
                "try { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop; break } " +
-               "catch { Start-Sleep -Milliseconds 500 } } } }\"";
+               "catch { Start-Sleep -Milliseconds 500 } } }";
     }
+
+    private static string PowerShellLiteral(string? value) => value is null
+        ? "$null"
+        : $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
+
+    private static string WindowsPowerShellPath() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe");
 }
 
 internal static class StartupCommandBuilder
