@@ -9,9 +9,13 @@
     <RootNamespace>CodexContinuity</RootNamespace>
     <Version>0.1.0</Version>
     <Authors>YesterdaysLemon</Authors>
+    <Company>YesterdaysLemon</Company>
     <Product>Codex Continuity</Product>
+    <AssemblyTitle>Codex Continuity Supervisor</AssemblyTitle>
+    <Copyright>Copyright © 2026 Alireza Afshan</Copyright>
     <Description>Keep Codex agent threads alive while the Windows desktop UI updates or restarts.</Description>
     <RepositoryUrl>https://github.com/YesterdaysLemon/codex-continuity</RepositoryUrl>
+    <ApplicationIcon>assets\CodexContinuity.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="tests\**\*.cs" />

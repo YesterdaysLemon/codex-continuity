@@ -17,6 +17,9 @@ export const metadata: Metadata = {
   title: "Codex Continuity — Keep the agents. Replace the window.",
   description:
     "An unofficial Windows utility that keeps Codex agent threads alive while the desktop app updates or restarts.",
+  icons: {
+    icon: "/icon.svg",
+  },
   openGraph: {
     type: "website",
     title: "Codex Continuity — Keep the agents. Replace the window.",

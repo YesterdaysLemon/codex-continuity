@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Codex Continuity</title>
+  <desc id="desc">Three live agent threads continuing across a dark window.</desc>
+  <rect x="20" y="20" width="472" height="472" rx="112" fill="#080b09" stroke="#26322b" stroke-width="16"/>
+  <g fill="#9aff57">
+    <rect x="112" y="142" width="276" height="54" rx="27"/>
+    <rect x="112" y="229" width="186" height="54" rx="27"/>
+    <rect x="112" y="316" width="96" height="54" rx="27"/>
+  </g>
+  <g fill="#66e3ff">
+    <circle cx="400" cy="169" r="20"/>
+    <circle cx="310" cy="256" r="20"/>
+    <circle cx="220" cy="343" r="20"/>
+  </g>
+</svg>
