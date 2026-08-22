@@ -301,6 +301,13 @@ configured, Windows may identify the executable as coming from an unknown
 publisher and Continuity will not automatically stage its own updates. See
 [SECURITY.md](SECURITY.md) before bypassing any warning.
 
+Versioned desktop delivery is continuous: after the complete CI workflow passes
+for the current `main` commit, a new matching supervisor/tray version is tagged
+at that exact green revision and sent through the same release workflow used by
+explicit tags. Stale, fork, pull-request, failed, and already-published versions
+are safe no-ops. Ordinary merges keep deploying the website without minting a
+new desktop version.
+
 ## Unofficial project
 
 Codex Continuity is not affiliated with or endorsed by OpenAI. Codex and OpenAI

@@ -66,7 +66,7 @@ export default function RootLayout({
               "@context": "https://schema.org",
               "@type": "SoftwareApplication",
               name: "Codex Continuity",
-              softwareVersion: "0.2.1",
+              softwareVersion: "0.3.0",
               applicationCategory: "UtilitiesApplication",
               operatingSystem: "Windows 11 x64",
               description:

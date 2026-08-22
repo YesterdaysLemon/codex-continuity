@@ -12,6 +12,9 @@ import {
 const sha = "0123456789abcdef0123456789abcdef01234567";
 const literalBody = "{\"event\":\"push\",\"branch\":\"main\",\"repo\":\"YesterdaysLemon/codex-continuity\",\"sha\":\"0123456789abcdef0123456789abcdef01234567\"}";
 const knownSignature = "sha256=89c842c455184d279bcbef68ba29a33fee4a59dce4b77723c655a95e487ede64";
+const { version: productVersion } = JSON.parse(
+  await readFile(new URL("../package.json", import.meta.url), "utf8"),
+);
 
 test("uses unreserved payload variables for the deployment manager", async () => {
   const workflow = await readFile(
@@ -173,14 +176,14 @@ test("verifies release, llms, and exact production revision markers", async () =
   const requested = [];
   await verifyPublication({
     baseUrl: "https://continuity.example.test",
-    expectedVersion: "0.2.1",
+    expectedVersion: productVersion,
     expectedRevision: sha,
     fetchImpl: async (url) => {
       requested.push(url.pathname);
       const body = url.pathname === "/"
-        ? 'Codex Continuity softwareVersion":"0.2.1'
+        ? `Codex Continuity softwareVersion":"${productVersion}`
         : url.pathname === "/llms.txt"
-          ? "supported v0.2.1 release target"
+          ? `supported v${productVersion} release target`
           : `${sha}\n`;
       return new Response(body);
     },
@@ -191,12 +194,16 @@ test("verifies release, llms, and exact production revision markers", async () =
 
 test("rejects wrong release, llms, and revision markers", async () => {
   const validBodies = {
-    "/": 'Codex Continuity softwareVersion":"0.2.1',
-    "/llms.txt": "supported v0.2.1 release target",
+    "/": `Codex Continuity softwareVersion":"${productVersion}`,
+    "/llms.txt": `supported v${productVersion} release target`,
     "/deploy-revision.txt": `${sha}\n`,
   };
   const cases = [
-    ["/", "Codex Continuity softwareVersion\":\"0.1.0", /expected v0.2.1 release marker/],
+    [
+      "/",
+      "Codex Continuity softwareVersion\":\"0.1.0",
+      new RegExp(`expected v${productVersion.replaceAll(".", "\\.")} release marker`),
+    ],
     ["/llms.txt", "supported v0.1.0 release target", /llms.txt does not expose/],
     ["/deploy-revision.txt", `${"f".repeat(40)}\n`, /not serving the requested commit SHA/],
   ];
@@ -205,7 +212,7 @@ test("rejects wrong release, llms, and revision markers", async () => {
     await assert.rejects(
       verifyPublication({
         baseUrl: "https://continuity.example.test",
-        expectedVersion: "0.2.1",
+        expectedVersion: productVersion,
         expectedRevision: sha,
         fetchImpl: async (url) => new Response(
           url.pathname === changedPath ? changedBody : validBodies[url.pathname],
@@ -251,12 +258,12 @@ test("production orchestration verifies exact custom revision and Sites fallback
     }],
     ["verify", {
       baseUrl: environment.PRODUCTION_URL,
-      expectedVersion: "0.2.1",
+      expectedVersion: productVersion,
       expectedRevision: sha,
     }],
     ["verify", {
       baseUrl: environment.SITES_URL,
-      expectedVersion: "0.2.1",
+      expectedVersion: productVersion,
     }],
   ]);
 });

@@ -1,0 +1,138 @@
+name: Continuous release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+concurrency:
+  group: continuous-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      release_ref: ${{ steps.plan.outputs.release_ref }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      release_sha: ${{ steps.plan.outputs.release_sha }}
+      should_release: ${{ steps.plan.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Plan the exact green release
+        id: plan
+        shell: pwsh
+        env:
+          CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          CI_EVENT: ${{ github.event.workflow_run.event }}
+          CI_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          CI_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:EXPECTED_SHA -notmatch '^[0-9a-f]{40}$') {
+            throw "CI did not provide a full commit SHA: $env:EXPECTED_SHA"
+          }
+
+          $remoteMainLine = git ls-remote origin refs/heads/main
+          if ($LASTEXITCODE -ne 0 -or -not $remoteMainLine) {
+            throw 'Could not resolve remote main.'
+          }
+          $remoteMain = ($remoteMainLine -split '\s+')[0]
+
+          $supervisorVersion = ([xml](Get-Content CodexContinuity.csproj -Raw)).Project.PropertyGroup.Version
+          $trayVersion = ([xml](Get-Content tray/CodexContinuity.Tray.csproj -Raw)).Project.PropertyGroup.Version
+          $siteVersion = (Get-Content site/package.json -Raw | ConvertFrom-Json).version
+
+          $tag = "v$supervisorVersion"
+          git fetch --force origin 'refs/tags/*:refs/tags/*'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not fetch release tags.'
+          }
+          git show-ref --verify --quiet "refs/tags/$tag"
+          $tagExists = $LASTEXITCODE -eq 0
+          $tagSha = $null
+          $release = $null
+          if ($tagExists) {
+            $tagSha = (git rev-list -n 1 "refs/tags/$tag").Trim()
+            $releaseJson = gh release view $tag --repo $env:GITHUB_REPOSITORY --json tagName,isDraft,isPrerelease,assets 2> $null
+            if ($LASTEXITCODE -eq 0) {
+              $release = $releaseJson | ConvertFrom-Json
+            }
+          }
+
+          $plannerInput = @{
+            conclusion = $env:CI_CONCLUSION
+            workflowEvent = $env:CI_EVENT
+            headBranch = $env:CI_HEAD_BRANCH
+            headRepository = $env:CI_HEAD_REPOSITORY
+            repository = $env:GITHUB_REPOSITORY
+            expectedSha = $env:EXPECTED_SHA
+            remoteMain = $remoteMain
+            supervisorVersion = $supervisorVersion
+            trayVersion = $trayVersion
+            siteVersion = $siteVersion
+            stableTags = @(git tag --list 'v*')
+            tagSha = $tagSha
+            release = $release
+          } | ConvertTo-Json -Depth 10 -Compress
+          $planJson = $plannerInput | node scripts/plan-continuous-release.mjs
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not evaluate the continuous release plan.'
+          }
+          $plan = $planJson | ConvertFrom-Json
+          if ($plan.action -eq 'skip') {
+            "should_release=false" | Out-File $env:GITHUB_OUTPUT -Append
+            Write-Host $plan.reason
+            exit 0
+          }
+          if ($plan.action -eq 'fail') {
+            throw $plan.reason
+          }
+          if ($plan.action -ne 'release' -or $plan.tag -ne $tag) {
+            throw "Unexpected continuous release plan: $planJson"
+          }
+
+          if ($plan.createTag) {
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git tag --annotate $tag $env:EXPECTED_SHA --message "Codex Continuity $tag"
+            git push origin "refs/tags/$tag"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not publish exact release tag $tag."
+            }
+          }
+
+          "release_ref=refs/tags/$tag" | Out-File $env:GITHUB_OUTPUT -Append
+          "release_tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append
+          "release_sha=$env:EXPECTED_SHA" | Out-File $env:GITHUB_OUTPUT -Append
+          "should_release=true" | Out-File $env:GITHUB_OUTPUT -Append
+
+  release:
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      release_ref: ${{ needs.prepare.outputs.release_ref }}
+      release_tag: ${{ needs.prepare.outputs.release_tag }}
+      release_sha: ${{ needs.prepare.outputs.release_sha }}
+    secrets: inherit
