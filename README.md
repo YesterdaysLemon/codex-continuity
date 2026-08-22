@@ -85,8 +85,9 @@ Codex desktop UI  ── reconnectable WebSocket ──  supervised app-server
 - Shows optional health, active-agent count, and update status in the Windows
   notification area; the tray is a separate process and can safely exit.
 - Checks for stable Continuity releases at supervisor start and every four
-  hours, verifies the published SHA-256 digest, reruns the isolated self-test,
-  and stages a newer build without restarting active agents.
+  hours. Automatic staging requires the archive checksum, a valid Authenticode
+  signature from the same publisher as the installed build, and a passing
+  isolated self-test; it never restarts active agents.
 - Binds only to `127.0.0.1`; it does not expose Codex over the network.
 - Removes the desktop's blue in-app update prompt on future launches.
 - Leaves signed package delivery to Microsoft Store, Intune, or another
@@ -103,12 +104,15 @@ a bounded ledger in `update-status.json` under the owned state directory. A
 release can be **observed**, **staged**, or **active**:
 
 - **Observed** means the stable GitHub release was discovered.
-- **Staged** means its archive checksum and isolated self-test passed and the
-  installed startup target now selects that version for the next safe start.
+- **Staged** means its archive checksum, matching publisher signature, and
+  isolated self-test passed and the installed startup target now selects that
+  version for the next safe start.
 - **Active** means a supervisor process with that version is actually running.
 
 The updater never turns "downloaded" into "active" and never restarts the live
-backend or desktop to apply a release.
+backend or desktop to apply a release. Unsigned and development builds can still
+observe releases, but automatic staging fails closed; use the explicit manual
+installation path until publisher signing is configured.
 
 ## Requirements
 
@@ -286,7 +290,8 @@ workflow also supports SHA-256 Authenticode signing with an RFC 3161 timestamp
 and fails verification if signing is configured but invalid. A production code
 signing certificate is the remaining external publisher gate; until it is
 configured, Windows may identify the executable as coming from an unknown
-publisher. See [SECURITY.md](SECURITY.md) before bypassing any warning.
+publisher and Continuity will not automatically stage its own updates. See
+[SECURITY.md](SECURITY.md) before bypassing any warning.
 
 ## Unofficial project
 
