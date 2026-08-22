@@ -121,6 +121,32 @@ test("rejects malformed or unconfirmed revisions", async () => {
     }),
     /did not confirm/,
   );
+
+  await assert.rejects(
+    notifyDeployment({
+      url: "https://deploy.example.test/deploy/continuity",
+      secret: "fixture-secret",
+      payload: { event: "push", branch: "main", repo: "repo", sha },
+      fetchImpl: async () => new Response(
+        JSON.stringify({ ok: true, skipped: true, reason: "wrong_ref" }),
+        { status: 202 },
+      ),
+    }),
+    /did not confirm the requested commit SHA\. Reason: wrong_ref\./,
+  );
+
+  await assert.rejects(
+    notifyDeployment({
+      url: "https://deploy.example.test/deploy/continuity",
+      secret: "fixture-secret",
+      payload: { event: "push", branch: "main", repo: "repo", sha },
+      fetchImpl: async () => new Response(
+        JSON.stringify({ ok: true, skipped: true, reason: "wrong_ref\nforged log" }),
+        { status: 202 },
+      ),
+    }),
+    (error) => error.message === "Deployment manager did not confirm the requested commit SHA.",
+  );
 });
 
 test("verifies release, llms, and exact production revision markers", async () => {
