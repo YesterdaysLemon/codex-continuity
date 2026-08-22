@@ -1,5 +1,6 @@
 using CodexContinuity.Tray;
 using System.Diagnostics;
+using System.Text.Json;
 using Xunit;
 
 namespace CodexContinuity.Tests;
@@ -169,6 +170,98 @@ public sealed class TrayStatusParserTests
                 Directory.Delete(root, recursive: true);
             }
         }
+    }
+
+    [Fact]
+    public void MutationResolutionUsesVersionedCommandsAndFailsClosed()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"continuity-tray-mutation-{Guid.NewGuid():N}");
+        var applicationDirectory = Path.Combine(root, "tray");
+        var stateDirectory = Path.Combine(root, "state");
+        var legacyDirectory = Path.Combine(root, "legacy");
+        var bundledExecutable = Path.Combine(applicationDirectory, "CodexContinuity.exe");
+        var stableExecutable = Path.Combine(stateDirectory, "bin", "CodexContinuity.exe");
+        var installedExecutable = Path.Combine(stateDirectory, "versions", "v1", "CodexContinuity.exe");
+        var statePath = Path.Combine(stateDirectory, "install-state.json");
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(stableExecutable)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(installedExecutable)!);
+            Directory.CreateDirectory(applicationDirectory);
+            File.WriteAllText(bundledExecutable, "bundled");
+            File.WriteAllText(stableExecutable, "stable");
+            File.WriteAllText(installedExecutable, "versioned");
+            File.WriteAllText(statePath, JsonSerializer.Serialize(new
+            {
+                installedExecutable,
+                lifecycle = 0,
+            }));
+
+            Assert.Equal(
+                new TrayMutationTarget(Path.GetFullPath(installedExecutable), null),
+                TrayStatusClient.ResolveMutationTarget(
+                    applicationDirectory, stateDirectory, legacyDirectory));
+
+            File.Delete(installedExecutable);
+            Assert.Equal(
+                new TrayMutationTarget(Path.GetFullPath(bundledExecutable), null),
+                TrayStatusClient.ResolveMutationTarget(
+                    applicationDirectory, stateDirectory, legacyDirectory));
+
+            File.WriteAllText(statePath, JsonSerializer.Serialize(new
+            {
+                installedExecutable = stableExecutable,
+                lifecycle = 1,
+            }));
+            var deferred = TrayStatusClient.ResolveMutationTarget(
+                applicationDirectory, stateDirectory, legacyDirectory);
+            Assert.False(deferred.Available);
+            Assert.Contains("deferred uninstall", deferred.Error);
+
+            foreach (var invalidState in new[] { "not json", """{"lifecycle":9}""" })
+            {
+                File.WriteAllText(statePath, invalidState);
+                var invalid = TrayStatusClient.ResolveMutationTarget(
+                    applicationDirectory, stateDirectory, legacyDirectory);
+                Assert.False(invalid.Available);
+                Assert.Contains("state is invalid", invalid.Error);
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task MutationGateSerializesCommands()
+    {
+        var gate = new TrayCommandGate();
+        var firstEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var first = gate.RunAsync(async () =>
+        {
+            firstEntered.SetResult(true);
+            await releaseFirst.Task;
+            return 1;
+        }, CancellationToken.None);
+        await firstEntered.Task;
+        var second = gate.RunAsync(() =>
+        {
+            secondEntered.SetResult(true);
+            return Task.FromResult(2);
+        }, CancellationToken.None);
+
+        Assert.False(secondEntered.Task.IsCompleted);
+        releaseFirst.SetResult(true);
+        Assert.Equal(new[] { 1, 2 }, await Task.WhenAll(first, second));
     }
 
     [Fact]

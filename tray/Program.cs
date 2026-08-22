@@ -30,17 +30,20 @@ internal sealed class ContinuityTrayContext : ApplicationContext
     private readonly ToolStripMenuItem agentsItem;
     private readonly ToolStripMenuItem updateItem;
     private readonly ToolStripMenuItem updateDetailItem;
+    private readonly ToolStripMenuItem checkForUpdatesItem;
+    private readonly ToolStripMenuItem recoveryItem;
     private readonly System.Windows.Forms.Timer refreshTimer;
     private readonly TrayStatusClient statusClient;
     private readonly Icon healthyIcon;
     private bool refreshInProgress;
+    private bool mutationInProgress;
 
     internal ContinuityTrayContext()
     {
         var applicationDirectory = AppContext.BaseDirectory;
         var supervisorExecutable = TrayStatusClient.ResolveSupervisorExecutable(
             applicationDirectory);
-        statusClient = new TrayStatusClient(supervisorExecutable);
+        statusClient = new TrayStatusClient(supervisorExecutable, applicationDirectory);
         healthyIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath)
             ?? SystemIcons.Application;
         healthItem = new ToolStripMenuItem("Checking backend…") { Enabled = false };
@@ -48,14 +51,24 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         updateItem = new ToolStripMenuItem("Updates: checking…") { Enabled = false };
         updateDetailItem = new ToolStripMenuItem("Update state: checking…") { Enabled = false };
 
+        checkForUpdatesItem = MenuItem(
+            "Check for updates now",
+            async () => await CheckForUpdatesAsync());
+        recoveryItem = MenuItem(
+            "Restart Continuity backend",
+            async () => await RestartSupervisorAsync());
+        recoveryItem.Visible = false;
+
         var menu = new ContextMenuStrip();
         menu.Items.AddRange([
             healthItem,
             agentsItem,
             updateItem,
             updateDetailItem,
+            recoveryItem,
             new ToolStripSeparator(),
             MenuItem("Refresh now", async () => await RefreshAsync()),
+            checkForUpdatesItem,
             MenuItem("Open diagnostics folder", OpenDiagnostics),
             MenuItem("Visit product site", OpenProductSite),
             new ToolStripSeparator(),
@@ -114,6 +127,7 @@ internal sealed class ContinuityTrayContext : ApplicationContext
             };
             var state = status.Health.ToString().ToLowerInvariant();
             notifyIcon.Text = $"Codex Continuity — {state} — {status.ActiveAgentCount} active agents";
+            recoveryItem.Visible = status.Health == ContinuityHealth.Unavailable;
             var update = await statusClient.ReadUpdateAsync(shutdown.Token);
             updateItem.Text = TrayStatusPresentation.UpdateCounts(update);
             updateItem.Enabled = update.LatestVersion is not null;
@@ -130,6 +144,59 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         finally
         {
             refreshInProgress = false;
+        }
+    }
+
+    private Task CheckForUpdatesAsync() => RunMutationAsync(
+        updateDetailItem,
+        "Checking for verified releases…",
+        "Update check",
+        statusClient.CheckForUpdatesAsync);
+
+    private Task RestartSupervisorAsync() => RunMutationAsync(
+        healthItem,
+        "Starting Continuity backend…",
+        "Backend recovery",
+        statusClient.RestartSupervisorAsync,
+        TimeSpan.FromSeconds(2));
+
+    private async Task RunMutationAsync(
+        ToolStripMenuItem feedbackItem,
+        string pendingText,
+        string action,
+        Func<CancellationToken, Task<TrayCommandResult>> command,
+        TimeSpan? settleDelay = null)
+    {
+        if (mutationInProgress)
+        {
+            return;
+        }
+        mutationInProgress = true;
+        checkForUpdatesItem.Enabled = false;
+        recoveryItem.Enabled = false;
+        feedbackItem.Text = pendingText;
+        try
+        {
+            var result = await command(shutdown.Token);
+            if (result.ExitCode != 0)
+            {
+                feedbackItem.Text = TrayStatusPresentation.CommandFailure(action, result);
+                return;
+            }
+            if (settleDelay is { } delay)
+            {
+                await Task.Delay(delay, shutdown.Token);
+            }
+            await RefreshAsync();
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            mutationInProgress = false;
+            checkForUpdatesItem.Enabled = true;
+            recoveryItem.Enabled = true;
         }
     }
 
