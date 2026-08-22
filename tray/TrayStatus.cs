@@ -22,6 +22,33 @@ internal sealed record TrayStatusSnapshot(
 
 internal sealed record TrayCommandResult(int ExitCode, string Output, string Error);
 
+internal sealed record TrayMutationTarget(
+    string? Executable,
+    string? SelectedExecutable,
+    string? ExpectedSha256,
+    string? Error)
+{
+    internal bool Available => Executable is not null;
+}
+
+internal sealed class TrayCommandGate
+{
+    private readonly SemaphoreSlim semaphore = new(1, 1);
+
+    internal async Task<T> RunAsync<T>(Func<Task<T>> command, CancellationToken cancellationToken)
+    {
+        await semaphore.WaitAsync(cancellationToken);
+        try
+        {
+            return await command();
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+}
+
 internal sealed record ContinuityUpdateSnapshot(
     string? RunningVersion,
     bool RunningProcessObserved,
@@ -38,6 +65,8 @@ internal sealed record ContinuityUpdateSnapshot(
 
 internal static class TrayStatusPresentation
 {
+    internal static bool ShowRecovery(ContinuityHealth health) => health == ContinuityHealth.Unavailable;
+
     internal static string UpdateCounts(ContinuityUpdateSnapshot update) =>
         $"Updates: {update.ObservedCount} observed / {update.StagedCount} staged / " +
         $"{update.AppliedCount} applied";
@@ -72,6 +101,13 @@ internal static class TrayStatusPresentation
             "unknown" => $"{currentVersion}; update state unknown",
             _ => $"{currentVersion}; update state {update.LatestState}",
         };
+    }
+
+    internal static string CommandFailure(string action, TrayCommandResult result)
+    {
+        var detail = string.IsNullOrWhiteSpace(result.Error) ? result.Output : result.Error;
+        detail = string.IsNullOrWhiteSpace(detail) ? $"exit code {result.ExitCode}" : detail;
+        return $"{action} failed: {Compact(detail)}";
     }
 
     private static string Compact(string text)
@@ -154,9 +190,27 @@ internal static class TrayStatusParser
         root.TryGetProperty(name, out var value) && value.GetBoolean();
 }
 
-internal sealed class TrayStatusClient(string supervisorExecutable)
+internal sealed class TrayStatusClient(
+    string supervisorExecutable,
+    string? mutationApplicationDirectory = null,
+    string? mutationStateDirectory = null,
+    string? mutationLegacyStateDirectory = null,
+    Func<string, IReadOnlyList<string>, CancellationToken, Task<TrayCommandResult>>?
+        mutationProcessRunner = null)
 {
     internal const int DefaultPort = 45123;
+
+    private readonly string applicationDirectory =
+        mutationApplicationDirectory ?? AppContext.BaseDirectory;
+    private readonly string actionStateDirectory = mutationStateDirectory ?? StateDirectory;
+    private readonly string actionLegacyStateDirectory =
+        mutationLegacyStateDirectory ?? LegacyStateDirectory;
+    private readonly TrayCommandGate mutationGate = new();
+    private readonly Func<
+        string,
+        IReadOnlyList<string>,
+        CancellationToken,
+        Task<TrayCommandResult>> processRunner = mutationProcessRunner ?? RunProcessAsync;
 
     private static string StateDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -213,6 +267,21 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
         }
     }
 
+    internal Task<TrayCommandResult> CheckForUpdatesAsync(CancellationToken cancellationToken) =>
+        RunMutationAsync(_ => ["update"], cancellationToken);
+
+    internal Task<TrayCommandResult> RestartSupervisorAsync(CancellationToken cancellationToken) =>
+        RunMutationAsync(target => target.SelectedExecutable is null
+            ? ["repair", "--start-now"]
+            : [
+                "repair",
+                "--start-now",
+                "--expected-installed-executable",
+                target.SelectedExecutable,
+                "--expected-installed-sha256",
+                target.ExpectedSha256!,
+            ], cancellationToken);
+
     internal static string ResolveSupervisorExecutable(string applicationDirectory)
         => ResolveSupervisorExecutable(applicationDirectory, StateDirectory);
 
@@ -227,6 +296,90 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
         return File.Exists(stableExecutable)
             ? stableExecutable
             : Path.Combine(applicationDirectory, "CodexContinuity.exe");
+    }
+
+    internal static TrayMutationTarget ResolveMutationTarget(
+        string applicationDirectory,
+        string currentDirectory,
+        string legacyDirectory)
+    {
+        var bundledExecutable = Path.GetFullPath(
+            Path.Combine(applicationDirectory, "CodexContinuity.exe"));
+        var statePath = new[] { currentDirectory, legacyDirectory }
+            .Select(directory => Path.Combine(directory, "install-state.json"))
+            .FirstOrDefault(File.Exists);
+        if (statePath is null)
+        {
+            return File.Exists(bundledExecutable)
+                ? new(bundledExecutable, null, null, null)
+                : new(null, null, null, "No immutable Continuity command is available.");
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(statePath));
+            var root = document.RootElement;
+            if (IsDeferredUninstall(root))
+            {
+                return new(
+                    null,
+                    null,
+                    null,
+                    "Continuity is pending deferred uninstall; actions are disabled.");
+            }
+            var installedExecutable = root.GetProperty("installedExecutable").GetString();
+            var expectedSha256 = root.GetProperty("binarySha256").GetString();
+            var stateDirectory = Path.GetDirectoryName(statePath)!;
+            if (!string.IsNullOrWhiteSpace(installedExecutable) &&
+                !string.IsNullOrWhiteSpace(expectedSha256))
+            {
+                var fullExecutable = Path.GetFullPath(installedExecutable);
+                var versionsDirectory = Path.GetFullPath(
+                    Path.Combine(stateDirectory, "versions")) + Path.DirectorySeparatorChar;
+                if (fullExecutable.StartsWith(versionsDirectory, StringComparison.OrdinalIgnoreCase) &&
+                    Path.GetFileName(fullExecutable).Equals(
+                        "CodexContinuity.exe",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    File.Exists(fullExecutable))
+                {
+                    return new(fullExecutable, fullExecutable, expectedSha256, null);
+                }
+                return File.Exists(bundledExecutable)
+                    ? new(bundledExecutable, fullExecutable, expectedSha256, null)
+                    : new(null, null, null, "The installed Continuity command is unavailable.");
+            }
+            return new(null, null, null, "Installed Continuity state is invalid; actions are disabled.");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+            JsonException or KeyNotFoundException or InvalidDataException or InvalidOperationException or
+            ArgumentException or NotSupportedException)
+        {
+            return new(null, null, null, "Installed Continuity state is invalid; actions are disabled.");
+        }
+    }
+
+    private static bool IsDeferredUninstall(JsonElement root)
+    {
+        if (!root.TryGetProperty("lifecycle", out var lifecycle))
+        {
+            return false;
+        }
+        if (lifecycle.ValueKind == JsonValueKind.Number &&
+            lifecycle.TryGetInt32(out var numericLifecycle) &&
+            numericLifecycle is 0 or 1)
+        {
+            return numericLifecycle == 1;
+        }
+        if (lifecycle.ValueKind == JsonValueKind.String)
+        {
+            return lifecycle.GetString() switch
+            {
+                "installed" or "Installed" => false,
+                "deferredUninstall" or "DeferredUninstall" => true,
+                _ => throw new InvalidDataException("Unknown install lifecycle."),
+            };
+        }
+        throw new InvalidDataException("Unknown install lifecycle.");
     }
 
     internal static string ResolveDiagnosticsDirectory(
@@ -312,6 +465,19 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
         var legacy = Path.Combine(LegacyStateDirectory, fileName);
         return File.Exists(legacy) ? legacy : null;
     }
+
+    private Task<TrayCommandResult> RunMutationAsync(
+        Func<TrayMutationTarget, IReadOnlyList<string>> arguments,
+        CancellationToken cancellationToken) => mutationGate.RunAsync(async () =>
+        {
+            var target = ResolveMutationTarget(
+                applicationDirectory,
+                actionStateDirectory,
+                actionLegacyStateDirectory);
+            return target.Executable is null
+                ? new TrayCommandResult(-1, string.Empty, target.Error ?? "Command unavailable.")
+                : await processRunner(target.Executable, arguments(target), cancellationToken);
+        }, cancellationToken);
 
     internal static async Task<TrayCommandResult> RunProcessAsync(
         string executable,

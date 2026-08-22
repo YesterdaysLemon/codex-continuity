@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 
@@ -30,17 +31,20 @@ internal sealed class ContinuityTrayContext : ApplicationContext
     private readonly ToolStripMenuItem agentsItem;
     private readonly ToolStripMenuItem updateItem;
     private readonly ToolStripMenuItem updateDetailItem;
+    private readonly ToolStripMenuItem checkForUpdatesItem;
+    private readonly ToolStripMenuItem recoveryItem;
     private readonly System.Windows.Forms.Timer refreshTimer;
     private readonly TrayStatusClient statusClient;
     private readonly Icon healthyIcon;
     private bool refreshInProgress;
+    private readonly TrayMutationPresenter mutationPresenter = new();
 
     internal ContinuityTrayContext()
     {
         var applicationDirectory = AppContext.BaseDirectory;
         var supervisorExecutable = TrayStatusClient.ResolveSupervisorExecutable(
             applicationDirectory);
-        statusClient = new TrayStatusClient(supervisorExecutable);
+        statusClient = new TrayStatusClient(supervisorExecutable, applicationDirectory);
         healthyIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath)
             ?? SystemIcons.Application;
         healthItem = new ToolStripMenuItem("Checking backend…") { Enabled = false };
@@ -48,14 +52,24 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         updateItem = new ToolStripMenuItem("Updates: checking…") { Enabled = false };
         updateDetailItem = new ToolStripMenuItem("Update state: checking…") { Enabled = false };
 
+        checkForUpdatesItem = MenuItem(
+            "Check for updates now",
+            async () => await CheckForUpdatesAsync());
+        recoveryItem = MenuItem(
+            "Restart Continuity backend",
+            async () => await RestartSupervisorAsync());
+        recoveryItem.Visible = false;
+
         var menu = new ContextMenuStrip();
         menu.Items.AddRange([
             healthItem,
             agentsItem,
             updateItem,
             updateDetailItem,
+            recoveryItem,
             new ToolStripSeparator(),
             MenuItem("Refresh now", async () => await RefreshAsync()),
+            checkForUpdatesItem,
             MenuItem("Open diagnostics folder", OpenDiagnostics),
             MenuItem("Visit product site", OpenProductSite),
             new ToolStripSeparator(),
@@ -114,6 +128,7 @@ internal sealed class ContinuityTrayContext : ApplicationContext
             };
             var state = status.Health.ToString().ToLowerInvariant();
             notifyIcon.Text = $"Codex Continuity — {state} — {status.ActiveAgentCount} active agents";
+            recoveryItem.Visible = TrayStatusPresentation.ShowRecovery(status.Health);
             var update = await statusClient.ReadUpdateAsync(shutdown.Token);
             updateItem.Text = TrayStatusPresentation.UpdateCounts(update);
             updateItem.Enabled = update.LatestVersion is not null;
@@ -132,6 +147,38 @@ internal sealed class ContinuityTrayContext : ApplicationContext
             refreshInProgress = false;
         }
     }
+
+    private Task CheckForUpdatesAsync() => RunMutationAsync(
+        updateDetailItem,
+        "Checking for verified releases…",
+        "Update check",
+        statusClient.CheckForUpdatesAsync);
+
+    private Task RestartSupervisorAsync() => RunMutationAsync(
+        healthItem,
+        "Starting Continuity backend…",
+        "Backend recovery",
+        statusClient.RestartSupervisorAsync,
+        TimeSpan.FromSeconds(2));
+
+    private Task RunMutationAsync(
+        ToolStripMenuItem feedbackItem,
+        string pendingText,
+        string action,
+        Func<CancellationToken, Task<TrayCommandResult>> command,
+        TimeSpan? settleDelay = null) => mutationPresenter.RunAsync(
+            pendingText,
+            action,
+            command,
+            shutdown.Token,
+            enabled =>
+            {
+                checkForUpdatesItem.Enabled = enabled;
+                recoveryItem.Enabled = enabled;
+            },
+            text => feedbackItem.Text = text,
+            RefreshAsync,
+            settleDelay);
 
     private static void OpenDiagnostics()
     {
@@ -168,5 +215,59 @@ internal sealed class ContinuityTrayContext : ApplicationContext
             shutdown.Dispose();
         }
         base.Dispose(disposing);
+    }
+}
+
+internal sealed class TrayMutationPresenter
+{
+    private bool mutationInProgress;
+
+    internal async Task RunAsync(
+        string pendingText,
+        string action,
+        Func<CancellationToken, Task<TrayCommandResult>> command,
+        CancellationToken cancellationToken,
+        Action<bool> setActionsEnabled,
+        Action<string> setFeedback,
+        Func<Task> refreshAsync,
+        TimeSpan? settleDelay = null)
+    {
+        if (mutationInProgress)
+        {
+            return;
+        }
+        mutationInProgress = true;
+        setActionsEnabled(false);
+        setFeedback(pendingText);
+        try
+        {
+            var result = await command(cancellationToken);
+            if (result.ExitCode != 0)
+            {
+                setFeedback(TrayStatusPresentation.CommandFailure(action, result));
+                return;
+            }
+            if (settleDelay is { } delay)
+            {
+                await Task.Delay(delay, cancellationToken);
+            }
+            await refreshAsync();
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or
+            InvalidOperationException or Win32Exception)
+        {
+            setFeedback(TrayStatusPresentation.CommandFailure(
+                action,
+                new TrayCommandResult(-1, string.Empty, exception.Message)));
+        }
+        finally
+        {
+            mutationInProgress = false;
+            setActionsEnabled(true);
+        }
     }
 }

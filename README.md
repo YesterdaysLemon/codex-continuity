@@ -114,6 +114,14 @@ backend or desktop to apply a release. Unsigned and development builds can still
 observe releases, but automatic staging fails closed; use the explicit manual
 installation path until publisher signing is configured.
 
+The tray's **Check for updates now** action runs the same verified staging path
+without interrupting the backend. When the backend is unavailable, **Restart
+Continuity backend** reapplies the installed configuration and starts only the
+owned supervisor; it still refuses a foreign endpoint on the configured port.
+Both actions use the selected versioned coordinator and are serialized so an
+update, repair, uninstall, or rollback cannot mutate installation state at the
+same time.
+
 ## Requirements
 
 - Windows 11 (the initial release is tested on Windows 11 x64).

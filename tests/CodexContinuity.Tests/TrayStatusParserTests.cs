@@ -1,5 +1,7 @@
 using CodexContinuity.Tray;
+using System.ComponentModel;
 using System.Diagnostics;
+using System.Text.Json;
 using Xunit;
 
 namespace CodexContinuity.Tests;
@@ -62,6 +64,10 @@ public sealed class TrayStatusParserTests
         Assert.Equal(ContinuityHealth.Degraded, status.Health);
     }
 
+    [Theory, InlineData(0, false), InlineData(1, false), InlineData(2, true)]
+    public void ShowsRecoveryOnlyWhileUnavailable(int health, bool expected) =>
+        Assert.Equal(expected, TrayStatusPresentation.ShowRecovery((ContinuityHealth)health));
+
     [Fact]
     public void ParsesObservedStagedAndAppliedUpdateCounts()
     {
@@ -123,6 +129,33 @@ public sealed class TrayStatusParserTests
             ContinuityHealth.Unavailable));
 
     [Theory]
+    [InlineData("stderr", "stdout", 2, "Update check failed: stderr")]
+    [InlineData("", "stdout", 2, "Update check failed: stdout")]
+    [InlineData("", "", 2, "Update check failed: exit code 2")]
+    public void CommandFailureUsesBoundedUsefulDetail(
+        string error, string output, int exitCode, string expected) => Assert.Equal(
+            expected,
+            TrayStatusPresentation.CommandFailure(
+                "Update check", new TrayCommandResult(exitCode, output, error)));
+
+    [Fact]
+    public async Task MutationPresenterContainsLauncherFailureAndRestoresActions()
+    {
+        var enabledStates = new List<bool>();
+        var feedback = string.Empty;
+        await new TrayMutationPresenter().RunAsync(
+            "Checkingâ€¦",
+            "Update check",
+            _ => throw new Win32Exception("launch failed"),
+            CancellationToken.None,
+            enabledStates.Add,
+            text => feedback = text,
+            () => throw new InvalidOperationException("Refresh must not run."));
+        Assert.Equal([false, true], enabledStates);
+        Assert.Equal("Update check failed: launch failed", feedback);
+    }
+
+    [Theory]
     [InlineData("[]")]
     [InlineData("{\"observedCount\":\"many\"}")]
     public void InvalidUpdateShapeIsUnavailable(string json) => Assert.Equal(
@@ -172,6 +205,185 @@ public sealed class TrayStatusParserTests
     }
 
     [Fact]
+    public void MutationResolutionUsesVersionedCommandsAndFailsClosed()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"continuity-tray-mutation-{Guid.NewGuid():N}");
+        var applicationDirectory = Path.Combine(root, "tray");
+        var stateDirectory = Path.Combine(root, "state");
+        var legacyDirectory = Path.Combine(root, "legacy");
+        var bundledExecutable = Path.Combine(applicationDirectory, "CodexContinuity.exe");
+        var stableExecutable = Path.Combine(stateDirectory, "bin", "CodexContinuity.exe");
+        var installedExecutable = Path.Combine(stateDirectory, "versions", "v1", "CodexContinuity.exe");
+        var statePath = Path.Combine(stateDirectory, "install-state.json");
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(stableExecutable)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(installedExecutable)!);
+            Directory.CreateDirectory(applicationDirectory);
+            File.WriteAllText(bundledExecutable, "bundled");
+            File.WriteAllText(stableExecutable, "stable");
+            File.WriteAllText(installedExecutable, "versioned");
+            WriteInstallState(statePath, installedExecutable, "AA", lifecycle: 0);
+
+            Assert.Equal(
+                new TrayMutationTarget(
+                    Path.GetFullPath(installedExecutable),
+                    Path.GetFullPath(installedExecutable),
+                    "AA",
+                    null),
+                TrayStatusClient.ResolveMutationTarget(
+                    applicationDirectory, stateDirectory, legacyDirectory));
+
+            File.Delete(installedExecutable);
+            Assert.Equal(
+                new TrayMutationTarget(
+                    Path.GetFullPath(bundledExecutable),
+                    Path.GetFullPath(installedExecutable),
+                    "AA",
+                    null),
+                TrayStatusClient.ResolveMutationTarget(
+                    applicationDirectory, stateDirectory, legacyDirectory));
+
+            WriteInstallState(statePath, stableExecutable, "BB", lifecycle: 0);
+            Assert.Equal(
+                new TrayMutationTarget(
+                    Path.GetFullPath(bundledExecutable),
+                    Path.GetFullPath(stableExecutable),
+                    "BB",
+                    null),
+                TrayStatusClient.ResolveMutationTarget(
+                    applicationDirectory, stateDirectory, legacyDirectory));
+
+            WriteInstallState(statePath, stableExecutable, "BB", lifecycle: 1);
+            var deferred = TrayStatusClient.ResolveMutationTarget(
+                applicationDirectory, stateDirectory, legacyDirectory);
+            Assert.False(deferred.Available);
+            Assert.Contains("deferred uninstall", deferred.Error);
+
+            foreach (var invalidState in new[] { "not json", """{"lifecycle":9}""" })
+            {
+                File.WriteAllText(statePath, invalidState);
+                var invalid = TrayStatusClient.ResolveMutationTarget(
+                    applicationDirectory, stateDirectory, legacyDirectory);
+                Assert.False(invalid.Available);
+                Assert.Contains("state is invalid", invalid.Error);
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task MutationActionsUseOneGateAndExactVersionedCommands()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"continuity-tray-actions-{Guid.NewGuid():N}");
+        var applicationDirectory = Path.Combine(root, "tray");
+        var stateDirectory = Path.Combine(root, "state");
+        var legacyDirectory = Path.Combine(root, "legacy");
+        var installedExecutable = Path.Combine(stateDirectory, "versions", "v1", "CodexContinuity.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(installedExecutable)!);
+        Directory.CreateDirectory(applicationDirectory);
+        File.WriteAllText(installedExecutable, "versioned");
+        WriteInstallState(
+            Path.Combine(stateDirectory, "install-state.json"),
+            installedExecutable,
+            "ABC123",
+            lifecycle: 0);
+        var calls = new List<string>();
+        var firstEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        async Task<TrayCommandResult> RunProcess(
+            string executable,
+            IReadOnlyList<string> arguments,
+            CancellationToken _)
+        {
+            calls.Add($"{executable}|{string.Join('|', arguments)}");
+            if (arguments[0] == "update")
+            {
+                firstEntered.SetResult(true);
+                await releaseFirst.Task;
+            }
+            else
+            {
+                secondEntered.SetResult(true);
+            }
+            return new(0, string.Empty, string.Empty);
+        }
+
+        try
+        {
+            var client = new TrayStatusClient(
+                "read-only-status.exe",
+                applicationDirectory,
+                stateDirectory,
+                legacyDirectory,
+                RunProcess);
+            var update = client.CheckForUpdatesAsync(CancellationToken.None);
+            await firstEntered.Task;
+            var recovery = client.RestartSupervisorAsync(CancellationToken.None);
+
+            Assert.False(secondEntered.Task.IsCompleted);
+            releaseFirst.SetResult(true);
+            await Task.WhenAll(update, recovery);
+            Assert.Equal(
+                [
+                    $"{Path.GetFullPath(installedExecutable)}|update",
+                    $"{Path.GetFullPath(installedExecutable)}|repair|--start-now|" +
+                        $"--expected-installed-executable|{Path.GetFullPath(installedExecutable)}|" +
+                        "--expected-installed-sha256|ABC123",
+                ],
+                calls);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task MutationGateReleasesAfterFaultAndSkipsCanceledQueue()
+    {
+        var gate = new TrayCommandGate();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => gate.RunAsync<int>(
+            () => throw new InvalidOperationException("fixture"),
+            CancellationToken.None));
+        Assert.Equal(1, await gate.RunAsync(() => Task.FromResult(1), CancellationToken.None));
+
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var held = gate.RunAsync(async () =>
+        {
+            await release.Task;
+            return 1;
+        }, CancellationToken.None);
+        using var cancellation = new CancellationTokenSource();
+        var entered = false;
+        var queued = gate.RunAsync(() =>
+        {
+            entered = true;
+            return Task.FromResult(2);
+        }, cancellation.Token);
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued);
+        Assert.False(entered);
+        release.SetResult(true);
+        Assert.Equal(1, await held);
+    }
+
+    [Fact]
     public async Task CancelingTrayProcessKillsTheChildProcessTree()
     {
         var recordPath = Path.GetTempFileName();
@@ -209,4 +421,12 @@ public sealed class TrayStatusParserTests
             File.Delete(recordPath);
         }
     }
+
+    private static void WriteInstallState(
+        string path,
+        string installedExecutable,
+        string binarySha256,
+        int lifecycle) => File.WriteAllText(
+            path,
+            JsonSerializer.Serialize(new { installedExecutable, binarySha256, lifecycle }));
 }
