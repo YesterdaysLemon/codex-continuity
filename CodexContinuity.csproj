@@ -7,7 +7,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <AssemblyName>CodexContinuity</AssemblyName>
     <RootNamespace>CodexContinuity</RootNamespace>
-    <Version>0.2.1</Version>
+    <Version>0.3.0</Version>
     <Authors>YesterdaysLemon</Authors>
     <Company>YesterdaysLemon</Company>
     <Product>Codex Continuity</Product>

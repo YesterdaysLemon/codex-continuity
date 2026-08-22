@@ -173,14 +173,14 @@ test("verifies release, llms, and exact production revision markers", async () =
   const requested = [];
   await verifyPublication({
     baseUrl: "https://continuity.example.test",
-    expectedVersion: "0.2.1",
+    expectedVersion: "0.3.0",
     expectedRevision: sha,
     fetchImpl: async (url) => {
       requested.push(url.pathname);
       const body = url.pathname === "/"
-        ? 'Codex Continuity softwareVersion":"0.2.1'
+        ? 'Codex Continuity softwareVersion":"0.3.0'
         : url.pathname === "/llms.txt"
-          ? "supported v0.2.1 release target"
+          ? "supported v0.3.0 release target"
           : `${sha}\n`;
       return new Response(body);
     },
@@ -191,12 +191,12 @@ test("verifies release, llms, and exact production revision markers", async () =
 
 test("rejects wrong release, llms, and revision markers", async () => {
   const validBodies = {
-    "/": 'Codex Continuity softwareVersion":"0.2.1',
-    "/llms.txt": "supported v0.2.1 release target",
+    "/": 'Codex Continuity softwareVersion":"0.3.0',
+    "/llms.txt": "supported v0.3.0 release target",
     "/deploy-revision.txt": `${sha}\n`,
   };
   const cases = [
-    ["/", "Codex Continuity softwareVersion\":\"0.1.0", /expected v0.2.1 release marker/],
+    ["/", "Codex Continuity softwareVersion\":\"0.1.0", /expected v0.3.0 release marker/],
     ["/llms.txt", "supported v0.1.0 release target", /llms.txt does not expose/],
     ["/deploy-revision.txt", `${"f".repeat(40)}\n`, /not serving the requested commit SHA/],
   ];
@@ -205,7 +205,7 @@ test("rejects wrong release, llms, and revision markers", async () => {
     await assert.rejects(
       verifyPublication({
         baseUrl: "https://continuity.example.test",
-        expectedVersion: "0.2.1",
+        expectedVersion: "0.3.0",
         expectedRevision: sha,
         fetchImpl: async (url) => new Response(
           url.pathname === changedPath ? changedBody : validBodies[url.pathname],
@@ -251,12 +251,12 @@ test("production orchestration verifies exact custom revision and Sites fallback
     }],
     ["verify", {
       baseUrl: environment.PRODUCTION_URL,
-      expectedVersion: "0.2.1",
+      expectedVersion: "0.3.0",
       expectedRevision: sha,
     }],
     ["verify", {
       baseUrl: environment.SITES_URL,
-      expectedVersion: "0.2.1",
+      expectedVersion: "0.3.0",
     }],
   ]);
 });

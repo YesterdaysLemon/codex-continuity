@@ -4,6 +4,14 @@ on:
   push:
     tags:
       - v*
+  workflow_call:
+    inputs:
+      release_ref:
+        required: true
+        type: string
+      release_tag:
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -11,13 +19,22 @@ permissions:
   attestations: write
   artifact-metadata: write
 
+concurrency:
+  group: release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   release:
     env:
+      RELEASE_REF: ${{ inputs.release_ref || github.ref }}
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
       SIGNING_CONFIGURED: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 != '' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_ref || github.ref }}
+          fetch-depth: 0
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
@@ -25,15 +42,23 @@ jobs:
       - name: Verify release version
         shell: pwsh
         run: |
-          $tag = '${{ github.ref_name }}'
+          $tag = $env:RELEASE_TAG
           if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
             throw "Release tag must use vX.Y.Z syntax: $tag"
+          }
+          if ($env:RELEASE_REF -ne "refs/tags/$tag") {
+            throw "Release ref must identify the exact tag: ref=$env:RELEASE_REF tag=$tag"
           }
           $tagVersion = $Matches.version
           $supervisorVersion = ([xml](Get-Content CodexContinuity.csproj -Raw)).Project.PropertyGroup.Version
           $trayVersion = ([xml](Get-Content tray/CodexContinuity.Tray.csproj -Raw)).Project.PropertyGroup.Version
           if ($tagVersion -ne $supervisorVersion -or $tagVersion -ne $trayVersion) {
             throw "Release version mismatch: tag=$tagVersion supervisor=$supervisorVersion tray=$trayVersion"
+          }
+          $headSha = (git rev-parse HEAD).Trim()
+          $tagSha = (git rev-list -n 1 "refs/tags/$tag").Trim()
+          if ($headSha -ne $tagSha) {
+            throw "Release checkout does not match the tag: HEAD=$headSha tag=$tagSha"
           }
       - run: dotnet build CodexContinuity.csproj --configuration Release --no-restore
       - run: dotnet test tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj --configuration Release --no-restore
@@ -68,7 +93,7 @@ jobs:
       - name: Package release
         shell: pwsh
         run: |
-          $tag = '${{ github.ref_name }}'
+          $tag = $env:RELEASE_TAG
           $folder = "CodexContinuity-$tag-win-x64"
           New-Item -ItemType Directory -Path "release/$folder" | Out-Null
           Copy-Item publish/CodexContinuity.exe "release/$folder/"
@@ -108,16 +133,19 @@ jobs:
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "${{ github.ref_name }}"
-          "release/CodexContinuity-${{ github.ref_name }}-win-x64.zip"
-          "release/CodexContinuity-${{ github.ref_name }}-win-x64.zip.sha256"
-          "release/CodexContinuity-win-x64.zip"
-          "release/CodexContinuity-win-x64.zip.sha256"
-          "release/CodexContinuity-${{ github.ref_name }}-Setup.exe"
-          "release/CodexContinuity-${{ github.ref_name }}-Setup.exe.sha256"
-          "release/CodexContinuity-Setup.exe"
-          "release/CodexContinuity-Setup.exe.sha256"
-          "release/CodexContinuity-${{ github.ref_name }}-winget-manifests.zip"
-          "install.ps1"
-          --generate-notes --title "Codex Continuity ${{ github.ref_name }}"
+        shell: pwsh
+        run: |
+          $tag = $env:RELEASE_TAG
+          $assets = @(
+            "release/CodexContinuity-$tag-win-x64.zip"
+            "release/CodexContinuity-$tag-win-x64.zip.sha256"
+            "release/CodexContinuity-win-x64.zip"
+            "release/CodexContinuity-win-x64.zip.sha256"
+            "release/CodexContinuity-$tag-Setup.exe"
+            "release/CodexContinuity-$tag-Setup.exe.sha256"
+            "release/CodexContinuity-Setup.exe"
+            "release/CodexContinuity-Setup.exe.sha256"
+            "release/CodexContinuity-$tag-winget-manifests.zip"
+            "install.ps1"
+          )
+          gh release create $tag @assets --verify-tag --generate-notes --title "Codex Continuity $tag"

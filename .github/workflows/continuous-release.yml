@@ -1,0 +1,116 @@
+name: Continuous release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+concurrency:
+  group: continuous-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      release_ref: ${{ steps.plan.outputs.release_ref }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      should_release: ${{ steps.plan.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - name: Plan the exact green release
+        id: plan
+        shell: pwsh
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:EXPECTED_SHA -notmatch '^[0-9a-f]{40}$') {
+            throw "CI did not provide a full commit SHA: $env:EXPECTED_SHA"
+          }
+
+          $remoteMainLine = git ls-remote origin refs/heads/main
+          if ($LASTEXITCODE -ne 0 -or -not $remoteMainLine) {
+            throw 'Could not resolve remote main.'
+          }
+          $remoteMain = ($remoteMainLine -split '\s+')[0]
+          if ($remoteMain -ne $env:EXPECTED_SHA) {
+            "should_release=false" | Out-File $env:GITHUB_OUTPUT -Append
+            Write-Host "Skipping stale green revision $env:EXPECTED_SHA; main is $remoteMain."
+            exit 0
+          }
+
+          $supervisorVersion = ([xml](Get-Content CodexContinuity.csproj -Raw)).Project.PropertyGroup.Version
+          $trayVersion = ([xml](Get-Content tray/CodexContinuity.Tray.csproj -Raw)).Project.PropertyGroup.Version
+          if ($supervisorVersion -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Release version must use X.Y.Z syntax: $supervisorVersion"
+          }
+          if ($supervisorVersion -ne $trayVersion) {
+            throw "Supervisor and tray versions differ: $supervisorVersion != $trayVersion"
+          }
+
+          $tag = "v$supervisorVersion"
+          git fetch --force origin 'refs/tags/*:refs/tags/*'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not fetch release tags.'
+          }
+          git show-ref --verify --quiet "refs/tags/$tag"
+          $tagExists = $LASTEXITCODE -eq 0
+          if ($tagExists) {
+            gh release view $tag --repo $env:GITHUB_REPOSITORY --json tagName *> $null
+            if ($LASTEXITCODE -eq 0) {
+              "should_release=false" | Out-File $env:GITHUB_OUTPUT -Append
+              Write-Host "$tag is already published; this merge does not need a desktop release."
+              exit 0
+            }
+            $tagSha = (git rev-list -n 1 "refs/tags/$tag").Trim()
+            if ($tagSha -ne $env:EXPECTED_SHA) {
+              throw "Unpublished tag $tag points to $tagSha instead of the green revision $env:EXPECTED_SHA."
+            }
+            Write-Host "$tag exists without a release; resuming the release pipeline."
+          } else {
+            $stableVersions = git tag --list 'v*' |
+              Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |
+              ForEach-Object { [version]$_.Substring(1) }
+            $latestVersion = $stableVersions | Sort-Object -Descending | Select-Object -First 1
+            if ($null -ne $latestVersion -and [version]$supervisorVersion -le $latestVersion) {
+              throw "New release version $supervisorVersion must be greater than $latestVersion."
+            }
+
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git tag --annotate $tag $env:EXPECTED_SHA --message "Codex Continuity $tag"
+            git push origin "refs/tags/$tag"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not publish exact release tag $tag."
+            }
+          }
+
+          "release_ref=refs/tags/$tag" | Out-File $env:GITHUB_OUTPUT -Append
+          "release_tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append
+          "should_release=true" | Out-File $env:GITHUB_OUTPUT -Append
+
+  release:
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      release_ref: ${{ needs.prepare.outputs.release_ref }}
+      release_tag: ${{ needs.prepare.outputs.release_tag }}
+    secrets: inherit

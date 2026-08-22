@@ -56,7 +56,7 @@ test("server-renders the Codex Continuity launch page", async () => {
   assert.match(html, /-Plan -Json/);
   assert.match(html, /\/llms\.txt/);
   assert.match(html, /SoftwareApplication/);
-  assert.match(html, /softwareVersion[^<]*0\.2\.1/);
+  assert.match(html, /softwareVersion[^<]*0\.3\.0/);
   assert.match(html, /Unofficial · Windows · Experimental/);
   assert.match(html, /Skip to content/);
   assert.match(html, /WIN11 VERIFIED/);
