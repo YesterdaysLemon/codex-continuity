@@ -60,5 +60,4 @@ jobs:
           DEPLOY_WEBHOOK_SECRET: ${{ secrets.CONTINUITY_DEPLOY_WEBHOOK_SECRET }}
           DEPLOY_WEBHOOK_URL: ${{ secrets.CONTINUITY_DEPLOY_WEBHOOK_URL }}
           PRODUCTION_URL: https://continuity.alirezaafshan.com
-          SITES_URL: https://codex-continuity.alirezaafshan4.chatgpt.site
         run: node site/scripts/deploy-production.mjs

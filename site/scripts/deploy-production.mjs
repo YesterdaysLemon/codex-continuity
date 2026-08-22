@@ -131,10 +131,6 @@ export async function main(
     expectedVersion: packageJson.version,
     expectedRevision: payload.sha,
   });
-  await verifyPublicationImpl({
-    baseUrl: requireValue(environment.SITES_URL, "SITES_URL"),
-    expectedVersion: packageJson.version,
-  });
   console.log(`Verified production deployment for ${payload.sha}.`);
 }
 
