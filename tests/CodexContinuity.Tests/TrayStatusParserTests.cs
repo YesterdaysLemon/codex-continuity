@@ -1,4 +1,5 @@
 using CodexContinuity.Tray;
+using System.Diagnostics;
 using Xunit;
 
 namespace CodexContinuity.Tests;
@@ -142,26 +143,33 @@ public sealed class TrayStatusParserTests
     }
 
     [Fact]
-    public void SupervisorResolutionPrefersStableCommandAndFallsBackToBundledCopy()
+    public void StatusAndDiagnosticsResolutionUseOwningPaths()
     {
         var root = Path.Combine(Path.GetTempPath(), $"continuity-tray-routing-{Guid.NewGuid():N}");
         var applicationDirectory = Path.Combine(root, "tray");
         var stateDirectory = Path.Combine(root, "state");
         var stableExecutable = Path.Combine(stateDirectory, "bin", "CodexContinuity.exe");
-        var bundledExecutable = Path.Combine(applicationDirectory, "CodexContinuity.exe");
+        var installStatePath = Path.Combine(stateDirectory, "install-state.json");
+        var legacyDirectory = Path.Combine(root, "legacy");
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(stableExecutable)!);
             File.WriteAllText(stableExecutable, "fixture");
+            File.WriteAllText(installStatePath, "{}");
 
             Assert.Equal(
                 stableExecutable,
                 TrayStatusClient.ResolveSupervisorExecutable(applicationDirectory, stateDirectory));
-
-            File.Delete(stableExecutable);
+            Directory.CreateDirectory(legacyDirectory);
+            File.WriteAllText(Path.Combine(legacyDirectory, "update-status.json"), "{}");
             Assert.Equal(
-                bundledExecutable,
-                TrayStatusClient.ResolveSupervisorExecutable(applicationDirectory, stateDirectory));
+                stateDirectory,
+                TrayStatusClient.ResolveDiagnosticsDirectory(stateDirectory, legacyDirectory));
+
+            File.Delete(installStatePath);
+            Assert.Equal(
+                legacyDirectory,
+                TrayStatusClient.ResolveDiagnosticsDirectory(stateDirectory, legacyDirectory));
         }
         finally
         {
@@ -169,6 +177,45 @@ public sealed class TrayStatusParserTests
             {
                 Directory.Delete(root, recursive: true);
             }
+        }
+    }
+
+    [Fact]
+    public async Task CancelingTrayProcessKillsTheChildProcessTree()
+    {
+        var recordPath = Path.GetTempFileName();
+        File.Delete(recordPath);
+        var powershell = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "System32",
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var commandTask = TrayStatusClient.RunProcessAsync(
+            powershell,
+            [
+                "-NoProfile",
+                "-Command",
+                $"Set-Content -LiteralPath '{recordPath}' -Value $PID; Start-Sleep -Seconds 15",
+            ],
+            cancellation.Token);
+        try
+        {
+            while (!File.Exists(recordPath) && !commandTask.IsCompleted)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(25));
+            }
+            var processId = int.Parse(await File.ReadAllTextAsync(recordPath));
+
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => commandTask);
+
+            Assert.Throws<ArgumentException>(() => Process.GetProcessById(processId));
+        }
+        finally
+        {
+            File.Delete(recordPath);
         }
     }
 }

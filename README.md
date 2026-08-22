@@ -120,8 +120,8 @@ immediately or safely start an unavailable backend. The recovery action retains
 the existing foreign-endpoint refusal, so it cannot adopt or create a competing
 app-server on an occupied port.
 
-The applied count is historical since tracking began; only the latest-state
-detail identifies which version is currently active.
+The counts are cumulative within the retained local update state; only the
+latest-state detail identifies which version is currently active.
 
 ## Requirements
 

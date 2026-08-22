@@ -20,6 +20,8 @@ internal sealed record TrayStatusSnapshot(
         new(ContinuityHealth.Unavailable, 0, detail);
 }
 
+internal sealed record TrayCommandResult(int ExitCode, string Output, string Error);
+
 internal sealed record ContinuityUpdateSnapshot(
     string? RunningVersion,
     string? LatestVersion,
@@ -158,33 +160,18 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
         }
 
         var port = ReadInstalledPort();
-        var startInfo = new ProcessStartInfo(supervisorExecutable)
-        {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        startInfo.ArgumentList.Add("status");
-        startInfo.ArgumentList.Add("--port");
-        startInfo.ArgumentList.Add(port.ToString());
-
         try
         {
-            using var process = Process.Start(startInfo);
-            if (process is null)
-            {
-                return TrayStatusSnapshot.Unavailable("Could not run the status probe");
-            }
-            var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-            var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-            await process.WaitForExitAsync(cancellationToken);
-            var output = await outputTask;
-            var error = await errorTask;
-            return process.ExitCode == 0
-                ? TrayStatusParser.Parse(output)
+            var result = await RunProcessAsync(
+                supervisorExecutable,
+                ["status", "--port", port.ToString()],
+                cancellationToken);
+            return result.ExitCode == 0
+                ? TrayStatusParser.Parse(result.Output)
                 : TrayStatusSnapshot.Unavailable(
-                    string.IsNullOrWhiteSpace(error) ? "Backend unavailable" : error.Trim());
+                    string.IsNullOrWhiteSpace(result.Error)
+                        ? "Backend unavailable"
+                        : result.Error.Trim());
         }
         catch (Exception exception) when (
             exception is IOException or InvalidOperationException or Win32Exception or JsonException)
@@ -210,12 +197,6 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
         }
     }
 
-    internal async Task<bool> CheckForUpdatesAsync(CancellationToken cancellationToken) =>
-        await RunCommandAsync(["update"], cancellationToken) == 0;
-
-    internal async Task<bool> RestartSupervisorAsync(CancellationToken cancellationToken) =>
-        await RunCommandAsync(["repair", "--start-now"], cancellationToken) == 0;
-
     internal static string ResolveSupervisorExecutable(string applicationDirectory)
         => ResolveSupervisorExecutable(applicationDirectory, StateDirectory);
 
@@ -231,6 +212,27 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
             ? stableExecutable
             : Path.Combine(applicationDirectory, "CodexContinuity.exe");
     }
+
+    internal static string ResolveDiagnosticsDirectory(
+        string currentDirectory,
+        string legacyDirectory)
+    {
+        static bool HasState(string directory) => new[]
+        {
+            "install-state.json",
+            "update-status.json",
+            "supervisor-status.json",
+            "app-server.log",
+        }.Any(fileName => File.Exists(Path.Combine(directory, fileName)));
+
+        return HasState(currentDirectory) || !HasState(legacyDirectory)
+            ? currentDirectory
+            : legacyDirectory;
+    }
+
+    internal static string ResolveDiagnosticsDirectory() => ResolveDiagnosticsDirectory(
+        StateDirectory,
+        LegacyStateDirectory);
 
     private static int ReadInstalledPort()
     {
@@ -274,15 +276,12 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
         return File.Exists(legacy) ? legacy : null;
     }
 
-    private async Task<int> RunCommandAsync(
+    internal static async Task<TrayCommandResult> RunProcessAsync(
+        string executable,
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken)
     {
-        if (!File.Exists(supervisorExecutable))
-        {
-            return -1;
-        }
-        var startInfo = new ProcessStartInfo(supervisorExecutable)
+        var startInfo = new ProcessStartInfo(executable)
         {
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -293,23 +292,28 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
         {
             startInfo.ArgumentList.Add(argument);
         }
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException($"Could not start {executable}.");
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
         try
         {
-            using var process = Process.Start(startInfo);
-            if (process is null)
-            {
-                return -1;
-            }
-            var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-            var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
             await process.WaitForExitAsync(cancellationToken);
             await Task.WhenAll(outputTask, errorTask);
-            return process.ExitCode;
+            return new TrayCommandResult(
+                process.ExitCode,
+                await outputTask,
+                await errorTask);
         }
-        catch (Exception exception) when (
-            exception is IOException or InvalidOperationException or Win32Exception)
+        catch (OperationCanceledException)
         {
-            return -1;
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+            await Task.WhenAll(outputTask, errorTask);
+            throw;
         }
     }
 }

@@ -30,7 +30,6 @@ internal sealed class ContinuityTrayContext : ApplicationContext
     private readonly ToolStripMenuItem agentsItem;
     private readonly ToolStripMenuItem updateItem;
     private readonly ToolStripMenuItem updateDetailItem;
-    private readonly ToolStripMenuItem recoveryItem;
     private readonly System.Windows.Forms.Timer refreshTimer;
     private readonly TrayStatusClient statusClient;
     private readonly Icon healthyIcon;
@@ -48,10 +47,6 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         agentsItem = new ToolStripMenuItem("Active agents: checking…") { Enabled = false };
         updateItem = new ToolStripMenuItem("Updates: checking…") { Enabled = false };
         updateDetailItem = new ToolStripMenuItem("Update state: checking…") { Enabled = false };
-        recoveryItem = MenuItem(
-            "Restart Continuity backend",
-            async () => await RestartSupervisorAsync());
-        recoveryItem.Visible = false;
 
         var menu = new ContextMenuStrip();
         menu.Items.AddRange([
@@ -59,10 +54,8 @@ internal sealed class ContinuityTrayContext : ApplicationContext
             agentsItem,
             updateItem,
             updateDetailItem,
-            recoveryItem,
             new ToolStripSeparator(),
             MenuItem("Refresh now", async () => await RefreshAsync()),
-            MenuItem("Check for updates now", async () => await CheckForUpdatesAsync()),
             MenuItem("Open diagnostics folder", OpenDiagnostics),
             MenuItem("Visit product site", OpenProductSite),
             new ToolStripSeparator(),
@@ -121,8 +114,6 @@ internal sealed class ContinuityTrayContext : ApplicationContext
             };
             var state = status.Health.ToString().ToLowerInvariant();
             notifyIcon.Text = $"Codex Continuity — {state} — {status.ActiveAgentCount} active agents";
-            recoveryItem.Visible = status.Health == ContinuityHealth.Unavailable;
-
             var update = await statusClient.ReadUpdateAsync(shutdown.Token);
             updateItem.Text = TrayStatusPresentation.UpdateCounts(update);
             updateItem.Enabled = update.LatestVersion is not null;
@@ -142,42 +133,9 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         }
     }
 
-    private async Task CheckForUpdatesAsync()
-    {
-        try
-        {
-            updateDetailItem.Text = "Checking for verified releases…";
-            var succeeded = await statusClient.CheckForUpdatesAsync(shutdown.Token);
-            await RefreshAsync();
-            updateDetailItem.Text = TrayStatusPresentation.ManualCheckResult(
-                succeeded,
-                updateDetailItem.Text);
-        }
-        catch (OperationCanceledException)
-        {
-        }
-    }
-
-    private async Task RestartSupervisorAsync()
-    {
-        try
-        {
-            healthItem.Text = "Starting Continuity backend…";
-            await statusClient.RestartSupervisorAsync(shutdown.Token);
-            await Task.Delay(TimeSpan.FromSeconds(2), shutdown.Token);
-            await RefreshAsync();
-        }
-        catch (OperationCanceledException)
-        {
-        }
-    }
-
     private static void OpenDiagnostics()
     {
-        var path = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "YesterdaysLemon",
-            "CodexContinuity");
+        var path = TrayStatusClient.ResolveDiagnosticsDirectory();
         Directory.CreateDirectory(path);
         Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
     }
