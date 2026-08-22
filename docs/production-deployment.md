@@ -19,8 +19,8 @@ not a durable unattended identity for GitHub Actions.
   `/llms.txt`, and a 40-hex source revision before swapping production, and
   retains the previous image for rollback.
 - The workflow accepts success only when the manager echoes the requested SHA,
-  the custom domain exposes that SHA at `/deploy-revision.txt`, and both the
-  custom domain and Sites fallback expose the expected release and `/llms.txt`.
+  and the canonical custom domain exposes that SHA at `/deploy-revision.txt`,
+  the expected release, and `/llms.txt`.
 
 ## Isolated VPS allocation
 
@@ -56,7 +56,8 @@ candidate health gate; historical SHAs cannot bypass the exact-current-`main`
 rule. If a newly started production container fails its health check during a
 deployment, the manager automatically restores the previous image.
 
-For a routing rollback, restore `continuity.alirezaafshan.com` to the retained
-Sites CNAME target `custom-domains.chatgpt.site.`. Keep the Sites custom-domain
-attachment until the VPS route has completed an observation window, so this
-rollback does not require recreating Sites state.
+For a routing rollback, first confirm that Sites still retains the
+`continuity.alirezaafshan.com` custom-domain attachment and publish the intended
+release there. Only then restore the domain to the Sites CNAME target
+`custom-domains.chatgpt.site.`. The obsolete slug URL is not a production
+health signal and must not be used to validate the rollback.
