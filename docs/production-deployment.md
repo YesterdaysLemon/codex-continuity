@@ -10,10 +10,10 @@ not a durable unattended identity for GitHub Actions.
   workflow succeeds for a push to `main`.
 - The deploy job checks out the exact successful SHA, repeats the site build,
   lint, rendered tests, and container build, then signs that SHA for the VPS.
-- GitHub Actions never cancels a deployment already in progress and retains up
-  to 100 pending deployment jobs. Queued jobs may complete out of commit order,
-  so the deploy manager rejects any stale SHA after fetching the current
-  `main`; the newest eligible revision still reaches that exact-main gate.
+- GitHub Actions lets green deployment jobs overlap so every successful CI
+  completion reaches the deploy manager. Its per-app lock serializes mutations;
+  waiting jobs retry, and any stale SHA is rejected after the manager fetches
+  the current `main`.
 - The deploy manager independently fetches `main`, requires its HEAD to equal
   the signed SHA, asks the candidate `/healthz` endpoint to verify the homepage,
   `/llms.txt`, and a 40-hex source revision before swapping production, and
