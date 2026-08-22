@@ -178,6 +178,12 @@ jobs:
             if ($bytes -contains 0x0D) {
               throw "WinGet manifest contains a non-canonical carriage return: $($referenceFile.Name)"
             }
+            if ($bytes.Length -eq 0 -or $bytes[-1] -ne 0x0A) {
+              throw "WinGet manifest is missing its canonical terminal LF: $($referenceFile.Name)"
+            }
+            if ($bytes.Length -ge 2 -and $bytes[-2] -eq 0x0A) {
+              throw "WinGet manifest contains multiple terminal newlines: $($referenceFile.Name)"
+            }
           }
 
   site:
