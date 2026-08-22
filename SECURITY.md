@@ -42,7 +42,10 @@ gh attestation verify .\CodexContinuity-Setup.exe --repo YesterdaysLemon/codex-c
 The Authenticode workflow is ready for an RFC 3161/SHA-256 timestamped code
 signing certificate, but publication remains unsigned until the repository
 secrets `WINDOWS_SIGNING_CERTIFICATE_BASE64` and
-`WINDOWS_SIGNING_CERTIFICATE_PASSWORD` are configured. Until then, Windows may
-show an "Unknown publisher" or SmartScreen warning. Do not bypass a warning
-unless the download URL, SHA-256, and GitHub attestation match the official
-release.
+`WINDOWS_SIGNING_CERTIFICATE_PASSWORD` and the repository variable
+`WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT` are configured. Partial configuration,
+an unexpected signer, a missing timestamp, or a mixed signed/unsigned release
+fails publication. Until then, Windows may show an "Unknown publisher" or
+SmartScreen warning. Do not bypass a warning unless the download URL, SHA-256,
+and GitHub attestation match the official release. See
+[the signing runbook](docs/release-signing.md) for the external identity gate.

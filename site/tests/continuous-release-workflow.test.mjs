@@ -168,6 +168,9 @@ test("workflow binds the reusable release to the tested SHA", async () => {
 test("release workflow preserves both entry points and the delivery contract", async () => {
   const workflow = await readFile(new URL("release.yml", workflowDirectory), "utf8");
   const assetBlock = workflow.match(/\$assets = @\(([\s\S]*?)\n\s*\)/)?.[1] ?? "";
+  const attestationBlock = workflow.match(
+    /uses: actions\/attest@v4[\s\S]*?subject-path: \|\n([\s\S]*?)\n\s+- name:/,
+  )?.[1] ?? "";
   const expectedAssets = [
     "release/CodexContinuity-$tag-win-x64.zip",
     "release/CodexContinuity-$tag-win-x64.zip.sha256",
@@ -188,12 +191,35 @@ test("release workflow preserves both entry points and the delivery contract", a
   assert.match(workflow, /RELEASE_SHA: \$\{\{ inputs\.release_sha \|\| github\.sha \}\}/);
   assert.match(workflow, /scripts\\sign-release\.ps1/);
   assert.match(workflow, /Verify release signing policy/);
+  assert.match(
+    workflow,
+    /SIGNING_REQUESTED: \$\{\{ secrets\.WINDOWS_SIGNING_CERTIFICATE_BASE64 != '' \|\| secrets\.WINDOWS_SIGNING_CERTIFICATE_PASSWORD != '' \|\| vars\.WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT != '' \}\}/,
+  );
+  assert.match(
+    workflow,
+    /CONTINUITY_SIGNING_EXPECTED_THUMBPRINT: \$\{\{ vars\.WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT \}\}/,
+  );
+  assert.match(workflow, /-VerifyOnly -RequireUnsigned/);
   assert.match(workflow, /winget validate --manifest release\/winget/);
   assert.match(workflow, /uses: actions\/attest@v4/);
   assert.deepEqual(
     expectedAssets.filter((asset) => !assetBlock.includes(`"${asset}"`)),
     [],
   );
+  const attestedSubjects = attestationBlock
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const publishedAssets = [...assetBlock.matchAll(/"([^"]+)"/g)]
+    .map((match) => match[1]);
+  const isAttested = (asset) => attestedSubjects.some((subject) => {
+    if (!subject.includes("*")) {
+      return subject === asset;
+    }
+    const [prefix, suffix] = subject.split("*");
+    return asset.startsWith(prefix) && asset.endsWith(suffix);
+  });
+  assert.deepEqual(publishedAssets.filter((asset) => !isAttested(asset)), []);
   assert.match(workflow, /gh release create \$tag @assets --verify-tag/);
   assert.match(workflow, /gh release upload \$tag @assets --clobber/);
   assert.match(workflow, /gh release edit \$tag --draft=false --prerelease=false --latest/);

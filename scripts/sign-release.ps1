@@ -5,15 +5,42 @@ param(
 
     [switch]$VerifyOnly,
 
-    [switch]$AllowUnsigned
+    [switch]$RequireUnsigned,
+
+    [string]$ExpectedThumbprint = $env:CONTINUITY_SIGNING_EXPECTED_THUMBPRINT
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot "authenticode-release-policy.psm1") -Force
 
 $resolvedPaths = @($Paths | ForEach-Object { (Resolve-Path -LiteralPath $_).Path })
 if ($resolvedPaths.Count -eq 0) {
     throw "At least one release executable is required."
+}
+
+$normalizedExpectedThumbprint = ConvertTo-NormalizedAuthenticodeThumbprint $ExpectedThumbprint
+
+if ($RequireUnsigned -and -not $VerifyOnly) {
+    throw "RequireUnsigned can only be used with VerifyOnly."
+}
+
+$certificateBase64 = $env:CONTINUITY_SIGNING_CERTIFICATE_BASE64
+$certificatePassword = $env:CONTINUITY_SIGNING_CERTIFICATE_PASSWORD
+if (-not $VerifyOnly) {
+    $missingConfiguration = @()
+    if ([string]::IsNullOrWhiteSpace($certificateBase64)) {
+        $missingConfiguration += "certificate"
+    }
+    if ([string]::IsNullOrWhiteSpace($certificatePassword)) {
+        $missingConfiguration += "password"
+    }
+    if ($null -eq $normalizedExpectedThumbprint) {
+        $missingConfiguration += "expected thumbprint"
+    }
+    if ($missingConfiguration.Count -gt 0) {
+        throw "Signing configuration is incomplete. Missing: $($missingConfiguration -join ', ')."
+    }
 }
 
 $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
@@ -28,13 +55,6 @@ if ($null -eq $signTool -and -not $VerifyOnly) {
 $certificatePath = $null
 try {
     if (-not $VerifyOnly) {
-        $certificateBase64 = $env:CONTINUITY_SIGNING_CERTIFICATE_BASE64
-        $certificatePassword = $env:CONTINUITY_SIGNING_CERTIFICATE_PASSWORD
-        if ([string]::IsNullOrWhiteSpace($certificateBase64) -or
-            [string]::IsNullOrWhiteSpace($certificatePassword)) {
-            throw "Signing is enabled but the certificate or password secret is missing."
-        }
-
         $certificatePath = Join-Path ([System.IO.Path]::GetTempPath()) (
             "codex-continuity-signing-" + [System.Guid]::NewGuid().ToString("N") + ".pfx")
         [System.IO.File]::WriteAllBytes(
@@ -53,32 +73,43 @@ try {
         }
     }
 
-    $expectedThumbprint = $null
-    foreach ($path in $resolvedPaths) {
-        $signature = Get-AuthenticodeSignature -LiteralPath $path
-        if ($signature.Status -eq [System.Management.Automation.SignatureStatus]::NotSigned -and
-            $AllowUnsigned) {
-            Write-Warning "Unsigned development artifact: $path"
-            continue
+    $signatures = @($resolvedPaths | ForEach-Object {
+            [PSCustomObject]@{
+                Path      = $_
+                Signature = Get-AuthenticodeSignature -LiteralPath $_
+            }
+        })
+    $policyArtifacts = @($signatures | ForEach-Object {
+            [PSCustomObject]@{
+                Path             = $_.Path
+                Status           = $_.Signature.Status.ToString()
+                SignerThumbprint = if ($null -eq $_.Signature.SignerCertificate) {
+                    $null
+                } else {
+                    $_.Signature.SignerCertificate.Thumbprint
+                }
+                HasTimestamp     = $null -ne $_.Signature.TimeStamperCertificate
+            }
+        })
+    Assert-AuthenticodeReleasePolicy `
+        -Artifacts $policyArtifacts `
+        -RequireUnsigned:$RequireUnsigned `
+        -ExpectedThumbprint $normalizedExpectedThumbprint
+    if ($RequireUnsigned) {
+        foreach ($artifact in $signatures) {
+            Write-Warning "Verified unsigned development artifact: $($artifact.Path)"
         }
-        if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
-            $null -eq $signature.SignerCertificate) {
-            throw "Authenticode verification failed for ${path}: $($signature.Status)"
-        }
-        $thumbprint = $signature.SignerCertificate.Thumbprint
-        if ($null -eq $expectedThumbprint) {
-            $expectedThumbprint = $thumbprint
-        }
-        elseif ($thumbprint -ne $expectedThumbprint) {
-            throw "Release executables were signed by different certificates."
-        }
+        return
+    }
+
+    foreach ($artifact in $signatures) {
+        $path = $artifact.Path
+        $signature = $artifact.Signature
+        $thumbprint = $signature.SignerCertificate.Thumbprint.ToUpperInvariant()
         if ($null -eq $signTool) {
             throw "Windows SDK signtool.exe is required to verify signed artifacts."
         }
-        & $signTool.FullName verify /pa /v $path
-        if ($LASTEXITCODE -ne 0) {
-            throw "SignTool verification failed for $path."
-        }
+        Invoke-SignToolVerification -SignToolPath $signTool.FullName -Path $path
         Write-Host "Verified Authenticode signature for $path ($thumbprint)"
     }
 }

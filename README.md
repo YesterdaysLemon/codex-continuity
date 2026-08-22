@@ -295,11 +295,12 @@ desktop observations behind the bridge.
 Every release retains SHA-256 checksum files and publishes GitHub/Sigstore build
 provenance that can be checked with `gh attestation verify`. The release
 workflow also supports SHA-256 Authenticode signing with an RFC 3161 timestamp
-and fails verification if signing is configured but invalid. A production code
-signing certificate is the remaining external publisher gate; until it is
-configured, Windows may identify the executable as coming from an unknown
-publisher and Continuity will not automatically stage its own updates. See
-[SECURITY.md](SECURITY.md) before bypassing any warning.
+and fails verification if signing is partial, unpinned, or invalid. A
+production code-signing certificate is the remaining external publisher gate;
+until it is configured, Windows may identify the executable as coming from an
+unknown publisher and Continuity will not automatically stage its own updates.
+See [the signing runbook](docs/release-signing.md) for the exact external setup
+and [SECURITY.md](SECURITY.md) before bypassing any warning.
 
 Versioned desktop delivery is continuous: after the complete CI workflow passes
 for the current `main` commit, a new matching supervisor/tray version is tagged
