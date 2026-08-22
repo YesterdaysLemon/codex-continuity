@@ -107,6 +107,51 @@ public sealed class InstallerEndToEndTests : IDisposable
     }
 
     [Fact]
+    public async Task DownloadRejectsOversizedContentLength()
+    {
+        Directory.CreateDirectory(root);
+        await using var server = new StaticHttpServer(new Dictionary<string, byte[]>
+        {
+            ["/oversized"] = new byte[5],
+        });
+        var destination = Path.Combine(root, "oversized.bin");
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            BootstrapInstaller.DownloadAsync(
+                $"{server.BaseUrl}/oversized",
+                destination,
+                maximumBytes: 4,
+                CancellationToken.None));
+
+        Assert.Contains("declares 5 bytes", exception.Message);
+        Assert.False(File.Exists(destination));
+    }
+
+    [Fact]
+    public async Task DownloadRejectsStreamedOverflowWithoutContentLength()
+    {
+        Directory.CreateDirectory(root);
+        await using var server = new StaticHttpServer(
+            new Dictionary<string, byte[]>
+            {
+                ["/streamed"] = new byte[5],
+            },
+            includeContentLength: false);
+        var destination = Path.Combine(root, "streamed.bin");
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            BootstrapInstaller.DownloadAsync(
+                $"{server.BaseUrl}/streamed",
+                destination,
+                maximumBytes: 4,
+                CancellationToken.None));
+
+        Assert.Contains("4-byte safety limit", exception.Message);
+        Assert.True(File.Exists(destination));
+        Assert.InRange(new FileInfo(destination).Length, 0, 4);
+    }
+
+    [Fact]
     public async Task SupervisorRefusesToAdoptForeignReadyEndpoint()
     {
         Directory.CreateDirectory(root);
@@ -294,13 +339,17 @@ public sealed class InstallerEndToEndTests : IDisposable
     private sealed class StaticHttpServer : IAsyncDisposable
     {
         private readonly IReadOnlyDictionary<string, byte[]> responses;
+        private readonly bool includeContentLength;
         private readonly TcpListener listener = new(IPAddress.Loopback, 0);
         private readonly CancellationTokenSource shutdown = new();
         private readonly Task serverTask;
 
-        internal StaticHttpServer(IReadOnlyDictionary<string, byte[]> responses)
+        internal StaticHttpServer(
+            IReadOnlyDictionary<string, byte[]> responses,
+            bool includeContentLength = true)
         {
             this.responses = responses;
+            this.includeContentLength = includeContentLength;
             listener.Start();
             var port = ((IPEndPoint)listener.LocalEndpoint).Port;
             BaseUrl = $"http://127.0.0.1:{port}";
@@ -361,8 +410,11 @@ public sealed class InstallerEndToEndTests : IDisposable
             var found = responses.TryGetValue(path, out var body);
             body ??= "Not found"u8.ToArray();
             var status = found ? "200 OK" : "404 Not Found";
+            var contentLength = includeContentLength
+                ? $"Content-Length: {body.Length}\r\n"
+                : string.Empty;
             var responseHeaders = Encoding.ASCII.GetBytes(
-                $"HTTP/1.1 {status}\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n");
+                $"HTTP/1.1 {status}\r\n{contentLength}Connection: close\r\n\r\n");
             await stream.WriteAsync(responseHeaders, cancellationToken);
             await stream.WriteAsync(body, cancellationToken);
         }
