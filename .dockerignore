@@ -1,0 +1,9 @@
+*
+!.git
+!.git/**
+!site
+!site/**
+site/.next
+site/.wrangler
+site/dist
+site/node_modules
