@@ -49,7 +49,10 @@ export async function notifyDeployment({
     }
 
     const deployInProgress = response.status === 409 && result?.error === "deploy_in_progress";
-    if ((deployInProgress || transientStatuses.has(response.status)) && attempt < maximumAttempts) {
+    if (deployInProgress || transientStatuses.has(response.status)) {
+      if (attempt === maximumAttempts) {
+        throw new Error("Deployment manager remained unavailable beyond the retry window.");
+      }
       await sleep(retryDelayMilliseconds);
       continue;
     }
@@ -96,7 +99,13 @@ export async function verifyPublication({
   }
 }
 
-export async function main(environment = process.env) {
+export async function main(
+  environment = process.env,
+  {
+    notifyDeploymentImpl = notifyDeployment,
+    verifyPublicationImpl = verifyPublication,
+  } = {},
+) {
   const packageJson = JSON.parse(
     await readFile(new URL("../package.json", import.meta.url), "utf8"),
   );
@@ -106,17 +115,17 @@ export async function main(environment = process.env) {
     repo: requireValue(environment.GITHUB_REPOSITORY, "GITHUB_REPOSITORY"),
     sha: requireValue(environment.GITHUB_SHA, "GITHUB_SHA"),
   });
-  await notifyDeployment({
+  await notifyDeploymentImpl({
     url: requireValue(environment.DEPLOY_WEBHOOK_URL, "DEPLOY_WEBHOOK_URL"),
     secret: requireValue(environment.DEPLOY_WEBHOOK_SECRET, "DEPLOY_WEBHOOK_SECRET"),
     payload,
   });
-  await verifyPublication({
+  await verifyPublicationImpl({
     baseUrl: requireValue(environment.PRODUCTION_URL, "PRODUCTION_URL"),
     expectedVersion: packageJson.version,
     expectedRevision: payload.sha,
   });
-  await verifyPublication({
+  await verifyPublicationImpl({
     baseUrl: requireValue(environment.SITES_URL, "SITES_URL"),
     expectedVersion: packageJson.version,
   });

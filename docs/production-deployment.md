@@ -10,12 +10,13 @@ not a durable unattended identity for GitHub Actions.
   workflow succeeds for a push to `main`.
 - The deploy job checks out the exact successful SHA, repeats the site build,
   lint, rendered tests, and container build, then signs that SHA for the VPS.
-- GitHub Actions cancels an older queued job when a newer green `main` revision
-  arrives. If the older deployment already reached the VPS, the newer job waits
-  for its per-app lock and then replaces it.
+- GitHub Actions never cancels a deployment already in progress. Queued jobs may
+  complete out of commit order, so the deploy manager rejects any stale SHA
+  after fetching the current `main`; the newest eligible revision remains live.
 - The deploy manager independently fetches `main`, requires its HEAD to equal
-  the signed SHA, health-checks a candidate container, swaps production only
-  after success, and retains the previous image for rollback.
+  the signed SHA, asks the candidate `/healthz` endpoint to verify the homepage,
+  `/llms.txt`, and a 40-hex source revision before swapping production, and
+  retains the previous image for rollback.
 - The workflow accepts success only when the manager echoes the requested SHA,
   the custom domain exposes that SHA at `/deploy-revision.txt`, and both the
   custom domain and Sites fallback expose the expected release and `/llms.txt`.
@@ -37,7 +38,7 @@ and Caddy route. It must not reuse the `website` app entry or secret.
 | Production port | `3040` |
 | Candidate port | `3041` |
 | Container port | `8080` |
-| Health path | `/llms.txt` |
+| Health path | `/healthz` |
 
 The GitHub repository stores the deploy URL and HMAC secret as
 `CONTINUITY_DEPLOY_WEBHOOK_URL` and `CONTINUITY_DEPLOY_WEBHOOK_SECRET` Actions
@@ -46,10 +47,11 @@ environment on the VPS.
 
 ## Rollback
 
-For an application rollback, rerun the deploy manager with the previous known-
-good Git SHA. Its candidate health gate and production rollback remain active.
-If a newly started production container fails its health check, the manager
-automatically restores the previous image.
+For an application rollback after a successful deployment, revert the bad
+commit on `main`. The revert becomes a new green SHA and follows the same
+candidate health gate; historical SHAs cannot bypass the exact-current-`main`
+rule. If a newly started production container fails its health check during a
+deployment, the manager automatically restores the previous image.
 
 For a routing rollback, restore `continuity.alirezaafshan.com` to the retained
 Sites CNAME target `custom-domains.chatgpt.site.`. Keep the Sites custom-domain

@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 45
     concurrency:
       group: codex-continuity-production-site
-      cancel-in-progress: true
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v6
         with:
@@ -35,7 +35,25 @@ jobs:
       - run: npm test
         working-directory: site
       - name: Verify the production container
-        run: docker build --file site/Dockerfile --tag codex-continuity-site:${{ github.event.workflow_run.head_sha }} .
+        env:
+          REVISION: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          docker build --build-arg DEPLOY_REVISION="$REVISION" --file site/Dockerfile --tag "codex-continuity-site:$REVISION" .
+          docker run --detach --name continuity-site-smoke --publish 127.0.0.1:8080:8080 "codex-continuity-site:$REVISION"
+          trap 'docker rm --force continuity-site-smoke' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null; then
+              break
+            fi
+            if [ "$attempt" = 30 ]; then
+              docker logs continuity-site-smoke
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8080/ >/dev/null
+          curl --fail --silent http://127.0.0.1:8080/llms.txt >/dev/null
+          test "$(curl --fail --silent http://127.0.0.1:8080/deploy-revision.txt)" = "$REVISION"
       - name: Deploy and verify the exact green revision
         env:
           DEPLOY_WEBHOOK_SECRET: ${{ secrets.CONTINUITY_DEPLOY_WEBHOOK_SECRET }}
