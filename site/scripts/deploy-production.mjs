@@ -60,7 +60,13 @@ export async function notifyDeployment({
       throw new Error(`Deployment manager returned HTTP ${response.status}.`);
     }
     if (result?.sha !== payload.sha) {
-      throw new Error("Deployment manager did not confirm the requested commit SHA.");
+      const reason = result?.reason;
+      const reasonDetail = typeof reason === "string" && /^[a-z0-9_-]{1,64}$/i.test(reason)
+        ? ` Reason: ${reason}.`
+        : "";
+      throw new Error(
+        `Deployment manager did not confirm the requested commit SHA.${reasonDetail}`,
+      );
     }
     return result;
   }
