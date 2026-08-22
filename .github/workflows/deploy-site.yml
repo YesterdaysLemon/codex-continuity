@@ -53,11 +53,12 @@ jobs:
           test "$(curl --fail --silent http://127.0.0.1:8080/deploy-revision.txt)" = "$REVISION"
       - name: Deploy and verify the exact green revision
         env:
+          DEPLOY_BRANCH: main
+          DEPLOY_EVENT_NAME: push
+          DEPLOY_REPOSITORY: YesterdaysLemon/codex-continuity
+          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
           DEPLOY_WEBHOOK_SECRET: ${{ secrets.CONTINUITY_DEPLOY_WEBHOOK_SECRET }}
           DEPLOY_WEBHOOK_URL: ${{ secrets.CONTINUITY_DEPLOY_WEBHOOK_URL }}
-          GITHUB_REF_NAME: main
-          GITHUB_REPOSITORY: YesterdaysLemon/codex-continuity
-          GITHUB_SHA: ${{ github.event.workflow_run.head_sha }}
           PRODUCTION_URL: https://continuity.alirezaafshan.com
           SITES_URL: https://codex-continuity.alirezaafshan4.chatgpt.site
         run: node site/scripts/deploy-production.mjs

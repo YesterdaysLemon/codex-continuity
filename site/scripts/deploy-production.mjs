@@ -13,7 +13,7 @@ function requireValue(value, name) {
 
 export function deploymentPayload({ event, branch, repo, sha }) {
   if (!/^[0-9a-f]{40}$/i.test(sha)) {
-    throw new Error("GITHUB_SHA must be a 40-character hexadecimal commit SHA.");
+    throw new Error("DEPLOY_SHA must be a 40-character hexadecimal commit SHA.");
   }
   return { event, branch, repo, sha };
 }
@@ -116,10 +116,10 @@ export async function main(
     await readFile(new URL("../package.json", import.meta.url), "utf8"),
   );
   const payload = deploymentPayload({
-    event: requireValue(environment.GITHUB_EVENT_NAME, "GITHUB_EVENT_NAME"),
-    branch: requireValue(environment.GITHUB_REF_NAME, "GITHUB_REF_NAME"),
-    repo: requireValue(environment.GITHUB_REPOSITORY, "GITHUB_REPOSITORY"),
-    sha: requireValue(environment.GITHUB_SHA, "GITHUB_SHA"),
+    event: requireValue(environment.DEPLOY_EVENT_NAME, "DEPLOY_EVENT_NAME"),
+    branch: requireValue(environment.DEPLOY_BRANCH, "DEPLOY_BRANCH"),
+    repo: requireValue(environment.DEPLOY_REPOSITORY, "DEPLOY_REPOSITORY"),
+    sha: requireValue(environment.DEPLOY_SHA, "DEPLOY_SHA"),
   });
   await notifyDeploymentImpl({
     url: requireValue(environment.DEPLOY_WEBHOOK_URL, "DEPLOY_WEBHOOK_URL"),
