@@ -28,6 +28,7 @@ function Assert-FailsWith {
         if ($_.Exception.Message -notmatch $ExpectedMessage) {
             throw "Expected failure matching '$ExpectedMessage', got: $($_.Exception.Message)"
         }
+        $global:LASTEXITCODE = 0
         return
     }
     throw "Expected command to fail with '$ExpectedMessage'."
