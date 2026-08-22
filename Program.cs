@@ -38,8 +38,7 @@ internal static class Program
                         : TrayInstallMode.Enabled,
                     ResolveInstallIntent(args),
                     ResolveAutomaticUpdateSha256(args)),
-                "repair" => await RepairAsync(
-                    args.Contains("--start-now", StringComparer.OrdinalIgnoreCase)),
+                "repair" => await RepairAsync(args),
                 "uninstall" => await UninstallAsync(),
                 "rollback" => Rollback(),
                 "setup" when args.Contains(
@@ -603,19 +602,67 @@ internal static class Program
             : UninstallReconnectPolicy.RestoreImmediately;
     }
 
-    private static async Task<int> RepairAsync(bool startNow)
-    {
-        using var lifecycleLock = ContinuityLifecycleLock.Acquire(
-            ContinuityPaths.StateDirectory);
-        var state = LoadInstallState()
-            ?? throw new InvalidOperationException("No installed Continuity state is available.");
-        return await InstallAsync(
+    private static Task<int> RepairAsync(string[] args) => RepairAsync(
+        args,
+        ContinuityPaths.StateDirectory,
+        LoadInstallState,
+        (state, startNow) => InstallAsync(
             state.Port,
             startNow,
             state.InstalledTrayExecutable is null
                 ? TrayInstallMode.Disabled
                 : TrayInstallMode.Enabled,
-            lockOwnership: LifecycleLockOwnership.AlreadyHeld);
+            lockOwnership: LifecycleLockOwnership.AlreadyHeld));
+
+    internal static async Task<int> RepairAsync(
+        string[] args,
+        string stateDirectory,
+        Func<InstallState?> loadInstallState,
+        Func<InstallState, bool, Task<int>> installAsync)
+    {
+        var startNow = args.Contains("--start-now", StringComparer.OrdinalIgnoreCase);
+        var expectedInstalledExecutable = ArgumentValue(
+            args,
+            "--expected-installed-executable");
+        var expectedInstalledSha256 = ArgumentValue(
+            args,
+            "--expected-installed-sha256");
+        using var lifecycleLock = ContinuityLifecycleLock.Acquire(stateDirectory);
+        var state = loadInstallState()
+            ?? throw new InvalidOperationException("No installed Continuity state is available.");
+        ValidateTrayRepairSelection(
+            state,
+            expectedInstalledExecutable,
+            expectedInstalledSha256);
+        return await installAsync(state, startNow);
+    }
+
+    internal static void ValidateTrayRepairSelection(
+        InstallState state,
+        string? expectedInstalledExecutable,
+        string? expectedInstalledSha256)
+    {
+        if (expectedInstalledExecutable is null && expectedInstalledSha256 is null)
+        {
+            return;
+        }
+        if (expectedInstalledExecutable is null || expectedInstalledSha256 is null)
+        {
+            throw new InvalidOperationException("Tray repair intent is incomplete.");
+        }
+        if (state.Lifecycle != InstallLifecycle.Installed)
+        {
+            throw new InvalidOperationException(
+                "Continuity is not in an installed lifecycle and cannot be repaired from the tray.");
+        }
+        if (!Path.GetFullPath(state.InstalledExecutable).Equals(
+                Path.GetFullPath(expectedInstalledExecutable),
+                StringComparison.OrdinalIgnoreCase) ||
+            !state.BinarySha256.Equals(expectedInstalledSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "The selected Continuity build changed before tray recovery acquired the lifecycle lock.");
+        }
     }
 
     private static int Rollback()
