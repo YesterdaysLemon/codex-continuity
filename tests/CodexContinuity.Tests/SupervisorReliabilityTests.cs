@@ -1,4 +1,5 @@
 using CodexContinuity;
+using System.Reflection;
 using Xunit;
 
 namespace CodexContinuity.Tests;
@@ -65,6 +66,150 @@ public sealed class SupervisorReliabilityTests : IDisposable
         Assert.Equal("127.0.0.1", readiness.Host);
         Assert.True(System.Net.IPAddress.IsLoopback(System.Net.IPAddress.Parse(websocket.Host)));
     }
+
+    [Fact]
+    public async Task UpdateLifetimeUnsubscribesAndAwaitsCancellation()
+    {
+        ConsoleCancelEventHandler? subscribedHandler = null;
+        ConsoleCancelEventHandler? removedHandler = null;
+        var cancellationObserved = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowUpdaterExit = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        async Task RunUpdates(
+            string _stateDirectory,
+            string _runningVersion,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                cancellationObserved.SetResult();
+            }
+            await allowUpdaterExit.Task;
+        }
+
+        var lifetime = new SupervisorUpdateLifetime(
+            root,
+            "0.2.1",
+            RunUpdates,
+            handler => subscribedHandler = handler,
+            handler => removedHandler = handler);
+        var eventArgs = CreateCancelEventArgs();
+        subscribedHandler!(null, eventArgs);
+        await cancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(eventArgs.Cancel);
+        Assert.True(lifetime.Token.IsCancellationRequested);
+        var disposeTask = lifetime.DisposeAsync().AsTask();
+        Assert.False(disposeTask.IsCompleted);
+        allowUpdaterExit.SetResult();
+        await disposeTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Same(subscribedHandler, removedHandler);
+    }
+
+    [Fact]
+    public void UpdateLifetimeUnsubscribesWhenRunnerThrowsSynchronously()
+    {
+        ConsoleCancelEventHandler? subscribedHandler = null;
+        ConsoleCancelEventHandler? removedHandler = null;
+        CancellationToken runnerToken = default;
+
+        Assert.Throws<InvalidOperationException>(() => new SupervisorUpdateLifetime(
+            root,
+            "0.2.1",
+            (_, _, cancellationToken) =>
+            {
+                runnerToken = cancellationToken;
+                throw new InvalidOperationException("fixture");
+            },
+            handler => subscribedHandler = handler,
+            handler => removedHandler = handler));
+
+        Assert.Same(subscribedHandler, removedHandler);
+        Assert.Throws<ObjectDisposedException>(() => runnerToken.WaitHandle);
+    }
+
+    [Fact]
+    public async Task UpdateLifetimeDisposesAfterUpdaterFault()
+    {
+        ConsoleCancelEventHandler? subscribedHandler = null;
+        ConsoleCancelEventHandler? removedHandler = null;
+        var cancellationObserved = false;
+        CancellationToken runnerToken = default;
+        var lifetime = new SupervisorUpdateLifetime(
+            root,
+            "0.2.1",
+            (_, _, cancellationToken) =>
+            {
+                runnerToken = cancellationToken;
+                cancellationToken.Register(() => cancellationObserved = true);
+                return Task.FromException(new InvalidOperationException("fixture"));
+            },
+            handler => subscribedHandler = handler,
+            handler => removedHandler = handler);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => lifetime.DisposeAsync().AsTask());
+
+        Assert.Equal("fixture", exception.Message);
+        Assert.True(cancellationObserved);
+        Assert.Same(subscribedHandler, removedHandler);
+        Assert.Throws<ObjectDisposedException>(() => runnerToken.WaitHandle);
+    }
+
+    [Fact]
+    public async Task UpdateLifetimeStillDisposesWhenCancellationCallbackThrows()
+    {
+        CancellationToken runnerToken = default;
+        var allowUpdaterExit = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var lifetime = new SupervisorUpdateLifetime(
+            root,
+            "0.2.1",
+            (_, _, cancellationToken) =>
+            {
+                runnerToken = cancellationToken;
+                cancellationToken.Register(() => throw new InvalidOperationException("fixture"));
+                return allowUpdaterExit.Task;
+            },
+            _ => { },
+            _ => { });
+
+        var disposeTask = lifetime.DisposeAsync().AsTask();
+        Assert.False(disposeTask.IsCompleted);
+        allowUpdaterExit.SetResult();
+        await Assert.ThrowsAsync<AggregateException>(() => disposeTask);
+
+        Assert.Throws<ObjectDisposedException>(() => runnerToken.WaitHandle);
+    }
+
+    [Fact]
+    public async Task RestartBackoffReturnsCleanlyWhenShutdownIsCanceled()
+    {
+        using var shutdown = new CancellationTokenSource();
+        var waitTask = Program.WaitForRestartAsync(
+            TimeSpan.FromMinutes(1),
+            shutdown.Token);
+
+        Assert.False(waitTask.IsCompleted);
+        shutdown.Cancel();
+
+        Assert.False(await waitTask.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    private static ConsoleCancelEventArgs CreateCancelEventArgs() =>
+        (ConsoleCancelEventArgs)(Activator.CreateInstance(
+            typeof(ConsoleCancelEventArgs),
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            args: [ConsoleSpecialKey.ControlC],
+            culture: null)
+        ?? throw new InvalidOperationException("Could not create console cancel event args."));
 
     public void Dispose()
     {
