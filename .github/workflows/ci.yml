@@ -163,3 +163,22 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm test
+
+  deploy-event-probe:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'codex/issue-29-deploy-event-probe'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Probe the accepted event without deploying
+        env:
+          DEPLOY_WEBHOOK_SECRET: ${{ secrets.CONTINUITY_DEPLOY_WEBHOOK_SECRET }}
+          DEPLOY_WEBHOOK_URL: ${{ secrets.CONTINUITY_DEPLOY_WEBHOOK_URL }}
+        run: node site/scripts/probe-deploy-event.mjs
