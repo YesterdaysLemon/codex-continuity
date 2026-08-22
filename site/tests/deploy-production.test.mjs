@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -11,6 +12,18 @@ import {
 const sha = "0123456789abcdef0123456789abcdef01234567";
 const literalBody = "{\"event\":\"push\",\"branch\":\"main\",\"repo\":\"YesterdaysLemon/codex-continuity\",\"sha\":\"0123456789abcdef0123456789abcdef01234567\"}";
 const knownSignature = "sha256=89c842c455184d279bcbef68ba29a33fee4a59dce4b77723c655a95e487ede64";
+
+test("preserves the workflow_run event for the deployment manager", async () => {
+  const workflow = await readFile(
+    new URL("../../.github/workflows/deploy-site.yml", import.meta.url),
+    "utf8",
+  );
+  const deployStep = workflow.split("- name: Deploy and verify the exact green revision")[1];
+
+  assert.ok(deployStep, "production deployment step is missing");
+  assert.doesNotMatch(deployStep, /^\s+GITHUB_EVENT_NAME:/m);
+  assert.match(workflow, /github\.event\.workflow_run\.event == 'push'/);
+});
 
 test("signs the exact deploy payload and waits for an older deployment", async () => {
   const payload = deploymentPayload({
@@ -201,7 +214,7 @@ test("production orchestration verifies exact custom revision and Sites fallback
   const environment = {
     DEPLOY_WEBHOOK_SECRET: "fixture-secret",
     DEPLOY_WEBHOOK_URL: "https://deploy.example.test/deploy/continuity",
-    GITHUB_EVENT_NAME: "push",
+    GITHUB_EVENT_NAME: "workflow_run",
     GITHUB_REF_NAME: "main",
     GITHUB_REPOSITORY: "YesterdaysLemon/codex-continuity",
     GITHUB_SHA: sha,
@@ -219,7 +232,7 @@ test("production orchestration verifies exact custom revision and Sites fallback
       url: environment.DEPLOY_WEBHOOK_URL,
       secret: environment.DEPLOY_WEBHOOK_SECRET,
       payload: {
-        event: "push",
+        event: "workflow_run",
         branch: "main",
         repo: "YesterdaysLemon/codex-continuity",
         sha,
