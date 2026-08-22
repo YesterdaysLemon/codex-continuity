@@ -4,6 +4,9 @@ import test from "node:test";
 
 const publicDirectory = new URL("../public/", import.meta.url);
 const sourceDirectory = new URL("../app/", import.meta.url);
+const { version: productVersion } = JSON.parse(
+  await readFile(new URL("../package.json", import.meta.url), "utf8"),
+);
 
 async function render(path = "/", accept = "text/html") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -56,7 +59,9 @@ test("server-renders the Codex Continuity launch page", async () => {
   assert.match(html, /-Plan -Json/);
   assert.match(html, /\/llms\.txt/);
   assert.match(html, /SoftwareApplication/);
-  assert.match(html, /softwareVersion[^<]*0\.3\.0/);
+  const escapedVersion = productVersion.replaceAll(".", "\\.");
+  assert.match(html, new RegExp(`softwareVersion[^<]*${escapedVersion}`));
+  assert.match(html, new RegExp(`v${escapedVersion} supports Windows`));
   assert.match(html, /Unofficial · Windows · Experimental/);
   assert.match(html, /Skip to content/);
   assert.match(html, /WIN11 VERIFIED/);
@@ -83,7 +88,7 @@ test("retains responsive and keyboard-accessible site polish", async () => {
 
 test("serves agent and crawler discovery assets", async () => {
   const expectations = [
-    ["/llms.txt", /Installed files and logs are removed at the next Windows sign-in/],
+    ["/llms.txt", new RegExp(`supported v${productVersion.replaceAll(".", "\\.")} release target`)],
     ["/robots.txt", /Sitemap:/],
     ["/sitemap.xml", /<loc>https:\/\/continuity\.alirezaafshan\.com\//],
     ["/icon.svg", /<svg/],
