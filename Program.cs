@@ -227,7 +227,13 @@ internal static class Program
     private static Task<int> ServeAsync(int port) =>
         ServeAsync(port, ContinuityPaths.StateDirectory);
 
-    internal static async Task<int> ServeAsync(int port, string stateDirectory)
+    internal static Task<int> ServeAsync(int port, string stateDirectory) =>
+        ServeAsync(port, stateDirectory, AutomaticUpdateRunner.RunAsync);
+
+    internal static async Task<int> ServeAsync(
+        int port,
+        string stateDirectory,
+        Func<string, string, CancellationToken, Task> runUpdates)
     {
         using var mutex = new Mutex(
             initiallyOwned: true,
@@ -238,13 +244,6 @@ internal static class Program
             return Fail($"A Codex Continuity supervisor already owns port {port}.");
         }
 
-        using var shutdown = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, eventArgs) =>
-        {
-            eventArgs.Cancel = true;
-            shutdown.Cancel();
-        };
-
         Directory.CreateDirectory(stateDirectory);
         var logPath = ContinuityPaths.AppServerLogFile(stateDirectory);
         var logWriter = new RollingLogWriter(logPath);
@@ -253,14 +252,15 @@ internal static class Program
         var backoff = new RestartBackoffPolicy();
         var codexHome = FutureProcessEnvironment.ResolveCodexHome();
         var consecutiveFailures = 0;
-        var updateTask = AutomaticUpdateRunner.RunAsync(
+        await using var updateLifetime = new SupervisorUpdateLifetime(
             stateDirectory,
             ProductVersion(),
-            shutdown.Token);
+            runUpdates);
+        var shutdownToken = updateLifetime.Token;
         Console.WriteLine(
             $"Supervising {LoopbackEndpoint.WebSocketUrl(port)} with logs at {logPath}");
 
-        while (!shutdown.IsCancellationRequested)
+        while (!shutdownToken.IsCancellationRequested)
         {
             if (await IsReadyAsync(port, TimeSpan.FromMilliseconds(500)))
             {
@@ -280,10 +280,10 @@ internal static class Program
             var codexPath = FindCodexExecutable(persistedEnvironmentOnly: true);
             using var process = StartAppServer(codexPath, port);
             var startedAt = DateTimeOffset.UtcNow;
-            var stdout = PumpLogAsync(process.StandardOutput, logWriter, shutdown.Token);
-            var stderr = PumpLogAsync(process.StandardError, logWriter, shutdown.Token);
+            var stdout = PumpLogAsync(process.StandardOutput, logWriter, shutdownToken);
+            var stderr = PumpLogAsync(process.StandardError, logWriter, shutdownToken);
 
-            if (!await WaitUntilReadyAsync(port, process, TimeSpan.FromSeconds(20), shutdown.Token))
+            if (!await WaitUntilReadyAsync(port, process, TimeSpan.FromSeconds(20), shutdownToken))
             {
                 if (!process.HasExited)
                 {
@@ -305,7 +305,7 @@ internal static class Program
                 Console.WriteLine($"Continuity backend ready (PID {process.Id}).");
                 try
                 {
-                    await process.WaitForExitAsync(shutdown.Token);
+                    await process.WaitForExitAsync(shutdownToken);
                 }
                 catch (OperationCanceledException)
                 {
@@ -318,7 +318,7 @@ internal static class Program
             }
 
             await AwaitLogPumpsAsync(stdout, stderr);
-            if (!shutdown.IsCancellationRequested)
+            if (!shutdownToken.IsCancellationRequested)
             {
                 var uptime = DateTimeOffset.UtcNow - startedAt;
                 consecutiveFailures = uptime >= TimeSpan.FromMinutes(2)
@@ -339,7 +339,10 @@ internal static class Program
                     $"App-server exited after {uptime}."));
                 Console.Error.WriteLine(
                     $"App-server exited with code {process.ExitCode}; restarting in {delay.TotalSeconds:F1} seconds.");
-                await Task.Delay(delay, shutdown.Token);
+                if (!await WaitForRestartAsync(delay, shutdownToken))
+                {
+                    break;
+                }
             }
         }
 
@@ -352,8 +355,22 @@ internal static class Program
             lastExitCode: null,
             nextRetryAtUtc: null,
             "Supervisor stopped without changing future-launch configuration."));
-        await updateTask;
         return 0;
+    }
+
+    internal static async Task<bool> WaitForRestartAsync(
+        TimeSpan delay,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(delay, cancellationToken);
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
     }
 
     private static async Task<int> UpdateAsync()

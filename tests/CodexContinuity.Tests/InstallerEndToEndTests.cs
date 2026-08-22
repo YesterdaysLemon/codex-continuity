@@ -181,6 +181,47 @@ public sealed class InstallerEndToEndTests : IDisposable
             status);
     }
 
+    [Fact]
+    public async Task SupervisorCancelsAndAwaitsUpdaterOnEarlyExit()
+    {
+        Directory.CreateDirectory(root);
+        await using var server = new StaticHttpServer(new Dictionary<string, byte[]>
+        {
+            ["/readyz"] = "ready"u8.ToArray(),
+        });
+        var updaterStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationObserved = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowUpdaterExit = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        async Task RunUpdater(
+            string _stateDirectory,
+            string _runningVersion,
+            CancellationToken cancellationToken)
+        {
+            updaterStarted.SetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                cancellationObserved.SetResult();
+            }
+            await allowUpdaterExit.Task;
+        }
+
+        var serveTask = Program.ServeAsync(server.Port, root, RunUpdater);
+        await updaterStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await cancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(serveTask.IsCompleted);
+        allowUpdaterExit.SetResult();
+        Assert.Equal(1, await serveTask.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
     public void Dispose()
     {
         for (var attempt = 1; Directory.Exists(root); attempt++)

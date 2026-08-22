@@ -3,6 +3,101 @@ using System.Text.Json;
 
 namespace CodexContinuity;
 
+internal sealed class SupervisorUpdateLifetime : IAsyncDisposable
+{
+    private readonly CancellationTokenSource shutdown = new();
+    private readonly Action<ConsoleCancelEventHandler> unsubscribe;
+    private readonly ConsoleCancelEventHandler cancelHandler;
+    private readonly Task updateTask;
+    private int disposed;
+
+    internal SupervisorUpdateLifetime(
+        string stateDirectory,
+        string runningVersion,
+        Func<string, string, CancellationToken, Task> runUpdates)
+        : this(
+            stateDirectory,
+            runningVersion,
+            runUpdates,
+            handler => Console.CancelKeyPress += handler,
+            handler => Console.CancelKeyPress -= handler)
+    {
+    }
+
+    internal SupervisorUpdateLifetime(
+        string stateDirectory,
+        string runningVersion,
+        Func<string, string, CancellationToken, Task> runUpdates,
+        Action<ConsoleCancelEventHandler> subscribe,
+        Action<ConsoleCancelEventHandler> unsubscribe)
+    {
+        this.unsubscribe = unsubscribe;
+        cancelHandler = (_, eventArgs) =>
+        {
+            eventArgs.Cancel = true;
+            shutdown.Cancel();
+        };
+        var subscribed = false;
+        try
+        {
+            subscribe(cancelHandler);
+            subscribed = true;
+            updateTask = runUpdates(stateDirectory, runningVersion, shutdown.Token);
+        }
+        catch
+        {
+            try
+            {
+                if (subscribed)
+                {
+                    unsubscribe(cancelHandler);
+                }
+            }
+            finally
+            {
+                shutdown.Dispose();
+            }
+            throw;
+        }
+    }
+
+    internal CancellationToken Token => shutdown.Token;
+
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref disposed, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            unsubscribe(cancelHandler);
+        }
+        finally
+        {
+            try
+            {
+                shutdown.Cancel();
+            }
+            finally
+            {
+                try
+                {
+                    await updateTask;
+                }
+                catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+                {
+                }
+                finally
+                {
+                    shutdown.Dispose();
+                }
+            }
+        }
+    }
+}
+
 internal sealed class RestartBackoffPolicy(
     TimeSpan? initialDelay = null,
     TimeSpan? maximumDelay = null,
