@@ -24,9 +24,10 @@ not a durable unattended identity for GitHub Actions.
 
 ## Isolated VPS allocation
 
-The Continuity app has its own allowlist entry, webhook secret, repository
-checkout, deployment environment file, containers, loopback ports, log, lock,
-and Caddy route. It must not reuse the `website` app entry or secret.
+The Continuity app has its own allowlist entry, webhook secret, dedicated
+loopback webhook listener, repository checkout, deployment environment file,
+containers, loopback ports, log, lock, and Caddy route. It must not reuse the
+shared listener's app registry or the `website` app entry or secret.
 
 | Setting | Value |
 | --- | --- |
@@ -39,6 +40,7 @@ and Caddy route. It must not reuse the `website` app entry or secret.
 | Production port | `3040` |
 | Candidate port | `3041` |
 | Container port | `8080` |
+| Webhook listener | `127.0.0.1:9020` |
 | Health path | `/healthz` |
 
 The GitHub repository stores the deploy URL and HMAC secret as
