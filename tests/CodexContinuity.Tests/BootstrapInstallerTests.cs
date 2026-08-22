@@ -1,4 +1,6 @@
 using CodexContinuity;
+using System.Buffers.Binary;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using Xunit;
@@ -101,6 +103,146 @@ public sealed class BootstrapInstallerTests
     }
 
     [Fact]
+    public async Task BoundedCopyRejectsContentBeyondTheLimit()
+    {
+        await using var source = new MemoryStream(new byte[5]);
+        await using var destination = new MemoryStream();
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            ReleaseArchiveExtractor.CopyBoundedAsync(
+                source,
+                destination,
+                maximumBytes: 4,
+                CancellationToken.None));
+
+        Assert.Contains("4-byte safety limit", exception.Message);
+        Assert.Empty(destination.ToArray());
+    }
+
+    [Fact]
+    public async Task RejectsEntryCountFromCentralDirectoryBeforeExtraction()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var archivePath = Path.Combine(directory, "release.zip");
+            CreateArchive(archivePath, ("one.txt", "1"), ("two.txt", "2"));
+            var destination = Path.Combine(directory, "extracted");
+
+            var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                ReleaseArchiveExtractor.ExtractToDirectoryAsync(
+                    archivePath,
+                    destination,
+                    CancellationToken.None,
+                    maximumEntries: 1));
+
+            Assert.Contains("more than 1 entries", exception.Message);
+            Assert.False(Directory.Exists(destination));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RejectsUnderreportedCentralDirectorySize()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var archivePath = Path.Combine(directory, "release.zip");
+            CreateArchive(archivePath, ("one.txt", "1234"), ("two.txt", "5678"));
+            PatchZipUInt32(archivePath, 0x06054b50, fieldOffset: 12, value: 1);
+
+            var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                ReleaseArchiveExtractor.ExtractToDirectoryAsync(
+                    archivePath,
+                    Path.Combine(directory, "extracted"),
+                    CancellationToken.None));
+
+            Assert.Contains("central directory is malformed", exception.Message);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RejectsMisalignedEocdSignatureInsideArchiveComment()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var archivePath = Path.Combine(directory, "release.zip");
+            CreateArchive(archivePath, ("payload.txt", "safe"));
+            AppendMisalignedEocdComment(archivePath);
+
+            var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                ReleaseArchiveExtractor.ExtractToDirectoryAsync(
+                    archivePath,
+                    Path.Combine(directory, "extracted"),
+                    CancellationToken.None));
+
+            Assert.Contains("central directory is malformed", exception.Message);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RejectsActualExpansionBeyondForgedDeclaredLength()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var archivePath = Path.Combine(directory, "release.zip");
+            CreateArchive(archivePath, ("payload.txt", "12345678"));
+            PatchZipUInt32(archivePath, 0x02014b50, fieldOffset: 24, value: 1);
+
+            var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                ReleaseArchiveExtractor.ExtractToDirectoryAsync(
+                    archivePath,
+                    Path.Combine(directory, "extracted"),
+                    CancellationToken.None,
+                    maximumExtractedBytes: 4));
+
+            Assert.Contains("4-byte safety limit", exception.Message);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RejectsArchivePathTraversal()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var archivePath = Path.Combine(directory, "release.zip");
+            CreateArchive(archivePath, ("../escaped.txt", "nope"));
+
+            var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                ReleaseArchiveExtractor.ExtractToDirectoryAsync(
+                    archivePath,
+                    Path.Combine(directory, "extracted"),
+                    CancellationToken.None));
+
+            Assert.Contains("escapes the extraction directory", exception.Message);
+            Assert.False(File.Exists(Path.Combine(directory, "escaped.txt")));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void RejectsArchiveWhoseExecutableVersionDoesNotMatchRelease()
     {
         Assert.Throws<InvalidDataException>(() => BootstrapInstaller.VerifyReleaseVersion(
@@ -167,6 +309,73 @@ public sealed class BootstrapInstallerTests
             $"codex-continuity-bootstrap-tests-{Guid.NewGuid():N}");
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private static void CreateArchive(
+        string archivePath,
+        params (string Name, string Contents)[] entries)
+    {
+        using var archive = ZipFile.Open(archivePath, ZipArchiveMode.Create);
+        foreach (var (name, contents) in entries)
+        {
+            using var writer = new StreamWriter(
+                archive.CreateEntry(name, CompressionLevel.NoCompression).Open());
+            writer.Write(contents);
+        }
+    }
+
+    private static void PatchZipUInt32(
+        string archivePath,
+        uint signature,
+        int fieldOffset,
+        uint value)
+    {
+        var bytes = File.ReadAllBytes(archivePath);
+        for (var index = bytes.Length - sizeof(uint); index >= 0; index--)
+        {
+            if (BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(index)) != signature)
+            {
+                continue;
+            }
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                bytes.AsSpan(index + fieldOffset, sizeof(uint)),
+                value);
+            File.WriteAllBytes(archivePath, bytes);
+            return;
+        }
+        throw new InvalidOperationException("ZIP fixture signature was not found.");
+    }
+
+    private static void AppendMisalignedEocdComment(string archivePath)
+    {
+        const uint eocdSignature = 0x06054b50;
+        const int fakeRecordLength = 22;
+        const int trailingBytes = 1;
+        var bytes = File.ReadAllBytes(archivePath);
+        var eocdOffset = -1;
+        for (var index = bytes.Length - sizeof(uint); index >= 0; index--)
+        {
+            if (BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(index)) == eocdSignature)
+            {
+                eocdOffset = index;
+                break;
+            }
+        }
+        if (eocdOffset < 0)
+        {
+            throw new InvalidOperationException("ZIP fixture EOCD was not found.");
+        }
+
+        var originalLength = bytes.Length;
+        Array.Resize(ref bytes, originalLength + fakeRecordLength + trailingBytes);
+        BinaryPrimitives.WriteUInt16LittleEndian(
+            bytes.AsSpan(eocdOffset + 20, sizeof(ushort)),
+            fakeRecordLength + trailingBytes);
+        var fakeRecord = bytes.AsSpan(originalLength, fakeRecordLength);
+        BinaryPrimitives.WriteUInt32LittleEndian(fakeRecord, eocdSignature);
+        BinaryPrimitives.WriteUInt16LittleEndian(fakeRecord[8..], 2);
+        BinaryPrimitives.WriteUInt16LittleEndian(fakeRecord[10..], 2);
+        File.WriteAllBytes(archivePath, bytes);
     }
 
 }

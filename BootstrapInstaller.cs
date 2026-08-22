@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.IO.Compression;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
@@ -15,6 +14,9 @@ internal sealed record TrustedInstalledBuild(string Executable, string Sha256);
 
 internal static partial class BootstrapInstaller
 {
+    internal const long MaximumArchiveBytes = 128L * 1024 * 1024;
+    internal const long MaximumChecksumBytes = 16L * 1024;
+
     private static readonly HttpClient HttpClient = new()
     {
         Timeout = TimeSpan.FromMinutes(5),
@@ -95,8 +97,16 @@ internal static partial class BootstrapInstaller
         {
             Directory.CreateDirectory(workRoot);
             Report(quiet, $"Downloading Codex Continuity {release.Version}…");
-            await DownloadAsync(release.ArchiveUrl, archivePath, cancellationToken);
-            await DownloadAsync(release.ChecksumUrl, checksumPath, cancellationToken);
+            await DownloadAsync(
+                release.ArchiveUrl,
+                archivePath,
+                MaximumArchiveBytes,
+                cancellationToken);
+            await DownloadAsync(
+                release.ChecksumUrl,
+                checksumPath,
+                MaximumChecksumBytes,
+                cancellationToken);
 
             var expectedHash = ParseSha256(await File.ReadAllTextAsync(
                 checksumPath,
@@ -104,7 +114,10 @@ internal static partial class BootstrapInstaller
             await VerifySha256Async(archivePath, expectedHash);
             Report(quiet, "Release checksum verified.");
 
-            ZipFile.ExtractToDirectory(archivePath, extractPath);
+            await ReleaseArchiveExtractor.ExtractToDirectoryAsync(
+                archivePath,
+                extractPath,
+                cancellationToken);
             var supervisors = Directory.GetFiles(
                 extractPath,
                 "CodexContinuity.exe",
@@ -212,19 +225,31 @@ internal static partial class BootstrapInstaller
         return arguments;
     }
 
-    private static async Task DownloadAsync(
+    internal static async Task DownloadAsync(
         string url,
         string destination,
+        long maximumBytes,
         CancellationToken cancellationToken)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumBytes);
         using var response = await HttpClient.GetAsync(
             url,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken);
         response.EnsureSuccessStatusCode();
+        if (response.Content.Headers.ContentLength is { } contentLength &&
+            contentLength > maximumBytes)
+        {
+            throw new InvalidDataException(
+                $"Download declares {contentLength} bytes, exceeding the {maximumBytes}-byte safety limit.");
+        }
         await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
         await using var output = File.Create(destination);
-        await source.CopyToAsync(output, cancellationToken);
+        await ReleaseArchiveExtractor.CopyBoundedAsync(
+            source,
+            output,
+            maximumBytes,
+            cancellationToken);
     }
 
     private static async Task<string> ComputeSha256Async(string path)
