@@ -55,7 +55,6 @@ jobs:
         env:
           DEPLOY_WEBHOOK_SECRET: ${{ secrets.CONTINUITY_DEPLOY_WEBHOOK_SECRET }}
           DEPLOY_WEBHOOK_URL: ${{ secrets.CONTINUITY_DEPLOY_WEBHOOK_URL }}
-          GITHUB_EVENT_NAME: push
           GITHUB_REF_NAME: main
           GITHUB_REPOSITORY: YesterdaysLemon/codex-continuity
           GITHUB_SHA: ${{ github.event.workflow_run.head_sha }}
