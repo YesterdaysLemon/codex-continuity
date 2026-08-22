@@ -83,10 +83,14 @@ public sealed class TrayStatusParserTests
         Assert.Equal(
             new ContinuityUpdateSnapshot("0.2.1", "0.3.0", 2, 1, 0, "staged", null),
             update);
+        Assert.Equal(
+            "Updates: 2 observed / 1 staged / 0 applied",
+            TrayStatusPresentation.UpdateCounts(update));
     }
 
-    [Fact]
-    public void UpdatePresentationLabelsAppliedHistoryAndKeepsVersionsOnFailure()
+    [Theory]
+    [MemberData(nameof(UpdateDetails))]
+    public void PresentsEveryUpdateState(string state, string? error, string expected)
     {
         var update = new ContinuityUpdateSnapshot(
             "0.2.1",
@@ -94,53 +98,32 @@ public sealed class TrayStatusParserTests
             2,
             1,
             1,
-            "failed",
-            "checksum mismatch");
+            state,
+            error);
 
-        Assert.Equal(
-            "Updates: 2 observed / 1 staged / 1 applied",
-            TrayStatusPresentation.UpdateCounts(update));
-        Assert.Equal(
-            "Running v0.2.1; latest v0.3.0; last check failed: checksum mismatch",
-            TrayStatusPresentation.UpdateDetail(update));
+        Assert.Equal(expected, TrayStatusPresentation.UpdateDetail(update));
     }
 
-    [Fact]
-    public void UpdatePresentationExplainsRollbackAndFailedManualCheck()
+    public static TheoryData<string, string?, string> UpdateDetails => new()
     {
-        var update = new ContinuityUpdateSnapshot(
-            "0.2.1",
-            "0.3.0",
-            1,
-            1,
-            0,
-            "deferred",
-            null);
+        { "active", null, "Running v0.2.1; latest is active" },
+        { "staged", null, "v0.3.0 staged; running v0.2.1" },
+        { "deferred", null, "v0.3.0 deferred by rollback; running v0.2.1" },
+        { "inactive", null, "Last ran v0.2.1; latest v0.3.0 is not active" },
+        { "ahead", null, "Running v0.2.1; ahead of stable v0.3.0" },
+        { "failed", null, "v0.3.0 could not be staged; running v0.2.1" },
+        { "observed", null, "v0.3.0 observed; staging pending" },
+        { "unknown", null, "Running v0.2.1; update state unknown" },
+        { "future", null, "Running v0.2.1; update state future" },
+        { "failed", "checksum mismatch", "Running v0.2.1; latest v0.3.0; last check failed: checksum mismatch" },
+    };
 
-        var detail = TrayStatusPresentation.UpdateDetail(update);
-
-        Assert.Equal("v0.3.0 deferred by rollback; running v0.2.1", detail);
-        Assert.Equal(
-            $"Manual update check failed; {detail}",
-            TrayStatusPresentation.ManualCheckResult(succeeded: false, detail));
-    }
-
-    [Fact]
-    public void UpdatePresentationDoesNotCallAStoppedSupervisorActive()
-    {
-        var update = new ContinuityUpdateSnapshot(
-            "0.3.0",
-            "0.3.0",
-            1,
-            1,
-            1,
-            "inactive",
-            null);
-
-        Assert.Equal(
-            "Last ran v0.3.0; latest v0.3.0 is not active",
-            TrayStatusPresentation.UpdateDetail(update));
-    }
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("{\"observedCount\":\"many\"}")]
+    public void InvalidUpdateShapeIsUnavailable(string json) => Assert.Equal(
+        ContinuityUpdateSnapshot.Unavailable("Update status is invalid."),
+        TrayStatusParser.ParseUpdate(json));
 
     [Fact]
     public void StatusAndDiagnosticsResolutionUseOwningPaths()
@@ -197,7 +180,7 @@ public sealed class TrayStatusParserTests
             [
                 "-NoProfile",
                 "-Command",
-                $"Set-Content -LiteralPath '{recordPath}' -Value $PID; Start-Sleep -Seconds 15",
+                $"$child = Start-Process -FilePath '{powershell}' -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 15' -WindowStyle Hidden -PassThru; Set-Content -LiteralPath '{recordPath}' -Value $child.Id; Wait-Process -Id $child.Id",
             ],
             cancellation.Token);
         try

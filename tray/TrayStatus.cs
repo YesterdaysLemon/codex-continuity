@@ -70,9 +70,6 @@ internal static class TrayStatusPresentation
         };
     }
 
-    internal static string ManualCheckResult(bool succeeded, string detail) =>
-        succeeded ? detail : $"Manual update check failed; {detail}";
-
     private static string Compact(string text)
     {
         const int maximumLength = 160;
@@ -117,14 +114,25 @@ internal static class TrayStatusParser
     {
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
-        return new ContinuityUpdateSnapshot(
-            ReadString(root, "runningVersion"),
-            ReadString(root, "latestVersion"),
-            ReadInt(root, "observedCount"),
-            ReadInt(root, "stagedCount"),
-            ReadInt(root, "appliedCount"),
-            ReadString(root, "latestState") ?? "unknown",
-            ReadString(root, "lastError"));
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return ContinuityUpdateSnapshot.Unavailable("Update status is invalid.");
+        }
+        try
+        {
+            return new ContinuityUpdateSnapshot(
+                ReadString(root, "runningVersion"),
+                ReadString(root, "latestVersion"),
+                ReadInt(root, "observedCount"),
+                ReadInt(root, "stagedCount"),
+                ReadInt(root, "appliedCount"),
+                ReadString(root, "latestState") ?? "unknown",
+                ReadString(root, "lastError"));
+        }
+        catch (InvalidOperationException)
+        {
+            return ContinuityUpdateSnapshot.Unavailable("Update status is invalid.");
+        }
     }
 
     private static string? ReadString(JsonElement root, string name) =>
