@@ -12,19 +12,14 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot "authenticode-release-policy.psm1") -Force
 
 $resolvedPaths = @($Paths | ForEach-Object { (Resolve-Path -LiteralPath $_).Path })
 if ($resolvedPaths.Count -eq 0) {
     throw "At least one release executable is required."
 }
 
-$normalizedExpectedThumbprint = $null
-if (-not [string]::IsNullOrWhiteSpace($ExpectedThumbprint)) {
-    $normalizedExpectedThumbprint = ($ExpectedThumbprint -replace "\s", "").ToUpperInvariant()
-    if ($normalizedExpectedThumbprint -notmatch "^[0-9A-F]{40}$") {
-        throw "The expected Authenticode certificate thumbprint must contain exactly 40 hexadecimal characters."
-    }
-}
+$normalizedExpectedThumbprint = ConvertTo-NormalizedAuthenticodeThumbprint $ExpectedThumbprint
 
 if ($RequireUnsigned -and -not $VerifyOnly) {
     throw "RequireUnsigned can only be used with VerifyOnly."
@@ -84,48 +79,37 @@ try {
                 Signature = Get-AuthenticodeSignature -LiteralPath $_
             }
         })
+    $policyArtifacts = @($signatures | ForEach-Object {
+            [PSCustomObject]@{
+                Path             = $_.Path
+                Status           = $_.Signature.Status.ToString()
+                SignerThumbprint = if ($null -eq $_.Signature.SignerCertificate) {
+                    $null
+                } else {
+                    $_.Signature.SignerCertificate.Thumbprint
+                }
+                HasTimestamp     = $null -ne $_.Signature.TimeStamperCertificate
+            }
+        })
+    Assert-AuthenticodeReleasePolicy `
+        -Artifacts $policyArtifacts `
+        -RequireUnsigned:$RequireUnsigned `
+        -ExpectedThumbprint $normalizedExpectedThumbprint
     if ($RequireUnsigned) {
-        $signedArtifact = $signatures |
-            Where-Object { $_.Signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned } |
-            Select-Object -First 1
-        if ($null -ne $signedArtifact) {
-            throw "Unsigned release mode found an Authenticode signature on $($signedArtifact.Path)."
-        }
         foreach ($artifact in $signatures) {
             Write-Warning "Verified unsigned development artifact: $($artifact.Path)"
         }
         return
     }
 
-    $expectedThumbprint = $null
     foreach ($artifact in $signatures) {
         $path = $artifact.Path
         $signature = $artifact.Signature
-        if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
-            $null -eq $signature.SignerCertificate) {
-            throw "Authenticode verification failed for ${path}: $($signature.Status)"
-        }
-        if ($null -eq $signature.TimeStamperCertificate) {
-            throw "Authenticode signature is missing its RFC 3161 timestamp for $path."
-        }
         $thumbprint = $signature.SignerCertificate.Thumbprint.ToUpperInvariant()
-        if ($null -ne $normalizedExpectedThumbprint -and
-            $thumbprint -ne $normalizedExpectedThumbprint) {
-            throw "Authenticode signer thumbprint did not match the configured publisher for $path."
-        }
-        if ($null -eq $expectedThumbprint) {
-            $expectedThumbprint = $thumbprint
-        }
-        elseif ($thumbprint -ne $expectedThumbprint) {
-            throw "Release executables were signed by different certificates."
-        }
         if ($null -eq $signTool) {
             throw "Windows SDK signtool.exe is required to verify signed artifacts."
         }
-        & $signTool.FullName verify /pa /v $path
-        if ($LASTEXITCODE -ne 0) {
-            throw "SignTool verification failed for $path."
-        }
+        Invoke-SignToolVerification -SignToolPath $signTool.FullName -Path $path
         Write-Host "Verified Authenticode signature for $path ($thumbprint)"
     }
 }
