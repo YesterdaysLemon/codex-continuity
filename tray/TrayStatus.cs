@@ -22,7 +22,11 @@ internal sealed record TrayStatusSnapshot(
 
 internal sealed record TrayCommandResult(int ExitCode, string Output, string Error);
 
-internal sealed record TrayMutationTarget(string? Executable, string? Error)
+internal sealed record TrayMutationTarget(
+    string? Executable,
+    string? SelectedExecutable,
+    string? ExpectedSha256,
+    string? Error)
 {
     internal bool Available => Executable is not null;
 }
@@ -186,13 +190,25 @@ internal static class TrayStatusParser
 
 internal sealed class TrayStatusClient(
     string supervisorExecutable,
-    string? mutationApplicationDirectory = null)
+    string? mutationApplicationDirectory = null,
+    string? mutationStateDirectory = null,
+    string? mutationLegacyStateDirectory = null,
+    Func<string, IReadOnlyList<string>, CancellationToken, Task<TrayCommandResult>>?
+        mutationProcessRunner = null)
 {
     internal const int DefaultPort = 45123;
 
     private readonly string applicationDirectory =
         mutationApplicationDirectory ?? AppContext.BaseDirectory;
+    private readonly string actionStateDirectory = mutationStateDirectory ?? StateDirectory;
+    private readonly string actionLegacyStateDirectory =
+        mutationLegacyStateDirectory ?? LegacyStateDirectory;
     private readonly TrayCommandGate mutationGate = new();
+    private readonly Func<
+        string,
+        IReadOnlyList<string>,
+        CancellationToken,
+        Task<TrayCommandResult>> processRunner = mutationProcessRunner ?? RunProcessAsync;
 
     private static string StateDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -250,10 +266,19 @@ internal sealed class TrayStatusClient(
     }
 
     internal Task<TrayCommandResult> CheckForUpdatesAsync(CancellationToken cancellationToken) =>
-        RunMutationAsync(["update"], cancellationToken);
+        RunMutationAsync(_ => ["update"], cancellationToken);
 
     internal Task<TrayCommandResult> RestartSupervisorAsync(CancellationToken cancellationToken) =>
-        RunMutationAsync(["repair", "--start-now"], cancellationToken);
+        RunMutationAsync(target => target.SelectedExecutable is null
+            ? ["repair", "--start-now"]
+            : [
+                "repair",
+                "--start-now",
+                "--expected-installed-executable",
+                target.SelectedExecutable,
+                "--expected-installed-sha256",
+                target.ExpectedSha256!,
+            ], cancellationToken);
 
     internal static string ResolveSupervisorExecutable(string applicationDirectory)
         => ResolveSupervisorExecutable(applicationDirectory, StateDirectory);
@@ -284,8 +309,8 @@ internal sealed class TrayStatusClient(
         if (statePath is null)
         {
             return File.Exists(bundledExecutable)
-                ? new(bundledExecutable, null)
-                : new(null, "No immutable Continuity command is available.");
+                ? new(bundledExecutable, null, null, null)
+                : new(null, null, null, "No immutable Continuity command is available.");
         }
 
         try
@@ -294,11 +319,17 @@ internal sealed class TrayStatusClient(
             var root = document.RootElement;
             if (IsDeferredUninstall(root))
             {
-                return new(null, "Continuity is pending deferred uninstall; actions are disabled.");
+                return new(
+                    null,
+                    null,
+                    null,
+                    "Continuity is pending deferred uninstall; actions are disabled.");
             }
             var installedExecutable = root.GetProperty("installedExecutable").GetString();
+            var expectedSha256 = root.GetProperty("binarySha256").GetString();
             var stateDirectory = Path.GetDirectoryName(statePath)!;
-            if (!string.IsNullOrWhiteSpace(installedExecutable))
+            if (!string.IsNullOrWhiteSpace(installedExecutable) &&
+                !string.IsNullOrWhiteSpace(expectedSha256))
             {
                 var fullExecutable = Path.GetFullPath(installedExecutable);
                 var versionsDirectory = Path.GetFullPath(
@@ -309,18 +340,19 @@ internal sealed class TrayStatusClient(
                         StringComparison.OrdinalIgnoreCase) &&
                     File.Exists(fullExecutable))
                 {
-                    return new(fullExecutable, null);
+                    return new(fullExecutable, fullExecutable, expectedSha256, null);
                 }
+                return File.Exists(bundledExecutable)
+                    ? new(bundledExecutable, fullExecutable, expectedSha256, null)
+                    : new(null, null, null, "The installed Continuity command is unavailable.");
             }
-            return File.Exists(bundledExecutable)
-                ? new(bundledExecutable, null)
-                : new(null, "The installed Continuity command is unavailable.");
+            return new(null, null, null, "Installed Continuity state is invalid; actions are disabled.");
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
             JsonException or KeyNotFoundException or InvalidDataException or InvalidOperationException or
             ArgumentException or NotSupportedException)
         {
-            return new(null, "Installed Continuity state is invalid; actions are disabled.");
+            return new(null, null, null, "Installed Continuity state is invalid; actions are disabled.");
         }
     }
 
@@ -433,16 +465,16 @@ internal sealed class TrayStatusClient(
     }
 
     private Task<TrayCommandResult> RunMutationAsync(
-        IReadOnlyList<string> arguments,
+        Func<TrayMutationTarget, IReadOnlyList<string>> arguments,
         CancellationToken cancellationToken) => mutationGate.RunAsync(async () =>
         {
             var target = ResolveMutationTarget(
                 applicationDirectory,
-                StateDirectory,
-                LegacyStateDirectory);
+                actionStateDirectory,
+                actionLegacyStateDirectory);
             return target.Executable is null
                 ? new TrayCommandResult(-1, string.Empty, target.Error ?? "Command unavailable.")
-                : await RunProcessAsync(target.Executable, arguments, cancellationToken);
+                : await processRunner(target.Executable, arguments(target), cancellationToken);
         }, cancellationToken);
 
     internal static async Task<TrayCommandResult> RunProcessAsync(

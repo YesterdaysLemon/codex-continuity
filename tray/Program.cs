@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 
@@ -191,6 +192,14 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         }
         catch (OperationCanceledException)
         {
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or
+            InvalidOperationException or Win32Exception)
+        {
+            feedbackItem.Text = TrayStatusPresentation.CommandFailure(
+                action,
+                new TrayCommandResult(-1, string.Empty, exception.Message));
         }
         finally
         {
