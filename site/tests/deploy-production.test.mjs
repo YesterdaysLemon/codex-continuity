@@ -32,6 +32,11 @@ test("uses unreserved payload variables for the deployment manager", async () =>
     deployStep,
     /^\s+DEPLOY_SHA: \$\{\{ github\.event\.workflow_run\.head_sha \}\}$/m,
   );
+  assert.match(
+    deployStep,
+    /^\s+PRODUCTION_URL: https:\/\/continuity\.alirezaafshan\.com$/m,
+  );
+  assert.doesNotMatch(deployStep, /^\s+SITES_URL:/m);
   assert.match(workflow, /github\.event\.workflow_run\.event == 'push'/);
 });
 
@@ -223,7 +228,7 @@ test("rejects wrong release, llms, and revision markers", async () => {
   }
 });
 
-test("production orchestration verifies exact custom revision and Sites fallback", async () => {
+test("production orchestration verifies the exact canonical revision", async () => {
   const calls = [];
   const environment = {
     DEPLOY_BRANCH: "main",
@@ -237,7 +242,7 @@ test("production orchestration verifies exact custom revision and Sites fallback
     GITHUB_REPOSITORY: "reserved/repository",
     GITHUB_SHA: "f".repeat(40),
     PRODUCTION_URL: "https://continuity.example.test",
-    SITES_URL: "https://fallback.example.test",
+    SITES_URL: "https://obsolete.example.test",
   };
 
   await main(environment, {
@@ -260,10 +265,6 @@ test("production orchestration verifies exact custom revision and Sites fallback
       baseUrl: environment.PRODUCTION_URL,
       expectedVersion: productVersion,
       expectedRevision: sha,
-    }],
-    ["verify", {
-      baseUrl: environment.SITES_URL,
-      expectedVersion: productVersion,
     }],
   ]);
 });
