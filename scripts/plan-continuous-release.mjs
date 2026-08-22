@@ -75,6 +75,17 @@ export function planContinuousRelease(input) {
   }
 
   const tag = `v${input.supervisorVersion}`;
+  const stableVersions = (input.stableTags ?? [])
+    .map((stableTag) => /^v(\d+\.\d+\.\d+)$/.exec(stableTag)?.[1])
+    .filter(Boolean)
+    .map(parseStableVersion);
+  const latestVersion = stableVersions.sort(compareVersions).at(-1);
+  if (latestVersion && compareVersions(supervisorVersion, latestVersion) < 0) {
+    return fail(
+      `Release version ${input.supervisorVersion} regresses from ${latestVersion.join(".")}.`,
+    );
+  }
+
   const tagExists = typeof input.tagSha === "string" && input.tagSha.length > 0;
   if (input.release && !tagExists) {
     return fail(`Release ${tag} exists without a fetched tag.`);
@@ -104,11 +115,6 @@ export function planContinuousRelease(input) {
     };
   }
 
-  const stableVersions = (input.stableTags ?? [])
-    .map((stableTag) => /^v(\d+\.\d+\.\d+)$/.exec(stableTag)?.[1])
-    .filter(Boolean)
-    .map(parseStableVersion);
-  const latestVersion = stableVersions.sort(compareVersions).at(-1);
   if (latestVersion && compareVersions(supervisorVersion, latestVersion) <= 0) {
     return fail(
       `New release version ${input.supervisorVersion} must be greater than ${latestVersion.join(".")}.`,

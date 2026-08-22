@@ -11,6 +11,18 @@ import {
 
 const workflowDirectory = new URL("../../.github/workflows/", import.meta.url);
 const sha = "a".repeat(40);
+const expectedAssetNames = [
+  "CodexContinuity-v0.3.0-win-x64.zip",
+  "CodexContinuity-v0.3.0-win-x64.zip.sha256",
+  "CodexContinuity-win-x64.zip",
+  "CodexContinuity-win-x64.zip.sha256",
+  "CodexContinuity-v0.3.0-Setup.exe",
+  "CodexContinuity-v0.3.0-Setup.exe.sha256",
+  "CodexContinuity-Setup.exe",
+  "CodexContinuity-Setup.exe.sha256",
+  "CodexContinuity-v0.3.0-winget-manifests.zip",
+  "install.ps1",
+];
 
 function input(overrides = {}) {
   return {
@@ -75,6 +87,10 @@ test("planner creates only a new stable version at the exact green SHA", () => {
     planContinuousRelease(input({ stableTags: ["v0.3.0"] })).action,
     "fail",
   );
+  assert.equal(
+    planContinuousRelease(input({ stableTags: ["v1.0.0"] })).action,
+    "fail",
+  );
 });
 
 test("planner CLI emits the same machine-readable release decision", () => {
@@ -89,14 +105,23 @@ test("planner CLI emits the same machine-readable release decision", () => {
 });
 
 test("planner skips a complete release and resumes every incomplete state", () => {
+  assert.deepEqual(expectedReleaseAssetNames("v0.3.0"), expectedAssetNames);
   const completeRelease = {
     isDraft: false,
     isPrerelease: false,
-    assets: expectedReleaseAssetNames("v0.3.0").map((name) => ({ name })),
+    assets: expectedAssetNames.map((name) => ({ name })),
   };
   assert.equal(
     planContinuousRelease(input({ tagSha: "b".repeat(40), release: completeRelease })).action,
     "skip",
+  );
+  assert.equal(
+    planContinuousRelease(input({
+      stableTags: ["v0.3.0", "v1.0.0"],
+      tagSha: "b".repeat(40),
+      release: completeRelease,
+    })).action,
+    "fail",
   );
 
   const incompleteReleases = [
@@ -158,6 +183,9 @@ test("release workflow preserves both entry points and the delivery contract", a
 
   assert.match(workflow, /push:\s+tags:\s+- v\*/);
   assert.match(workflow, /workflow_call:/);
+  assert.match(workflow, /RELEASE_REF: \$\{\{ inputs\.release_ref \|\| github\.ref \}\}/);
+  assert.match(workflow, /RELEASE_TAG: \$\{\{ inputs\.release_tag \|\| github\.ref_name \}\}/);
+  assert.match(workflow, /RELEASE_SHA: \$\{\{ inputs\.release_sha \|\| github\.sha \}\}/);
   assert.match(workflow, /scripts\\sign-release\.ps1/);
   assert.match(workflow, /Verify release signing policy/);
   assert.match(workflow, /winget validate --manifest release\/winget/);
