@@ -645,6 +645,14 @@ internal static class AutomaticUpdateRunner
             automaticUpdateSource: new TrustedInstalledBuild(
                 previousState.InstalledExecutable,
                 previousState.BinarySha256));
+        return VerifyStagedBuild(stateDirectory, previousState);
+    }
+
+    internal static StagedContinuityBuild VerifyStagedBuild(
+        string stateDirectory,
+        InstallState previousState)
+    {
+        using var lifecycleLock = ContinuityLifecycleLock.Acquire(stateDirectory);
         var stagedState = new InstallStateStore(
             ContinuityPaths.InstallStateFile(stateDirectory)).Load()
             ?? throw new InvalidDataException("Automatic update did not persist installed state.");

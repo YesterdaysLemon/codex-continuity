@@ -1,4 +1,5 @@
 using CodexContinuity;
+using System.Security.Cryptography;
 using Xunit;
 
 namespace CodexContinuity.Tests;
@@ -217,6 +218,51 @@ public sealed class AutomaticUpdateRunnerTests : IDisposable
         Assert.Equal("inactive", state.LatestState);
     }
 
+    [Fact]
+    public async Task StagedProofWaitsForTheLifecycleLock()
+    {
+        Directory.CreateDirectory(root);
+        var previousExecutable = Path.Combine(root, "previous.exe");
+        var stagedExecutable = Path.Combine(root, "staged.exe");
+        await File.WriteAllTextAsync(previousExecutable, "previous");
+        await File.WriteAllTextAsync(stagedExecutable, "staged");
+        var previousSha256 = Sha256(previousExecutable);
+        var stagedSha256 = Sha256(stagedExecutable);
+        var previousState = InstallState(45999, previousExecutable) with
+        {
+            BinarySha256 = previousSha256,
+        };
+        new InstallStateStore(ContinuityPaths.InstallStateFile(root)).Save(
+            InstallState(45999, stagedExecutable) with
+            {
+                PreviousInstalledExecutable = previousExecutable,
+                BinarySha256 = stagedSha256,
+            });
+
+        var heldLock = ContinuityLifecycleLock.Acquire(root);
+        var started = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var proofTask = Task.Run(() =>
+        {
+            started.SetResult();
+            return AutomaticUpdateRunner.VerifyStagedBuild(root, previousState);
+        });
+        try
+        {
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await Task.Delay(100);
+            Assert.False(proofTask.IsCompleted);
+        }
+        finally
+        {
+            heldLock.Dispose();
+        }
+
+        Assert.Equal(
+            new StagedContinuityBuild(stagedSha256, previousSha256),
+            await proofTask.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(root))
@@ -250,4 +296,7 @@ public sealed class AutomaticUpdateRunnerTests : IDisposable
 
     private static StagedContinuityBuild StagedBuild() =>
         new(new string('b', 64), new string('a', 64));
+
+    private static string Sha256(string path) =>
+        Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
 }

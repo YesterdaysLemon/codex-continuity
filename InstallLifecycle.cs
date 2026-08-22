@@ -35,6 +35,18 @@ internal enum InstallLifecycle
     DeferredUninstall,
 }
 
+internal enum InstallIntent
+{
+    Interactive,
+    AutomaticUpdate,
+}
+
+internal enum LifecycleLockOwnership
+{
+    Acquire,
+    AlreadyHeld,
+}
+
 internal sealed record DeferredEnvironmentRestore(string Name, OwnedString Value);
 
 internal sealed record InstalledAppRegistration(
@@ -104,6 +116,9 @@ internal static class ContinuityPaths
 
     internal static string UpdateLockFile(string stateDirectory) =>
         Path.Combine(stateDirectory, "update.lock");
+
+    internal static string LifecycleLockFile(string stateDirectory) =>
+        Path.Combine(stateDirectory, "lifecycle.lock");
 
     internal static string AppServerLogFile(string stateDirectory) =>
         Path.Combine(stateDirectory, "app-server.log");
@@ -195,7 +210,10 @@ internal sealed class InstallCoordinator(
         string sourceExecutable,
         int port,
         TrayInstallMode trayInstallMode,
-        ExistingEndpointOwnership endpointOwnership = ExistingEndpointOwnership.NotReady)
+        ExistingEndpointOwnership endpointOwnership = ExistingEndpointOwnership.NotReady,
+        InstallIntent intent = InstallIntent.Interactive,
+        string? expectedInstalledSha256 = null,
+        LifecycleLockOwnership lockOwnership = LifecycleLockOwnership.Acquire)
     {
         if (endpointOwnership == ExistingEndpointOwnership.Foreign)
         {
@@ -210,7 +228,51 @@ internal sealed class InstallCoordinator(
         }
 
         Directory.CreateDirectory(stateDirectory);
+        using var lifecycleLock = lockOwnership == LifecycleLockOwnership.Acquire
+            ? ContinuityLifecycleLock.Acquire(stateDirectory)
+            : null;
         var previousState = stateStore.Load() ?? LoadLegacyState();
+        if (intent == InstallIntent.AutomaticUpdate &&
+            previousState?.Lifecycle != InstallLifecycle.Installed)
+        {
+            throw new InvalidOperationException(
+                "Automatic update requires an installed Continuity state and cannot revive an uninstall.");
+        }
+        if (intent == InstallIntent.AutomaticUpdate &&
+            (expectedInstalledSha256?.Length != 64 ||
+             !expectedInstalledSha256.All(Uri.IsHexDigit)))
+        {
+            throw new InvalidOperationException(
+                "Automatic update did not pin the installed build SHA-256 digest.");
+        }
+        if (intent == InstallIntent.AutomaticUpdate &&
+            !string.Equals(
+                previousState!.BinarySha256,
+                expectedInstalledSha256,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "The installed Continuity build changed after the automatic update check; staging was aborted.");
+        }
+        if (intent == InstallIntent.AutomaticUpdate &&
+            (!File.Exists(previousState!.InstalledExecutable) ||
+             !string.Equals(
+                 ComputeSha256(previousState.InstalledExecutable),
+                 expectedInstalledSha256,
+                 StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException(
+                "The installed Continuity executable no longer matches its persisted SHA-256 digest; staging was aborted.");
+        }
+        var installedTrayMode = previousState?.InstalledTrayExecutable is null
+            ? TrayInstallMode.Disabled
+            : TrayInstallMode.Enabled;
+        if (intent == InstallIntent.AutomaticUpdate &&
+            (previousState!.Port != port || installedTrayMode != trayInstallMode))
+        {
+            throw new InvalidOperationException(
+                "The installed Continuity port or tray mode changed after the automatic update check; staging was aborted.");
+        }
         var sourceTrayExecutable = Path.Combine(
             Path.GetDirectoryName(sourcePath) ?? string.Empty,
             "CodexContinuity.Tray.exe");
@@ -358,8 +420,13 @@ internal sealed class InstallCoordinator(
     }
 
     internal bool Uninstall(
-        UninstallReconnectPolicy reconnectPolicy = UninstallReconnectPolicy.RestoreImmediately)
+        UninstallReconnectPolicy reconnectPolicy = UninstallReconnectPolicy.RestoreImmediately,
+        LifecycleLockOwnership lockOwnership = LifecycleLockOwnership.Acquire)
     {
+        Directory.CreateDirectory(stateDirectory);
+        using var lifecycleLock = lockOwnership == LifecycleLockOwnership.Acquire
+            ? ContinuityLifecycleLock.Acquire(stateDirectory)
+            : null;
         var state = stateStore.Load() ?? LoadLegacyState();
         if (state is null)
         {
@@ -427,6 +494,8 @@ internal sealed class InstallCoordinator(
 
     internal InstallState Rollback()
     {
+        Directory.CreateDirectory(stateDirectory);
+        using var lifecycleLock = ContinuityLifecycleLock.Acquire(stateDirectory);
         var state = (stateStore.Load() ?? LoadLegacyState())
             ?? throw new InvalidOperationException("No installed Continuity state is available.");
         if (state.Lifecycle != InstallLifecycle.Installed)
