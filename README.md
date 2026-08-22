@@ -115,10 +115,9 @@ observe releases, but automatic staging fails closed; use the explicit manual
 installation path until publisher signing is configured.
 
 Left-click the tray icon to see running and latest versions,
-observed/staged/applied counts, the last failure, and actions to check
-immediately or safely start an unavailable backend. The recovery action retains
-the existing foreign-endpoint refusal, so it cannot adopt or create a competing
-app-server on an occupied port.
+observed/staged/applied counts, and the last failure. These status controls are
+read-only; refreshing or exiting the tray does not start, stop, or update the
+backend.
 
 The counts are cumulative within the retained local update state; only the
 latest-state detail identifies which version is currently active.
