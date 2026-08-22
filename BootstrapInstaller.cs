@@ -11,6 +11,8 @@ internal sealed record BootstrapRelease(
     string ArchiveUrl,
     string ChecksumUrl);
 
+internal sealed record TrustedInstalledBuild(string Executable, string Sha256);
+
 internal static partial class BootstrapInstaller
 {
     private static readonly HttpClient HttpClient = new()
@@ -80,7 +82,8 @@ internal static partial class BootstrapInstaller
         bool startNow,
         bool skipSelfTest,
         bool quiet,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TrustedInstalledBuild? automaticUpdateSource = null)
     {
         var workRoot = Path.Combine(
             Path.GetTempPath(),
@@ -118,6 +121,18 @@ internal static partial class BootstrapInstaller
             if (trayInstallMode == TrayInstallMode.Enabled && !File.Exists(tray))
             {
                 throw new InvalidDataException("The release is missing CodexContinuity.Tray.exe.");
+            }
+
+            if (automaticUpdateSource is not null)
+            {
+                var candidates = File.Exists(tray)
+                    ? new[] { supervisor, tray }
+                    : [supervisor];
+                await AuthenticodeReleaseVerifier.VerifyMatchingPublisherAsync(
+                    automaticUpdateSource.Executable,
+                    candidates,
+                    cancellationToken);
+                Report(quiet, "Release publisher signature verified.");
             }
 
             if (!skipSelfTest)

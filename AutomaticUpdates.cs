@@ -641,7 +641,10 @@ internal static class AutomaticUpdateRunner
             startNow: false,
             skipSelfTest: false,
             quiet: true,
-            cancellationToken: cancellationToken);
+            cancellationToken: cancellationToken,
+            automaticUpdateSource: new TrustedInstalledBuild(
+                previousState.InstalledExecutable,
+                previousState.BinarySha256));
         var stagedState = new InstallStateStore(
             ContinuityPaths.InstallStateFile(stateDirectory)).Load()
             ?? throw new InvalidDataException("Automatic update did not persist installed state.");

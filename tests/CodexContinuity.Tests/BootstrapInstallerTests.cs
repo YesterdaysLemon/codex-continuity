@@ -81,4 +81,65 @@ public sealed class BootstrapInstallerTests
             "99.99.99"));
     }
 
+    [Fact]
+    public async Task RejectsUnsignedAutomaticUpdatePublisherChain()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var installed = Path.Combine(directory, "installed.exe");
+            var candidate = Path.Combine(directory, "candidate.exe");
+            await File.WriteAllTextAsync(installed, "unsigned installed build");
+            await File.WriteAllTextAsync(candidate, "unsigned candidate build");
+
+            var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                AuthenticodeReleaseVerifier.VerifyMatchingPublisherAsync(
+                    installed,
+                    [candidate],
+                    CancellationToken.None));
+
+            Assert.Contains("does not have a valid Authenticode signature", exception.Message);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RequiresEveryCandidateToMatchTheTrustedPublisher()
+    {
+        var trusted = new AuthenticodeSignature("installed.exe", "Valid", "trusted");
+
+        AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
+            [
+                trusted,
+                new AuthenticodeSignature("candidate.exe", "Valid", "trusted"),
+                new AuthenticodeSignature("tray.exe", "Valid", "trusted"),
+            ]);
+
+        var unsigned = Assert.Throws<InvalidDataException>(() =>
+            AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
+                [trusted, new AuthenticodeSignature("candidate.exe", "NotSigned", null)]));
+        Assert.Contains("does not have a valid Authenticode signature", unsigned.Message);
+
+        var differentPublisher = Assert.Throws<InvalidDataException>(() =>
+            AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
+                [
+                    trusted,
+                    new AuthenticodeSignature("candidate.exe", "Valid", "trusted"),
+                    new AuthenticodeSignature("tray.exe", "Valid", "different"),
+                ]));
+        Assert.Contains("different publisher certificate", differentPublisher.Message);
+    }
+
+    private static string CreateTemporaryDirectory()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"codex-continuity-bootstrap-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(path);
+        return path;
+    }
+
 }
