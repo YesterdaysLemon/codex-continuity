@@ -24,6 +24,7 @@ internal sealed record TrayCommandResult(int ExitCode, string Output, string Err
 
 internal sealed record ContinuityUpdateSnapshot(
     string? RunningVersion,
+    bool RunningProcessObserved,
     string? LatestVersion,
     int ObservedCount,
     int StagedCount,
@@ -32,7 +33,7 @@ internal sealed record ContinuityUpdateSnapshot(
     string? LastError)
 {
     internal static ContinuityUpdateSnapshot Unavailable(string? error = null) =>
-        new(null, null, 0, 0, 0, "unknown", error);
+        new(null, false, null, 0, 0, 0, "unknown", error);
 }
 
 internal static class TrayStatusPresentation
@@ -41,13 +42,16 @@ internal static class TrayStatusPresentation
         $"Updates: {update.ObservedCount} observed / {update.StagedCount} staged / " +
         $"{update.AppliedCount} applied";
 
-    internal static string UpdateDetail(ContinuityUpdateSnapshot update)
+    internal static string UpdateDetail(ContinuityUpdateSnapshot update, ContinuityHealth health)
     {
+        var currentVersion = update.RunningProcessObserved && health == ContinuityHealth.Healthy
+            ? $"Running v{update.RunningVersion}"
+            : $"Last ran v{update.RunningVersion}";
         var versions = update.RunningVersion is null
             ? "Update tracking unavailable"
             : update.LatestVersion is null
-                ? $"Running v{update.RunningVersion}; latest release unknown"
-                : $"Running v{update.RunningVersion}; latest v{update.LatestVersion}";
+                ? $"{currentVersion}; latest release unknown"
+                : $"{currentVersion}; latest v{update.LatestVersion}";
         if (update.LastError is not null)
         {
             return $"{versions}; last check failed: {Compact(update.LastError)}";
@@ -58,15 +62,15 @@ internal static class TrayStatusPresentation
         }
         return update.LatestState switch
         {
-            "active" => $"Running v{update.RunningVersion}; latest is active",
-            "staged" => $"v{update.LatestVersion} staged; running v{update.RunningVersion}",
-            "deferred" => $"v{update.LatestVersion} deferred by rollback; running v{update.RunningVersion}",
-            "inactive" => $"Last ran v{update.RunningVersion}; latest v{update.LatestVersion} is not active",
-            "ahead" => $"Running v{update.RunningVersion}; ahead of stable v{update.LatestVersion}",
-            "failed" => $"v{update.LatestVersion} could not be staged; running v{update.RunningVersion}",
-            "observed" => $"v{update.LatestVersion} observed; staging pending",
-            "unknown" => $"Running v{update.RunningVersion}; update state unknown",
-            _ => $"Running v{update.RunningVersion}; update state {update.LatestState}",
+            "active" => $"{currentVersion}; latest is active",
+            "staged" => $"{currentVersion}; v{update.LatestVersion} staged",
+            "deferred" => $"{currentVersion}; v{update.LatestVersion} deferred by rollback",
+            "inactive" => $"{currentVersion}; latest v{update.LatestVersion} is not active",
+            "ahead" => $"{currentVersion}; ahead of stable v{update.LatestVersion}",
+            "failed" => $"{currentVersion}; v{update.LatestVersion} could not be staged",
+            "observed" => $"{currentVersion}; v{update.LatestVersion} observed; staging pending",
+            "unknown" => $"{currentVersion}; update state unknown",
+            _ => $"{currentVersion}; update state {update.LatestState}",
         };
     }
 
@@ -122,6 +126,7 @@ internal static class TrayStatusParser
         {
             return new ContinuityUpdateSnapshot(
                 ReadString(root, "runningVersion"),
+                ReadBool(root, "runningProcessObserved"),
                 ReadString(root, "latestVersion"),
                 ReadInt(root, "observedCount"),
                 ReadInt(root, "stagedCount"),
@@ -144,6 +149,9 @@ internal static class TrayStatusParser
         root.TryGetProperty(name, out var value) && value.TryGetInt32(out var parsed)
             ? parsed
             : 0;
+
+    private static bool ReadBool(JsonElement root, string name) =>
+        root.TryGetProperty(name, out var value) && value.GetBoolean();
 }
 
 internal sealed class TrayStatusClient(string supervisorExecutable)
@@ -225,6 +233,25 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
         string currentDirectory,
         string legacyDirectory)
     {
+        static bool HasLiveSupervisor(string directory)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(File.ReadAllText(
+                    Path.Combine(directory, "supervisor-status.json")));
+                var root = document.RootElement;
+                using var process = Process.GetProcessById(
+                    root.GetProperty("supervisorProcessId").GetInt32());
+                return !process.HasExited && process.StartTime.ToUniversalTime() <=
+                    root.GetProperty("updatedAtUtc").GetDateTimeOffset().UtcDateTime;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                JsonException or KeyNotFoundException or ArgumentException or InvalidOperationException or
+                FormatException or Win32Exception)
+            {
+                return false;
+            }
+        }
         static bool HasState(string directory) => new[]
         {
             "install-state.json",
@@ -233,9 +260,11 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
             "app-server.log",
         }.Any(fileName => File.Exists(Path.Combine(directory, fileName)));
 
-        return HasState(currentDirectory) || !HasState(legacyDirectory)
+        var liveDirectory = HasLiveSupervisor(currentDirectory)
             ? currentDirectory
-            : legacyDirectory;
+            : HasLiveSupervisor(legacyDirectory) ? legacyDirectory : null;
+        return liveDirectory ?? (HasState(currentDirectory) || !HasState(legacyDirectory)
+            ? currentDirectory : legacyDirectory);
     }
 
     internal static string ResolveDiagnosticsDirectory() => ResolveDiagnosticsDirectory(
@@ -317,7 +346,13 @@ internal sealed class TrayStatusClient(string supervisorExecutable)
         {
             if (!process.HasExited)
             {
-                process.Kill(entireProcessTree: true);
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (InvalidOperationException) when (process.HasExited)
+                {
+                }
                 await process.WaitForExitAsync();
             }
             await Task.WhenAll(outputTask, errorTask);

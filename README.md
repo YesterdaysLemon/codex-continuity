@@ -114,14 +114,6 @@ backend or desktop to apply a release. Unsigned and development builds can still
 observe releases, but automatic staging fails closed; use the explicit manual
 installation path until publisher signing is configured.
 
-Left-click the tray icon to see running and latest versions,
-observed/staged/applied counts, and the last failure. These status controls are
-read-only; refreshing or exiting the tray does not start, stop, or update the
-backend.
-
-The counts are cumulative within the retained local update state; only the
-latest-state detail identifies which version is currently active.
-
 ## Requirements
 
 - Windows 11 (the initial release is tested on Windows 11 x64).

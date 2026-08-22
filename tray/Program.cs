@@ -122,7 +122,7 @@ internal sealed class ContinuityTrayContext : ApplicationContext
             {
                 updateItem.Click += OpenLatestRelease;
             }
-            updateDetailItem.Text = TrayStatusPresentation.UpdateDetail(update);
+            updateDetailItem.Text = TrayStatusPresentation.UpdateDetail(update, status.Health);
         }
         catch (OperationCanceledException)
         {

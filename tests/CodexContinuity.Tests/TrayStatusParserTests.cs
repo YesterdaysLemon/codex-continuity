@@ -69,6 +69,7 @@ public sealed class TrayStatusParserTests
             """
             {
               "runningVersion": "0.2.1",
+              "runningProcessObserved": true,
               "latestVersion": "0.3.0",
               "observedCount": 2,
               "stagedCount": 1,
@@ -81,7 +82,7 @@ public sealed class TrayStatusParserTests
         var update = TrayStatusParser.ParseUpdate(json);
 
         Assert.Equal(
-            new ContinuityUpdateSnapshot("0.2.1", "0.3.0", 2, 1, 0, "staged", null),
+            new ContinuityUpdateSnapshot("0.2.1", true, "0.3.0", 2, 1, 0, "staged", null),
             update);
         Assert.Equal(
             "Updates: 2 observed / 1 staged / 0 applied",
@@ -90,33 +91,36 @@ public sealed class TrayStatusParserTests
 
     [Theory]
     [MemberData(nameof(UpdateDetails))]
-    public void PresentsEveryUpdateState(string state, string? error, string expected)
+    public void PresentsEveryUpdateState(string state, bool running, bool live, string? error, string expected)
     {
         var update = new ContinuityUpdateSnapshot(
-            "0.2.1",
-            "0.3.0",
-            2,
-            1,
-            1,
-            state,
-            error);
+            "0.2.1", running, "0.3.0", 2, 1, 1, state, error);
 
-        Assert.Equal(expected, TrayStatusPresentation.UpdateDetail(update));
+        Assert.Equal(expected, TrayStatusPresentation.UpdateDetail(
+            update, live ? ContinuityHealth.Healthy : ContinuityHealth.Unavailable));
     }
 
-    public static TheoryData<string, string?, string> UpdateDetails => new()
+    public static TheoryData<string, bool, bool, string?, string> UpdateDetails => new()
     {
-        { "active", null, "Running v0.2.1; latest is active" },
-        { "staged", null, "v0.3.0 staged; running v0.2.1" },
-        { "deferred", null, "v0.3.0 deferred by rollback; running v0.2.1" },
-        { "inactive", null, "Last ran v0.2.1; latest v0.3.0 is not active" },
-        { "ahead", null, "Running v0.2.1; ahead of stable v0.3.0" },
-        { "failed", null, "v0.3.0 could not be staged; running v0.2.1" },
-        { "observed", null, "v0.3.0 observed; staging pending" },
-        { "unknown", null, "Running v0.2.1; update state unknown" },
-        { "future", null, "Running v0.2.1; update state future" },
-        { "failed", "checksum mismatch", "Running v0.2.1; latest v0.3.0; last check failed: checksum mismatch" },
+        { "active", true, true, null, "Running v0.2.1; latest is active" },
+        { "staged", true, true, null, "Running v0.2.1; v0.3.0 staged" },
+        { "staged", false, true, null, "Last ran v0.2.1; v0.3.0 staged" },
+        { "deferred", true, true, null, "Running v0.2.1; v0.3.0 deferred by rollback" },
+        { "inactive", false, true, null, "Last ran v0.2.1; latest v0.3.0 is not active" },
+        { "ahead", true, true, null, "Running v0.2.1; ahead of stable v0.3.0" },
+        { "failed", true, true, null, "Running v0.2.1; v0.3.0 could not be staged" },
+        { "observed", true, true, null, "Running v0.2.1; v0.3.0 observed; staging pending" },
+        { "unknown", true, true, null, "Running v0.2.1; update state unknown" },
+        { "future", true, true, null, "Running v0.2.1; update state future" },
+        { "failed", true, false, "checksum mismatch", "Last ran v0.2.1; latest v0.3.0; last check failed: checksum mismatch" },
     };
+
+    [Fact]
+    public void CompactsMultilineUpdateErrors() => Assert.Equal(
+        $"Last ran v0.2.1; latest v0.3.0; last check failed: first  {new string('x', 153)}…",
+        TrayStatusPresentation.UpdateDetail(new(
+            "0.2.1", true, "0.3.0", 0, 0, 0, "failed", "first\r\n" + new string('x', 170)),
+            ContinuityHealth.Unavailable));
 
     [Theory]
     [InlineData("[]")]
@@ -128,6 +132,8 @@ public sealed class TrayStatusParserTests
     [Fact]
     public void StatusAndDiagnosticsResolutionUseOwningPaths()
     {
+        static string SupervisorStatus(int processId, DateTimeOffset updatedAt) =>
+            $$"""{"supervisorProcessId":{{processId}},"updatedAtUtc":"{{updatedAt:O}}"}""";
         var root = Path.Combine(Path.GetTempPath(), $"continuity-tray-routing-{Guid.NewGuid():N}");
         var applicationDirectory = Path.Combine(root, "tray");
         var stateDirectory = Path.Combine(root, "state");
@@ -145,14 +151,16 @@ public sealed class TrayStatusParserTests
                 TrayStatusClient.ResolveSupervisorExecutable(applicationDirectory, stateDirectory));
             Directory.CreateDirectory(legacyDirectory);
             File.WriteAllText(Path.Combine(legacyDirectory, "update-status.json"), "{}");
-            Assert.Equal(
-                stateDirectory,
-                TrayStatusClient.ResolveDiagnosticsDirectory(stateDirectory, legacyDirectory));
-
-            File.Delete(installStatePath);
-            Assert.Equal(
-                legacyDirectory,
-                TrayStatusClient.ResolveDiagnosticsDirectory(stateDirectory, legacyDirectory));
+            var statusPath = Path.Combine(legacyDirectory, "supervisor-status.json");
+            using var currentProcess = Process.GetCurrentProcess();
+            File.WriteAllText(statusPath, SupervisorStatus(Environment.ProcessId,
+                new DateTimeOffset(currentProcess.StartTime).AddMinutes(-1)));
+            Assert.Equal(stateDirectory, TrayStatusClient.ResolveDiagnosticsDirectory(stateDirectory, legacyDirectory));
+            File.WriteAllText(statusPath, SupervisorStatus(int.MaxValue, DateTimeOffset.UtcNow));
+            Assert.Equal(stateDirectory, TrayStatusClient.ResolveDiagnosticsDirectory(stateDirectory, legacyDirectory));
+            File.WriteAllText(statusPath, SupervisorStatus(Environment.ProcessId, DateTimeOffset.UtcNow));
+            File.WriteAllText(Path.Combine(stateDirectory, "supervisor-status.json"), "{}");
+            Assert.Equal(legacyDirectory, TrayStatusClient.ResolveDiagnosticsDirectory(stateDirectory, legacyDirectory));
         }
         finally
         {
