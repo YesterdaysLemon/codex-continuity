@@ -151,6 +151,40 @@ jobs:
             throw "WinGet manifest validation failed with exit code $validationExitCode."
           }
           exit 0
+      - name: Verify cross-PowerShell WinGet reproducibility
+        shell: powershell
+        run: |
+          $productVersion = ([xml](Get-Content CodexContinuity.csproj -Raw)).Project.PropertyGroup.Version
+          $setupHash = (Get-FileHash .\artifacts\install-smoke\CodexContinuity.exe -Algorithm SHA256).Hash
+          .\scripts\write-winget-manifests.ps1 -Version $productVersion -InstallerUrl "https://example.invalid/CodexContinuity-v$productVersion-Setup.exe" -InstallerSha256 $setupHash -ReleaseDate 2026-08-22 -OutputDirectory artifacts/winget-windows-powershell
+          $referenceDirectory = [IO.Path]::GetFullPath('artifacts/winget-smoke')
+          $comparisonDirectory = [IO.Path]::GetFullPath('artifacts/winget-windows-powershell')
+          $referenceFiles = @(Get-ChildItem -LiteralPath $referenceDirectory -File | Sort-Object Name)
+          $comparisonFiles = @(Get-ChildItem -LiteralPath $comparisonDirectory -File | Sort-Object Name)
+          if (Compare-Object $referenceFiles.Name $comparisonFiles.Name) {
+            throw 'WinGet generators produced different file sets across PowerShell runtimes.'
+          }
+          foreach ($referenceFile in $referenceFiles) {
+            $comparisonPath = Join-Path $comparisonDirectory $referenceFile.Name
+            $referenceHash = (Get-FileHash -LiteralPath $referenceFile.FullName -Algorithm SHA256).Hash
+            $comparisonHash = (Get-FileHash -LiteralPath $comparisonPath -Algorithm SHA256).Hash
+            if ($referenceHash -ne $comparisonHash) {
+              throw "WinGet manifest differs across PowerShell runtimes: $($referenceFile.Name)"
+            }
+            $bytes = [IO.File]::ReadAllBytes($comparisonPath)
+            if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+              throw "WinGet manifest contains a UTF-8 BOM: $($referenceFile.Name)"
+            }
+            if ($bytes -contains 0x0D) {
+              throw "WinGet manifest contains a non-canonical carriage return: $($referenceFile.Name)"
+            }
+            if ($bytes.Length -eq 0 -or $bytes[-1] -ne 0x0A) {
+              throw "WinGet manifest is missing its canonical terminal LF: $($referenceFile.Name)"
+            }
+            if ($bytes.Length -ge 2 -and $bytes[-2] -eq 0x0A) {
+              throw "WinGet manifest contains multiple terminal newlines: $($referenceFile.Name)"
+            }
+          }
 
   site:
     runs-on: ubuntu-latest
