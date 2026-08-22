@@ -141,7 +141,7 @@ test("rejects malformed or unconfirmed revisions", async () => {
       secret: "fixture-secret",
       payload: { event: "push", branch: "main", repo: "repo", sha },
       fetchImpl: async () => new Response(
-        JSON.stringify({ ok: true, skipped: true, reason: "wrong_ref\nforged log" }),
+        JSON.stringify({ ok: true, skipped: true, reason: "wrong_ref\nforged_log" }),
         { status: 202 },
       ),
     }),
