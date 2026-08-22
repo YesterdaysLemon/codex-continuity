@@ -284,6 +284,152 @@ public sealed class InstallCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public void TrayRepairIntentRejectsIncompleteChangedOrInvalidSelection()
+    {
+        var state = CreateCoordinator(new FakeInstallPlatform()).Install(
+            CreateSource("version-one"),
+            45123,
+            TrayInstallMode.Disabled).State;
+        Program.ValidateTrayRepairSelection(
+            state,
+            state.InstalledExecutable,
+            state.BinarySha256);
+
+        var missingExecutable = Assert.Throws<InvalidOperationException>(() =>
+            Program.ValidateTrayRepairSelection(state, null, state.BinarySha256));
+        var missingHash = Assert.Throws<InvalidOperationException>(() =>
+            Program.ValidateTrayRepairSelection(state, state.InstalledExecutable, null));
+        var changedPath = Assert.Throws<InvalidOperationException>(() =>
+            Program.ValidateTrayRepairSelection(
+                state,
+                $"{state.InstalledExecutable}.stale",
+                state.BinarySha256));
+        var changedHash = Assert.Throws<InvalidOperationException>(() =>
+            Program.ValidateTrayRepairSelection(
+                state,
+                state.InstalledExecutable,
+                new string('0', 64)));
+        var deferred = Assert.Throws<InvalidOperationException>(() =>
+            Program.ValidateTrayRepairSelection(
+                state with { Lifecycle = InstallLifecycle.DeferredUninstall },
+                state.InstalledExecutable,
+                state.BinarySha256));
+        var unknownLifecycle = Assert.Throws<InvalidOperationException>(() =>
+            Program.ValidateTrayRepairSelection(
+                state with { Lifecycle = (InstallLifecycle)9 },
+                state.InstalledExecutable,
+                state.BinarySha256));
+
+        Assert.Contains("intent is incomplete", missingExecutable.Message);
+        Assert.Contains("intent is incomplete", missingHash.Message);
+        Assert.Contains("selected Continuity build changed", changedPath.Message);
+        Assert.Contains("selected Continuity build changed", changedHash.Message);
+        Assert.Contains("not in an installed lifecycle", deferred.Message);
+        Assert.Contains("not in an installed lifecycle", unknownLifecycle.Message);
+    }
+
+    [Fact]
+    public async Task TrayRepairParsesPinnedSelectionAndStartNow()
+    {
+        var state = CreateCoordinator(new FakeInstallPlatform()).Install(
+            CreateSource("version-one"),
+            45123,
+            TrayInstallMode.Disabled).State;
+        InstallState? installedState = null;
+        var startedNow = false;
+
+        var exitCode = await Program.RepairAsync(
+            [
+                "repair",
+                "--start-now",
+                "--expected-installed-executable",
+                state.InstalledExecutable,
+                "--expected-installed-sha256",
+                state.BinarySha256,
+            ],
+            root,
+            () => state,
+            (loadedState, startNow) =>
+            {
+                installedState = loadedState;
+                startedNow = startNow;
+                return Task.FromResult(17);
+            });
+
+        Assert.Equal(17, exitCode);
+        Assert.Equal(state, installedState);
+        Assert.True(startedNow);
+    }
+
+    [Theory]
+    [InlineData("path")]
+    [InlineData("hash")]
+    public async Task TrayRepairRevalidatesPinnedSelectionAfterWaitingForTheLock(
+        string changedField)
+    {
+        var state = CreateCoordinator(new FakeInstallPlatform()).Install(
+            CreateSource("version-one"),
+            45123,
+            TrayInstallMode.Disabled).State;
+        var store = new InstallStateStore(ContinuityPaths.InstallStateFile(root));
+        var installCalled = false;
+        var heldLock = ContinuityLifecycleLock.Acquire(root);
+        var repairTask = Task.Run(() => Program.RepairAsync(
+            [
+                "repair",
+                "--start-now",
+                "--expected-installed-executable",
+                state.InstalledExecutable,
+                "--expected-installed-sha256",
+                state.BinarySha256,
+            ],
+            root,
+            store.Load,
+            (_, _) =>
+            {
+                installCalled = true;
+                return Task.FromResult(0);
+            }));
+        try
+        {
+            await Task.Delay(100);
+            Assert.False(repairTask.IsCompleted);
+            store.Save(changedField switch
+            {
+                "path" => state with
+                {
+                    InstalledExecutable = $"{state.InstalledExecutable}.replacement",
+                },
+                "hash" => state with { BinarySha256 = new string('0', 64) },
+                _ => throw new ArgumentOutOfRangeException(nameof(changedField)),
+            });
+        }
+        finally
+        {
+            heldLock.Dispose();
+        }
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => repairTask);
+
+        Assert.Contains("selected Continuity build changed", exception.Message);
+        Assert.False(installCalled);
+    }
+
+    [Theory]
+    [InlineData("--expected-installed-executable")]
+    [InlineData("--expected-installed-sha256")]
+    public async Task TrayRepairRejectsAnExpectedSelectionFlagWithoutAValue(string flag)
+    {
+        var exception = await Assert.ThrowsAsync<ArgumentException>(() => Program.RepairAsync(
+            ["repair", flag],
+            root,
+            () => throw new InvalidOperationException("State must not load."),
+            (_, _) => throw new InvalidOperationException("Install must not run.")));
+
+        Assert.Contains($"{flag} requires a value", exception.Message);
+    }
+
+    [Fact]
     public void DeferredReconnectRestoreDoesNotClaimUrlChangedAfterInstall()
     {
         var platform = new FakeInstallPlatform();
