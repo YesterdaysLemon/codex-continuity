@@ -29,16 +29,34 @@ $identifier = "YesterdaysLemon.CodexContinuity"
 $schemaVersion = "1.12.0"
 $sha256 = $InstallerSha256.ToUpperInvariant()
 
-@"
+function Write-Utf8NoBomFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Content
+    )
+
+    $normalizedContent = $Content -replace "`r`n", "`n"
+    $normalizedContent = ($normalizedContent -replace "`r", "`n").TrimEnd("`n") + "`n"
+    $encoding = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($Path, $normalizedContent, $encoding)
+}
+
+$versionManifest = @"
 # yaml-language-server: `$schema=https://aka.ms/winget-manifest.version.$schemaVersion.schema.json
 PackageIdentifier: $identifier
 PackageVersion: $Version
 DefaultLocale: en-US
 ManifestType: version
 ManifestVersion: $schemaVersion
-"@ | Set-Content -LiteralPath (Join-Path $resolvedOutput "$identifier.yaml") -Encoding utf8
+"@
+Write-Utf8NoBomFile `
+    -Path (Join-Path $resolvedOutput "$identifier.yaml") `
+    -Content $versionManifest
 
-@"
+$localeManifest = @"
 # yaml-language-server: `$schema=https://aka.ms/winget-manifest.defaultLocale.$schemaVersion.schema.json
 PackageIdentifier: $identifier
 PackageVersion: $Version
@@ -64,9 +82,12 @@ Tags:
 ReleaseNotesUrl: https://github.com/YesterdaysLemon/codex-continuity/releases/tag/v$Version
 ManifestType: defaultLocale
 ManifestVersion: $schemaVersion
-"@ | Set-Content -LiteralPath (Join-Path $resolvedOutput "$identifier.locale.en-US.yaml") -Encoding utf8
+"@
+Write-Utf8NoBomFile `
+    -Path (Join-Path $resolvedOutput "$identifier.locale.en-US.yaml") `
+    -Content $localeManifest
 
-@"
+$installerManifest = @"
 # yaml-language-server: `$schema=https://aka.ms/winget-manifest.installer.$schemaVersion.schema.json
 PackageIdentifier: $identifier
 PackageVersion: $Version
@@ -94,6 +115,9 @@ Installers:
     RepairBehavior: installer
 ManifestType: installer
 ManifestVersion: $schemaVersion
-"@ | Set-Content -LiteralPath (Join-Path $resolvedOutput "$identifier.installer.yaml") -Encoding utf8
+"@
+Write-Utf8NoBomFile `
+    -Path (Join-Path $resolvedOutput "$identifier.installer.yaml") `
+    -Content $installerManifest
 
 Write-Host "Generated WinGet review manifests at $resolvedOutput"
