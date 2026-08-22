@@ -1,4 +1,5 @@
 using CodexContinuity.Tray;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
 using Xunit;
@@ -62,6 +63,10 @@ public sealed class TrayStatusParserTests
 
         Assert.Equal(ContinuityHealth.Degraded, status.Health);
     }
+
+    [Theory, InlineData(0, false), InlineData(1, false), InlineData(2, true)]
+    public void ShowsRecoveryOnlyWhileUnavailable(int health, bool expected) =>
+        Assert.Equal(expected, TrayStatusPresentation.ShowRecovery((ContinuityHealth)health));
 
     [Fact]
     public void ParsesObservedStagedAndAppliedUpdateCounts()
@@ -133,6 +138,23 @@ public sealed class TrayStatusParserTests
             TrayStatusPresentation.CommandFailure(
                 "Update check", new TrayCommandResult(exitCode, output, error)));
 
+    [Fact]
+    public async Task MutationPresenterContainsLauncherFailureAndRestoresActions()
+    {
+        var enabledStates = new List<bool>();
+        var feedback = string.Empty;
+        await new TrayMutationPresenter().RunAsync(
+            "Checkingâ€¦",
+            "Update check",
+            _ => throw new Win32Exception("launch failed"),
+            CancellationToken.None,
+            enabledStates.Add,
+            text => feedback = text,
+            () => throw new InvalidOperationException("Refresh must not run."));
+        Assert.Equal([false, true], enabledStates);
+        Assert.Equal("Update check failed: launch failed", feedback);
+    }
+
     [Theory]
     [InlineData("[]")]
     [InlineData("{\"observedCount\":\"many\"}")]
@@ -201,12 +223,7 @@ public sealed class TrayStatusParserTests
             File.WriteAllText(bundledExecutable, "bundled");
             File.WriteAllText(stableExecutable, "stable");
             File.WriteAllText(installedExecutable, "versioned");
-            File.WriteAllText(statePath, JsonSerializer.Serialize(new
-            {
-                installedExecutable,
-                binarySha256 = "AA",
-                lifecycle = 0,
-            }));
+            WriteInstallState(statePath, installedExecutable, "AA", lifecycle: 0);
 
             Assert.Equal(
                 new TrayMutationTarget(
@@ -227,12 +244,7 @@ public sealed class TrayStatusParserTests
                 TrayStatusClient.ResolveMutationTarget(
                     applicationDirectory, stateDirectory, legacyDirectory));
 
-            File.WriteAllText(statePath, JsonSerializer.Serialize(new
-            {
-                installedExecutable = stableExecutable,
-                binarySha256 = "BB",
-                lifecycle = 0,
-            }));
+            WriteInstallState(statePath, stableExecutable, "BB", lifecycle: 0);
             Assert.Equal(
                 new TrayMutationTarget(
                     Path.GetFullPath(bundledExecutable),
@@ -242,12 +254,7 @@ public sealed class TrayStatusParserTests
                 TrayStatusClient.ResolveMutationTarget(
                     applicationDirectory, stateDirectory, legacyDirectory));
 
-            File.WriteAllText(statePath, JsonSerializer.Serialize(new
-            {
-                installedExecutable = stableExecutable,
-                binarySha256 = "BB",
-                lifecycle = 1,
-            }));
+            WriteInstallState(statePath, stableExecutable, "BB", lifecycle: 1);
             var deferred = TrayStatusClient.ResolveMutationTarget(
                 applicationDirectory, stateDirectory, legacyDirectory);
             Assert.False(deferred.Available);
@@ -282,13 +289,11 @@ public sealed class TrayStatusParserTests
         Directory.CreateDirectory(Path.GetDirectoryName(installedExecutable)!);
         Directory.CreateDirectory(applicationDirectory);
         File.WriteAllText(installedExecutable, "versioned");
-        File.WriteAllText(Path.Combine(stateDirectory, "install-state.json"),
-            JsonSerializer.Serialize(new
-            {
-                installedExecutable,
-                binarySha256 = "ABC123",
-                lifecycle = 0,
-            }));
+        WriteInstallState(
+            Path.Combine(stateDirectory, "install-state.json"),
+            installedExecutable,
+            "ABC123",
+            lifecycle: 0);
         var calls = new List<string>();
         var firstEntered = new TaskCompletionSource<bool>(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -416,4 +421,12 @@ public sealed class TrayStatusParserTests
             File.Delete(recordPath);
         }
     }
+
+    private static void WriteInstallState(
+        string path,
+        string installedExecutable,
+        string binarySha256,
+        int lifecycle) => File.WriteAllText(
+            path,
+            JsonSerializer.Serialize(new { installedExecutable, binarySha256, lifecycle }));
 }

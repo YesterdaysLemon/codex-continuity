@@ -37,7 +37,7 @@ internal sealed class ContinuityTrayContext : ApplicationContext
     private readonly TrayStatusClient statusClient;
     private readonly Icon healthyIcon;
     private bool refreshInProgress;
-    private bool mutationInProgress;
+    private readonly TrayMutationPresenter mutationPresenter = new();
 
     internal ContinuityTrayContext()
     {
@@ -128,7 +128,7 @@ internal sealed class ContinuityTrayContext : ApplicationContext
             };
             var state = status.Health.ToString().ToLowerInvariant();
             notifyIcon.Text = $"Codex Continuity — {state} — {status.ActiveAgentCount} active agents";
-            recoveryItem.Visible = status.Health == ContinuityHealth.Unavailable;
+            recoveryItem.Visible = TrayStatusPresentation.ShowRecovery(status.Health);
             var update = await statusClient.ReadUpdateAsync(shutdown.Token);
             updateItem.Text = TrayStatusPresentation.UpdateCounts(update);
             updateItem.Enabled = update.LatestVersion is not null;
@@ -161,53 +161,24 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         statusClient.RestartSupervisorAsync,
         TimeSpan.FromSeconds(2));
 
-    private async Task RunMutationAsync(
+    private Task RunMutationAsync(
         ToolStripMenuItem feedbackItem,
         string pendingText,
         string action,
         Func<CancellationToken, Task<TrayCommandResult>> command,
-        TimeSpan? settleDelay = null)
-    {
-        if (mutationInProgress)
-        {
-            return;
-        }
-        mutationInProgress = true;
-        checkForUpdatesItem.Enabled = false;
-        recoveryItem.Enabled = false;
-        feedbackItem.Text = pendingText;
-        try
-        {
-            var result = await command(shutdown.Token);
-            if (result.ExitCode != 0)
+        TimeSpan? settleDelay = null) => mutationPresenter.RunAsync(
+            pendingText,
+            action,
+            command,
+            shutdown.Token,
+            enabled =>
             {
-                feedbackItem.Text = TrayStatusPresentation.CommandFailure(action, result);
-                return;
-            }
-            if (settleDelay is { } delay)
-            {
-                await Task.Delay(delay, shutdown.Token);
-            }
-            await RefreshAsync();
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (Exception exception) when (
-            exception is IOException or UnauthorizedAccessException or
-            InvalidOperationException or Win32Exception)
-        {
-            feedbackItem.Text = TrayStatusPresentation.CommandFailure(
-                action,
-                new TrayCommandResult(-1, string.Empty, exception.Message));
-        }
-        finally
-        {
-            mutationInProgress = false;
-            checkForUpdatesItem.Enabled = true;
-            recoveryItem.Enabled = true;
-        }
-    }
+                checkForUpdatesItem.Enabled = enabled;
+                recoveryItem.Enabled = enabled;
+            },
+            text => feedbackItem.Text = text,
+            RefreshAsync,
+            settleDelay);
 
     private static void OpenDiagnostics()
     {
@@ -244,5 +215,59 @@ internal sealed class ContinuityTrayContext : ApplicationContext
             shutdown.Dispose();
         }
         base.Dispose(disposing);
+    }
+}
+
+internal sealed class TrayMutationPresenter
+{
+    private bool mutationInProgress;
+
+    internal async Task RunAsync(
+        string pendingText,
+        string action,
+        Func<CancellationToken, Task<TrayCommandResult>> command,
+        CancellationToken cancellationToken,
+        Action<bool> setActionsEnabled,
+        Action<string> setFeedback,
+        Func<Task> refreshAsync,
+        TimeSpan? settleDelay = null)
+    {
+        if (mutationInProgress)
+        {
+            return;
+        }
+        mutationInProgress = true;
+        setActionsEnabled(false);
+        setFeedback(pendingText);
+        try
+        {
+            var result = await command(cancellationToken);
+            if (result.ExitCode != 0)
+            {
+                setFeedback(TrayStatusPresentation.CommandFailure(action, result));
+                return;
+            }
+            if (settleDelay is { } delay)
+            {
+                await Task.Delay(delay, cancellationToken);
+            }
+            await refreshAsync();
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or
+            InvalidOperationException or Win32Exception)
+        {
+            setFeedback(TrayStatusPresentation.CommandFailure(
+                action,
+                new TrayCommandResult(-1, string.Empty, exception.Message)));
+        }
+        finally
+        {
+            mutationInProgress = false;
+            setActionsEnabled(true);
+        }
     }
 }

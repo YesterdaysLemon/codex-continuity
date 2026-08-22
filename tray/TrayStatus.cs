@@ -65,6 +65,8 @@ internal sealed record ContinuityUpdateSnapshot(
 
 internal static class TrayStatusPresentation
 {
+    internal static bool ShowRecovery(ContinuityHealth health) => health == ContinuityHealth.Unavailable;
+
     internal static string UpdateCounts(ContinuityUpdateSnapshot update) =>
         $"Updates: {update.ObservedCount} observed / {update.StagedCount} staged / " +
         $"{update.AppliedCount} applied";
