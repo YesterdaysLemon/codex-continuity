@@ -32,8 +32,11 @@ jobs:
         run: .\scripts\build-icons.ps1 -Check -ExecutablePath .\tray\bin\Release\net10.0-windows\CodexContinuity.Tray.exe -ExpectedDescription 'Codex Continuity Tray' -ExpectedOriginalFilename 'CodexContinuity.Tray.dll'
       - shell: pwsh
         run: .\scripts\build-social-card.ps1 -Check
-      - shell: pwsh
-        run: .\scripts\sign-release.ps1 -Paths .\bin\Release\net10.0-windows\CodexContinuity.exe -VerifyOnly -AllowUnsigned
+      - name: Verify unsigned signing policy
+        shell: pwsh
+        run: >-
+          .\scripts\test-sign-release-policy.ps1
+          -Paths .\bin\Release\net10.0-windows\CodexContinuity.exe,.\tray\bin\Release\net10.0-windows\CodexContinuity.Tray.exe
       - shell: pwsh
         run: |
           $plan = .\install.ps1 -Plan -Json | ConvertFrom-Json

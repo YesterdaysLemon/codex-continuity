@@ -5,7 +5,9 @@ param(
 
     [switch]$VerifyOnly,
 
-    [switch]$AllowUnsigned
+    [switch]$RequireUnsigned,
+
+    [string]$ExpectedThumbprint = $env:CONTINUITY_SIGNING_EXPECTED_THUMBPRINT
 )
 
 Set-StrictMode -Version Latest
@@ -14,6 +16,36 @@ $ErrorActionPreference = "Stop"
 $resolvedPaths = @($Paths | ForEach-Object { (Resolve-Path -LiteralPath $_).Path })
 if ($resolvedPaths.Count -eq 0) {
     throw "At least one release executable is required."
+}
+
+$normalizedExpectedThumbprint = $null
+if (-not [string]::IsNullOrWhiteSpace($ExpectedThumbprint)) {
+    $normalizedExpectedThumbprint = ($ExpectedThumbprint -replace "\s", "").ToUpperInvariant()
+    if ($normalizedExpectedThumbprint -notmatch "^[0-9A-F]{40}$") {
+        throw "The expected Authenticode certificate thumbprint must contain exactly 40 hexadecimal characters."
+    }
+}
+
+if ($RequireUnsigned -and -not $VerifyOnly) {
+    throw "RequireUnsigned can only be used with VerifyOnly."
+}
+
+$certificateBase64 = $env:CONTINUITY_SIGNING_CERTIFICATE_BASE64
+$certificatePassword = $env:CONTINUITY_SIGNING_CERTIFICATE_PASSWORD
+if (-not $VerifyOnly) {
+    $missingConfiguration = @()
+    if ([string]::IsNullOrWhiteSpace($certificateBase64)) {
+        $missingConfiguration += "certificate"
+    }
+    if ([string]::IsNullOrWhiteSpace($certificatePassword)) {
+        $missingConfiguration += "password"
+    }
+    if ($null -eq $normalizedExpectedThumbprint) {
+        $missingConfiguration += "expected thumbprint"
+    }
+    if ($missingConfiguration.Count -gt 0) {
+        throw "Signing configuration is incomplete. Missing: $($missingConfiguration -join ', ')."
+    }
 }
 
 $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
@@ -28,13 +60,6 @@ if ($null -eq $signTool -and -not $VerifyOnly) {
 $certificatePath = $null
 try {
     if (-not $VerifyOnly) {
-        $certificateBase64 = $env:CONTINUITY_SIGNING_CERTIFICATE_BASE64
-        $certificatePassword = $env:CONTINUITY_SIGNING_CERTIFICATE_PASSWORD
-        if ([string]::IsNullOrWhiteSpace($certificateBase64) -or
-            [string]::IsNullOrWhiteSpace($certificatePassword)) {
-            throw "Signing is enabled but the certificate or password secret is missing."
-        }
-
         $certificatePath = Join-Path ([System.IO.Path]::GetTempPath()) (
             "codex-continuity-signing-" + [System.Guid]::NewGuid().ToString("N") + ".pfx")
         [System.IO.File]::WriteAllBytes(
@@ -53,19 +78,41 @@ try {
         }
     }
 
-    $expectedThumbprint = $null
-    foreach ($path in $resolvedPaths) {
-        $signature = Get-AuthenticodeSignature -LiteralPath $path
-        if ($signature.Status -eq [System.Management.Automation.SignatureStatus]::NotSigned -and
-            $AllowUnsigned) {
-            Write-Warning "Unsigned development artifact: $path"
-            continue
+    $signatures = @($resolvedPaths | ForEach-Object {
+            [PSCustomObject]@{
+                Path      = $_
+                Signature = Get-AuthenticodeSignature -LiteralPath $_
+            }
+        })
+    if ($RequireUnsigned) {
+        $signedArtifact = $signatures |
+            Where-Object { $_.Signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned } |
+            Select-Object -First 1
+        if ($null -ne $signedArtifact) {
+            throw "Unsigned release mode found an Authenticode signature on $($signedArtifact.Path)."
         }
+        foreach ($artifact in $signatures) {
+            Write-Warning "Verified unsigned development artifact: $($artifact.Path)"
+        }
+        return
+    }
+
+    $expectedThumbprint = $null
+    foreach ($artifact in $signatures) {
+        $path = $artifact.Path
+        $signature = $artifact.Signature
         if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
             $null -eq $signature.SignerCertificate) {
             throw "Authenticode verification failed for ${path}: $($signature.Status)"
         }
-        $thumbprint = $signature.SignerCertificate.Thumbprint
+        if ($null -eq $signature.TimeStamperCertificate) {
+            throw "Authenticode signature is missing its RFC 3161 timestamp for $path."
+        }
+        $thumbprint = $signature.SignerCertificate.Thumbprint.ToUpperInvariant()
+        if ($null -ne $normalizedExpectedThumbprint -and
+            $thumbprint -ne $normalizedExpectedThumbprint) {
+            throw "Authenticode signer thumbprint did not match the configured publisher for $path."
+        }
         if ($null -eq $expectedThumbprint) {
             $expectedThumbprint = $thumbprint
         }

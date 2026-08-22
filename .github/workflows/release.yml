@@ -32,7 +32,8 @@ jobs:
       RELEASE_REF: ${{ inputs.release_ref || github.ref }}
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
       RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
-      SIGNING_CONFIGURED: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 != '' }}
+      SIGNING_REQUESTED: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 != '' || secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD != '' || vars.WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT != '' }}
+      CONTINUITY_SIGNING_EXPECTED_THUMBPRINT: ${{ vars.WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -83,7 +84,7 @@ jobs:
           -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
           --output publish-tray
       - name: Sign release executables
-        if: env.SIGNING_CONFIGURED == 'true'
+        if: env.SIGNING_REQUESTED == 'true'
         shell: pwsh
         env:
           CONTINUITY_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
@@ -92,11 +93,11 @@ jobs:
       - name: Verify release signing policy
         shell: pwsh
         run: |
-          if ($env:SIGNING_CONFIGURED -eq 'true') {
+          if ($env:SIGNING_REQUESTED -eq 'true') {
             .\scripts\sign-release.ps1 -Paths publish/CodexContinuity.exe,publish-tray/CodexContinuity.Tray.exe -VerifyOnly
           } else {
             Write-Warning 'Authenticode certificate is not configured; release artifacts will be unsigned.'
-            .\scripts\sign-release.ps1 -Paths publish/CodexContinuity.exe,publish-tray/CodexContinuity.Tray.exe -VerifyOnly -AllowUnsigned
+            .\scripts\sign-release.ps1 -Paths publish/CodexContinuity.exe,publish-tray/CodexContinuity.Tray.exe -VerifyOnly -RequireUnsigned
           }
       - name: Package release
         shell: pwsh
@@ -138,6 +139,7 @@ jobs:
             release/*.exe
             release/*.zip
             release/*.sha256
+            install.ps1
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
