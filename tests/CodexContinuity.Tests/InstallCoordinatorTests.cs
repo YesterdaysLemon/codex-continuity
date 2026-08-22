@@ -1,5 +1,6 @@
 using CodexContinuity;
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using Xunit;
 
@@ -96,6 +97,177 @@ public sealed class InstallCoordinatorTests : IDisposable
         Assert.Equal(
             "ws://127.0.0.1:40000",
             platform.Environment[InstallCoordinator.AppServerUrlVariable]);
+    }
+
+    [Fact]
+    public void AutomaticInstallCannotCreateOrReviveInstalledState()
+    {
+        var platform = new FakeInstallPlatform();
+        var coordinator = CreateCoordinator(platform);
+        var source = CreateSource("automatic-version");
+
+        var missingState = Assert.Throws<InvalidOperationException>(() => coordinator.Install(
+            source,
+            45123,
+            TrayInstallMode.Disabled,
+            ExistingEndpointOwnership.NotReady,
+            InstallIntent.AutomaticUpdate));
+        Assert.Contains("cannot revive an uninstall", missingState.Message);
+        Assert.False(File.Exists(ContinuityPaths.InstallStateFile(root)));
+
+        coordinator.Install(source, 45123, TrayInstallMode.Disabled);
+        coordinator.Uninstall(UninstallReconnectPolicy.PreserveUntilNextSignIn);
+        var deferredState = Assert.Throws<InvalidOperationException>(() => coordinator.Install(
+            source,
+            45123,
+            TrayInstallMode.Disabled,
+            ExistingEndpointOwnership.NotReady,
+            InstallIntent.AutomaticUpdate));
+
+        Assert.Contains("cannot revive an uninstall", deferredState.Message);
+        Assert.Equal(
+            InstallLifecycle.DeferredUninstall,
+            new InstallStateStore(ContinuityPaths.InstallStateFile(root)).Load()!.Lifecycle);
+    }
+
+    [Fact]
+    public void AutomaticInstallPinsThePreviouslyCheckedInstalledArtifact()
+    {
+        var platform = new FakeInstallPlatform();
+        var coordinator = CreateCoordinator(platform);
+        var installed = coordinator.Install(
+            CreateSource("installed-version"),
+            45123,
+            TrayInstallMode.Disabled).State;
+        var candidate = CreateSource("candidate-version");
+
+        var staleState = Assert.Throws<InvalidOperationException>(() => coordinator.Install(
+            candidate,
+            45123,
+            TrayInstallMode.Disabled,
+            ExistingEndpointOwnership.NotReady,
+            InstallIntent.AutomaticUpdate,
+            new string('0', 64)));
+        Assert.Contains("changed after the automatic update check", staleState.Message);
+
+        File.WriteAllText(installed.InstalledExecutable, "tampered-version");
+        var tamperedArtifact = Assert.Throws<InvalidOperationException>(() => coordinator.Install(
+            candidate,
+            45123,
+            TrayInstallMode.Disabled,
+            ExistingEndpointOwnership.NotReady,
+            InstallIntent.AutomaticUpdate,
+            installed.BinarySha256));
+
+        Assert.Contains("no longer matches its persisted SHA-256", tamperedArtifact.Message);
+        Assert.Equal(
+            installed,
+            new InstallStateStore(ContinuityPaths.InstallStateFile(root)).Load());
+    }
+
+    [Fact]
+    public void CorrectlyPinnedAutomaticInstallStagesTheCandidateAndRollback()
+    {
+        var platform = new FakeInstallPlatform();
+        var coordinator = CreateCoordinator(platform);
+        var installed = coordinator.Install(
+            CreateSource("installed-version"),
+            45123,
+            TrayInstallMode.Disabled).State;
+        var candidate = CreateSource("automatic-candidate");
+
+        var outcome = coordinator.Install(
+            candidate,
+            installed.Port,
+            TrayInstallMode.Disabled,
+            ExistingEndpointOwnership.NotReady,
+            InstallIntent.AutomaticUpdate,
+            installed.BinarySha256);
+
+        Assert.Equal(new InstallOutcome(outcome.State, true, true), outcome);
+        Assert.Equal(installed.InstalledExecutable, outcome.State.PreviousInstalledExecutable);
+        Assert.Equal(
+            Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(candidate))).ToLowerInvariant(),
+            outcome.State.BinarySha256);
+        Assert.Equal(
+            outcome.State,
+            new InstallStateStore(ContinuityPaths.InstallStateFile(root)).Load());
+    }
+
+    [Fact]
+    public void AutomaticInstallRejectsAStalePortOrTrayPlanForTheSameBinary()
+    {
+        var platform = new FakeInstallPlatform();
+        var coordinator = CreateCoordinator(platform);
+        var source = CreateBundleSource("same-version");
+        var checkedState = coordinator.Install(
+            source,
+            45123,
+            TrayInstallMode.Disabled).State;
+        var manuallyChanged = coordinator.Install(
+            source,
+            45124,
+            TrayInstallMode.Enabled).State;
+        Assert.Equal(checkedState.BinarySha256, manuallyChanged.BinarySha256);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => coordinator.Install(
+            CreateSource("automatic-candidate"),
+            checkedState.Port,
+            TrayInstallMode.Disabled,
+            ExistingEndpointOwnership.NotReady,
+            InstallIntent.AutomaticUpdate,
+            checkedState.BinarySha256));
+
+        Assert.Contains("port or tray mode changed", exception.Message);
+        Assert.Equal(
+            manuallyChanged,
+            new InstallStateStore(ContinuityPaths.InstallStateFile(root)).Load());
+    }
+
+    [Theory]
+    [InlineData("install")]
+    [InlineData("uninstall")]
+    [InlineData("rollback")]
+    public async Task LifecycleMutationEntrypointsWaitForTheSharedLock(string operation)
+    {
+        var platform = new FakeInstallPlatform();
+        var coordinator = CreateCoordinator(platform);
+        var source = CreateSource("version-one");
+        if (operation is "uninstall" or "rollback")
+        {
+            coordinator.Install(source, 45123, TrayInstallMode.Disabled);
+        }
+        if (operation == "rollback")
+        {
+            coordinator.Install(CreateSource("version-two"), 45123, TrayInstallMode.Disabled);
+        }
+
+        Action mutation = operation switch
+        {
+            "install" => () => coordinator.Install(source, 45123, TrayInstallMode.Disabled),
+            "uninstall" => () => coordinator.Uninstall(),
+            "rollback" => () => coordinator.Rollback(),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        };
+        var heldLock = ContinuityLifecycleLock.Acquire(root);
+        var started = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var mutationTask = Task.Run(() =>
+        {
+            started.SetResult();
+            mutation();
+        });
+        try
+        {
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await Task.Delay(100);
+            Assert.False(mutationTask.IsCompleted);
+        }
+        finally
+        {
+            heldLock.Dispose();
+        }
+        await mutationTask.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     [Fact]

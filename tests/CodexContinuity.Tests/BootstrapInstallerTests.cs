@@ -33,6 +33,33 @@ public sealed class BootstrapInstallerTests
     }
 
     [Fact]
+    public void AutomaticSetupMarksTheChildInstallIntent()
+    {
+        var digest = new string('a', 64);
+        var arguments = BootstrapInstaller.BuildInstallArguments(
+            45124,
+            TrayInstallMode.Enabled,
+            startNow: false,
+            InstallIntent.AutomaticUpdate,
+            digest);
+
+        Assert.Equal(
+            [
+                "install",
+                "--port",
+                "45124",
+                "--automatic-update",
+                "--automatic-update-from-sha256",
+                digest,
+            ],
+            arguments);
+        Assert.Equal(
+            InstallIntent.AutomaticUpdate,
+            Program.ResolveInstallIntent([.. arguments]));
+        Assert.Equal(digest, Program.ResolveAutomaticUpdateSha256([.. arguments]));
+    }
+
+    [Fact]
     public void ResolvesVersionedStableReleaseAssets()
     {
         var release = BootstrapInstaller.ResolveRelease();

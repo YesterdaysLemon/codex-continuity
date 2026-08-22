@@ -35,7 +35,9 @@ internal static class Program
                     args.Contains("--start-now", StringComparer.OrdinalIgnoreCase),
                     args.Contains("--no-tray", StringComparer.OrdinalIgnoreCase)
                         ? TrayInstallMode.Disabled
-                        : TrayInstallMode.Enabled),
+                        : TrayInstallMode.Enabled,
+                    ResolveInstallIntent(args),
+                    ResolveAutomaticUpdateSha256(args)),
                 "repair" => await RepairAsync(
                     args.Contains("--start-now", StringComparer.OrdinalIgnoreCase)),
                 "uninstall" => await UninstallAsync(),
@@ -77,6 +79,14 @@ internal static class Program
                 ? "setup"
                 : firstArgument ?? "help";
     }
+
+    internal static InstallIntent ResolveInstallIntent(string[] args) =>
+        args.Contains("--automatic-update", StringComparer.OrdinalIgnoreCase)
+            ? InstallIntent.AutomaticUpdate
+            : InstallIntent.Interactive;
+
+    internal static string? ResolveAutomaticUpdateSha256(string[] args) =>
+        ArgumentValue(args, "--automatic-update-from-sha256");
 
     private static int PrintHelp()
     {
@@ -131,16 +141,19 @@ internal static class Program
     }
 
     private static string? DownloadBaseUrl(string[] args)
+        => ArgumentValue(args, "--download-base-url");
+
+    private static string? ArgumentValue(string[] args, string name)
     {
         for (var index = 0; index < args.Length; index++)
         {
-            if (!args[index].Equals("--download-base-url", StringComparison.OrdinalIgnoreCase))
+            if (!args[index].Equals(name, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
             if (index + 1 >= args.Length)
             {
-                throw new ArgumentException("--download-base-url requires a URL.");
+                throw new ArgumentException($"{name} requires a value.");
             }
             return args[index + 1];
         }
@@ -399,7 +412,10 @@ internal static class Program
     private static async Task<int> InstallAsync(
         int port,
         bool startNow,
-        TrayInstallMode trayInstallMode)
+        TrayInstallMode trayInstallMode,
+        InstallIntent intent = InstallIntent.Interactive,
+        string? expectedInstalledSha256 = null,
+        LifecycleLockOwnership lockOwnership = LifecycleLockOwnership.Acquire)
     {
         var executable = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(executable) ||
@@ -411,6 +427,9 @@ internal static class Program
         }
 
         var stateDirectory = ContinuityPaths.StateDirectory;
+        using var lifecycleLock = lockOwnership == LifecycleLockOwnership.Acquire
+            ? ContinuityLifecycleLock.Acquire(stateDirectory)
+            : null;
         var existingState = LoadInstallState();
         await EnsurePortChangeIsSafeAsync(
             existingState?.Port,
@@ -426,7 +445,14 @@ internal static class Program
                     ? ExistingEndpointOwnership.Legacy
                     : ExistingEndpointOwnership.Foreign;
         }
-        var outcome = coordinator.Install(executable, port, trayInstallMode, endpointOwnership);
+        var outcome = coordinator.Install(
+            executable,
+            port,
+            trayInstallMode,
+            endpointOwnership,
+            intent,
+            expectedInstalledSha256,
+            LifecycleLockOwnership.AlreadyHeld);
         var state = outcome.State;
         Console.WriteLine(
             $"Configured future Codex desktop launches to use {state.AppServerUrl.AppliedValue}.");
@@ -503,6 +529,8 @@ internal static class Program
 
     private static async Task<int> UninstallAsync()
     {
+        using var lifecycleLock = ContinuityLifecycleLock.Acquire(
+            ContinuityPaths.StateDirectory);
         var coordinator = CreateInstallCoordinator(ContinuityPaths.StateDirectory);
         var installState = LoadInstallState();
         var legacyInstalledPort = installState is null
@@ -517,7 +545,9 @@ internal static class Program
             configuredUrl,
             port => IsManagedEndpointReadyAsync(port),
             port => IsReadyAsync(port, TimeSpan.FromSeconds(1)));
-        var removed = coordinator.Uninstall(reconnectPolicy);
+        var removed = coordinator.Uninstall(
+            reconnectPolicy,
+            LifecycleLockOwnership.AlreadyHeld);
         if (!removed)
         {
             Console.WriteLine(
@@ -558,6 +588,8 @@ internal static class Program
 
     private static async Task<int> RepairAsync(bool startNow)
     {
+        using var lifecycleLock = ContinuityLifecycleLock.Acquire(
+            ContinuityPaths.StateDirectory);
         var state = LoadInstallState()
             ?? throw new InvalidOperationException("No installed Continuity state is available.");
         return await InstallAsync(
@@ -565,7 +597,8 @@ internal static class Program
             startNow,
             state.InstalledTrayExecutable is null
                 ? TrayInstallMode.Disabled
-                : TrayInstallMode.Enabled);
+                : TrayInstallMode.Enabled,
+            lockOwnership: LifecycleLockOwnership.AlreadyHeld);
     }
 
     private static int Rollback()

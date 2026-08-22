@@ -98,7 +98,9 @@ internal static partial class BootstrapInstaller
             await DownloadAsync(release.ArchiveUrl, archivePath, cancellationToken);
             await DownloadAsync(release.ChecksumUrl, checksumPath, cancellationToken);
 
-            var expectedHash = ParseSha256(await File.ReadAllTextAsync(checksumPath));
+            var expectedHash = ParseSha256(await File.ReadAllTextAsync(
+                checksumPath,
+                cancellationToken));
             await VerifySha256Async(archivePath, expectedHash);
             Report(quiet, "Release checksum verified.");
 
@@ -153,7 +155,11 @@ internal static partial class BootstrapInstaller
             var installArguments = BuildInstallArguments(
                 port,
                 trayInstallMode,
-                startNow);
+                startNow,
+                automaticUpdateSource is null
+                    ? InstallIntent.Interactive
+                    : InstallIntent.AutomaticUpdate,
+                automaticUpdateSource?.Sha256);
             var installExitCode = await RunChildAsync(
                 supervisor,
                 installArguments,
@@ -176,7 +182,9 @@ internal static partial class BootstrapInstaller
     internal static List<string> BuildInstallArguments(
         int port,
         TrayInstallMode trayInstallMode,
-        bool startNow)
+        bool startNow,
+        InstallIntent intent = InstallIntent.Interactive,
+        string? expectedInstalledSha256 = null)
     {
         LoopbackEndpoint.ValidatePort(port);
         var arguments = new List<string> { "install", "--port", port.ToString() };
@@ -187,6 +195,19 @@ internal static partial class BootstrapInstaller
         if (trayInstallMode == TrayInstallMode.Disabled)
         {
             arguments.Add("--no-tray");
+        }
+        if (intent == InstallIntent.AutomaticUpdate)
+        {
+            if (expectedInstalledSha256?.Length != 64 ||
+                !expectedInstalledSha256.All(Uri.IsHexDigit))
+            {
+                throw new ArgumentException(
+                    "Automatic update install arguments require an expected SHA-256 digest.",
+                    nameof(expectedInstalledSha256));
+            }
+            arguments.Add("--automatic-update");
+            arguments.Add("--automatic-update-from-sha256");
+            arguments.Add(expectedInstalledSha256.ToLowerInvariant());
         }
         return arguments;
     }
