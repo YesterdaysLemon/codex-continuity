@@ -19,6 +19,7 @@ jobs:
     concurrency:
       group: codex-continuity-production-site
       cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@v6
         with:
