@@ -1113,9 +1113,9 @@ internal static class Program
     };
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
-    private sealed record ThreadSummary(string Id, string? Name, string Status);
+    internal sealed record ThreadSummary(string Id, string? Name, string Status);
 
-    private sealed class RpcClient : IAsyncDisposable
+    internal sealed class RpcClient : IAsyncDisposable
     {
         private readonly ClientWebSocket socket = new();
         private long nextId;
@@ -1152,42 +1152,81 @@ internal static class Program
             return client;
         }
 
-        public async Task<List<ThreadSummary>> ListThreadsAsync()
+        public async Task<List<ThreadSummary>> ListThreadsAsync(
+            int maximumThreads = int.MaxValue,
+            int maximumPages = int.MaxValue,
+            int maximumMessageBytes = int.MaxValue,
+            TimeSpan? operationTimeout = null)
         {
+            ArgumentOutOfRangeException.ThrowIfLessThan(maximumMessageBytes, 1);
+            using var timeout = new CancellationTokenSource(
+                operationTimeout ?? Timeout.InfiniteTimeSpan);
+            var budget = new RpcReadBudget(maximumThreads, maximumPages);
             var threads = new List<ThreadSummary>();
             string? cursor = null;
             do
             {
+                budget.BeginPage();
                 var parameters = new JsonObject { ["limit"] = 100 };
                 if (cursor is not null)
                 {
                     parameters["cursor"] = cursor;
                 }
-                var response = await RequestAsync("thread/list", parameters);
+                var response = await RequestAsync(
+                    "thread/list",
+                    parameters,
+                    timeout.Token,
+                    maximumMessageBytes);
                 ThrowIfRpcError(response, "thread/list");
                 var result = response["result"]?.AsObject()
                     ?? throw new InvalidOperationException("thread/list returned no result.");
-                foreach (var node in result["data"]?.AsArray() ?? [])
-                {
-                    if (node is null)
-                    {
-                        continue;
-                    }
-                    threads.Add(new ThreadSummary(
-                        node["id"]?.GetValue<string>() ?? string.Empty,
-                        node["name"]?.GetValue<string>(),
-                        node["status"]?["type"]?.GetValue<string>() ?? "unknown"));
-                }
+                var page = ParseThreadData(result["data"]);
+                budget.AddItems(page.Count);
+                threads.AddRange(page);
                 cursor = result["nextCursor"]?.GetValue<string>();
+                budget.ObserveCursor(cursor);
             }
             while (cursor is not null);
             return threads;
         }
 
-        public async Task<JsonObject> RequestAsync(string method, JsonObject parameters)
+        internal static IReadOnlyList<ThreadSummary> ParseThreadData(JsonNode? dataNode)
+        {
+            if (dataNode is not JsonArray data)
+            {
+                throw new InvalidOperationException("thread/list returned no data array.");
+            }
+
+            var threads = new List<ThreadSummary>(data.Count);
+            foreach (var node in data)
+            {
+                if (node is not JsonObject thread)
+                {
+                    throw new InvalidOperationException(
+                        "thread/list returned a malformed thread entry.");
+                }
+                var status = thread["status"]?["type"] is JsonValue statusValue &&
+                    statusValue.TryGetValue<string>(out var parsedStatus) &&
+                    !string.IsNullOrWhiteSpace(parsedStatus)
+                        ? parsedStatus
+                        : "unknown";
+                threads.Add(new ThreadSummary(
+                    thread["id"]?.GetValue<string>() ?? string.Empty,
+                    thread["name"]?.GetValue<string>(),
+                    status));
+            }
+            return threads;
+        }
+
+        public async Task<JsonObject> RequestAsync(
+            string method,
+            JsonObject parameters,
+            CancellationToken cancellationToken = default,
+            int maximumResponseBytes = int.MaxValue)
         {
             var id = Interlocked.Increment(ref nextId);
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(15));
             await SendAsync(new JsonObject
             {
                 ["method"] = method,
@@ -1197,7 +1236,7 @@ internal static class Program
 
             while (true)
             {
-                var message = await ReceiveAsync(timeout.Token);
+                var message = await ReceiveAsync(timeout.Token, maximumResponseBytes);
                 if (message["id"]?.GetValue<long>() == id)
                 {
                     return message;
@@ -1215,7 +1254,9 @@ internal static class Program
                 cancellationToken);
         }
 
-        private async Task<JsonObject> ReceiveAsync(CancellationToken cancellationToken)
+        private async Task<JsonObject> ReceiveAsync(
+            CancellationToken cancellationToken,
+            int maximumResponseBytes)
         {
             using var stream = new MemoryStream();
             var buffer = new byte[16 * 1024];
@@ -1227,6 +1268,10 @@ internal static class Program
                 {
                     throw new InvalidOperationException("App-server closed the WebSocket connection.");
                 }
+                RpcReadBudget.EnsureMessageFits(
+                    stream.Length,
+                    result.Count,
+                    maximumResponseBytes);
                 stream.Write(buffer, 0, result.Count);
             }
             while (!result.EndOfMessage);
