@@ -1,4 +1,5 @@
 using CodexContinuity;
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -83,6 +84,114 @@ public sealed class LoopbackRelayTests
     }
 
     [Fact]
+    public async Task ConcurrentGateCloseIsIdempotent()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+        using var client = await ConnectAsync(publicPort);
+        Assert.Equal("backend:open", await RoundTripAsync(client, "open"));
+
+        await Task.WhenAll(relay.CloseGateAsync(), relay.CloseGateAsync());
+
+        Assert.True(relay.IsGated);
+        Assert.Equal(0, relay.ActiveConnectionCount);
+        await AssertConnectionClosedAsync(client);
+    }
+
+    [Fact]
+    public async Task GateCloseRejectsConcurrentAdmissions()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var attempts = Enumerable.Range(0, 32).Select(async index =>
+        {
+            await start.Task;
+            try
+            {
+                using var client = await ConnectAsync(publicPort);
+                await RoundTripAsync(client, $"request-{index}");
+            }
+            catch (Exception exception) when (
+                exception is IOException or SocketException)
+            {
+            }
+        }).ToArray();
+
+        start.SetResult();
+        await relay.CloseGateAsync();
+        await Task.WhenAll(attempts);
+        var completedRequests = backend.CompletedRequestCount;
+        await Task.Delay(100);
+
+        Assert.True(relay.IsGated);
+        Assert.Equal(0, relay.ActiveConnectionCount);
+        Assert.Equal(completedRequests, backend.CompletedRequestCount);
+        using var refused = await ConnectAsync(publicPort);
+        await AssertConnectionClosedAsync(refused);
+    }
+
+    [Fact]
+    public async Task CanceledGateDrainStaysClosedUntilConnectionsFinish()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+        using var client = await ConnectAsync(publicPort);
+        Assert.Equal("backend:open", await RoundTripAsync(client, "open"));
+        using var canceled = new CancellationTokenSource();
+        canceled.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            relay.CloseGateAsync(canceled.Token));
+
+        Assert.True(relay.IsGated);
+        await WaitUntilAsync(() => relay.ActiveConnectionCount == 0);
+        await AssertConnectionClosedAsync(client);
+    }
+
+    [Fact]
+    public async Task RelaysFragmentedPayloadLargerThanBuffer()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(
+            publicPort,
+            backend.Port,
+            options: new LoopbackRelayOptions(BufferBytes: 1024));
+        using var client = await ConnectAsync(publicPort);
+        var payload = new string('x', 8 * 1024);
+
+        var response = await RoundTripAsync(client, payload);
+
+        Assert.Equal("backend:" + payload, response);
+    }
+
+    [Fact]
+    public async Task OwnsPublicPortExclusivelyAndReleasesItOnDispose()
+    {
+        await using var firstBackend = new TaggedBackend("first:");
+        await using var secondBackend = new TaggedBackend("second:");
+        var publicPort = AvailablePort();
+        var first = LoopbackRelay.Start(publicPort, firstBackend.Port);
+        try
+        {
+            Assert.Throws<SocketException>(() =>
+                LoopbackRelay.Start(publicPort, secondBackend.Port));
+        }
+        finally
+        {
+            await first.DisposeAsync();
+        }
+
+        await using var replacement = LoopbackRelay.Start(publicPort, secondBackend.Port);
+        using var client = await ConnectAsync(publicPort);
+        Assert.Equal("second:ready", await RoundTripAsync(client, "ready"));
+    }
+
+    [Fact]
     public async Task BackendCanOnlyChangeBehindDrainedGate()
     {
         var options = new LoopbackRelayOptions();
@@ -119,12 +228,44 @@ public sealed class LoopbackRelayTests
 
     private static async Task<string> RoundTripAsync(TcpClient client, string request)
     {
-        var bytes = Encoding.UTF8.GetBytes(request);
         var stream = client.GetStream();
-        await stream.WriteAsync(bytes).AsTask().WaitAsync(TimeSpan.FromSeconds(5));
-        var response = new byte[256];
-        var count = await stream.ReadAsync(response).AsTask().WaitAsync(TimeSpan.FromSeconds(5));
-        return Encoding.UTF8.GetString(response, 0, count);
+        await WriteFrameAsync(stream, Encoding.UTF8.GetBytes(request), CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        var response = await ReadFrameAsync(stream, CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        return Encoding.UTF8.GetString(response);
+    }
+
+    private static async Task WriteFrameAsync(
+        Stream stream,
+        byte[] payload,
+        CancellationToken cancellationToken)
+    {
+        var frame = new byte[sizeof(int) + payload.Length];
+        BinaryPrimitives.WriteInt32LittleEndian(frame, payload.Length);
+        payload.CopyTo(frame, sizeof(int));
+        for (var offset = 0; offset < frame.Length; offset += 127)
+        {
+            await stream.WriteAsync(
+                frame.AsMemory(offset, Math.Min(127, frame.Length - offset)),
+                cancellationToken);
+        }
+    }
+
+    private static async Task<byte[]> ReadFrameAsync(
+        Stream stream,
+        CancellationToken cancellationToken)
+    {
+        var header = new byte[sizeof(int)];
+        await stream.ReadExactlyAsync(header, cancellationToken);
+        var length = BinaryPrimitives.ReadInt32LittleEndian(header);
+        if (length is < 0 or > 1024 * 1024)
+        {
+            throw new InvalidDataException($"Invalid test frame length: {length}.");
+        }
+        var payload = new byte[length];
+        await stream.ReadExactlyAsync(payload, cancellationToken);
+        return payload;
     }
 
     private static async Task AssertConnectionClosedAsync(TcpClient client)
@@ -175,6 +316,7 @@ public sealed class LoopbackRelayTests
         private readonly CancellationTokenSource shutdown = new();
         private readonly Task acceptLoop;
         private readonly List<Task> connections = [];
+        private int completedRequestCount;
 
         internal TaggedBackend(string prefix)
         {
@@ -184,6 +326,8 @@ public sealed class LoopbackRelayTests
         }
 
         internal int Port => ((IPEndPoint)listener.LocalEndpoint).Port;
+
+        internal int CompletedRequestCount => Volatile.Read(ref completedRequestCount);
 
         public async ValueTask DisposeAsync()
         {
@@ -226,19 +370,23 @@ public sealed class LoopbackRelayTests
             using (client)
             {
                 var stream = client.GetStream();
-                var buffer = new byte[256];
                 try
                 {
                     while (!shutdown.IsCancellationRequested)
                     {
-                        var count = await stream.ReadAsync(buffer, shutdown.Token);
-                        if (count == 0)
+                        byte[] request;
+                        try
+                        {
+                            request = await ReadFrameAsync(stream, shutdown.Token);
+                        }
+                        catch (EndOfStreamException)
                         {
                             break;
                         }
-                        var request = Encoding.UTF8.GetString(buffer, 0, count);
-                        var response = Encoding.UTF8.GetBytes(prefix + request);
-                        await stream.WriteAsync(response, shutdown.Token);
+                        var response = Encoding.UTF8.GetBytes(
+                            prefix + Encoding.UTF8.GetString(request));
+                        await WriteFrameAsync(stream, response, shutdown.Token);
+                        Interlocked.Increment(ref completedRequestCount);
                     }
                 }
                 catch (Exception exception) when (

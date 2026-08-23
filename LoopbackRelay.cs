@@ -128,6 +128,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         {
             connection.Abort();
         }
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (snapshot.Length == 0)
         {
@@ -286,6 +287,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         private readonly TaskCompletionSource completion = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
         private TcpClient? backend;
+        private int aborted;
 
         internal Task Completion => completion.Task;
 
@@ -293,7 +295,17 @@ internal sealed class LoopbackRelay : IAsyncDisposable
 
         internal void Abort()
         {
-            lifetime.Cancel();
+            if (Interlocked.Exchange(ref aborted, 1) != 0)
+            {
+                return;
+            }
+            try
+            {
+                lifetime.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
             client.Dispose();
             backend?.Dispose();
         }
@@ -337,6 +349,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
             }
             finally
             {
+                Interlocked.Exchange(ref aborted, 1);
                 client.Dispose();
                 backend?.Dispose();
                 lifetime.Dispose();
