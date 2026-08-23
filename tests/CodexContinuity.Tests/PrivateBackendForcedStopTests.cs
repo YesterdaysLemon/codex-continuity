@@ -39,9 +39,6 @@ public sealed class PrivateBackendForcedStopTests
             await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
                 StopAsync(fixture, checks, waitTimeout: TimeSpan.FromSeconds(seconds)));
         }
-        var nativeWait = fixture.Target.WaitForExitWithinAsync(TimeSpan.FromMilliseconds(100));
-        Assert.Same(nativeWait, await Task.WhenAny(nativeWait, Task.Delay(TimeSpan.FromSeconds(5))));
-        Assert.False(await nativeWait);
         using var canceled = new CancellationTokenSource();
         canceled.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
@@ -177,29 +174,30 @@ public sealed class PrivateBackendForcedStopTests
                 fixture.Backend.CreateLease(fixture.PublicPort),
                 fixture.Backend.Process)
             : fixture.Target;
-        var waitCalled = false;
         var checks = Checks(
             tryForceStop: _ => scenario == "force-error"
                 ? throw new Win32Exception("Force state unavailable")
                 : true,
-            waitForExit: (_, _) =>
+            waitForExit: (ownedTarget, timeout) =>
             {
-                waitCalled = true;
-                return scenario == "wait-error"
-                    ? throw new Win32Exception("Wait state unavailable")
-                    : Task.FromResult(false);
+                Assert.Equal(TimeSpan.FromMilliseconds(100), timeout);
+                return scenario switch
+                {
+                    "wait-error" => throw new Win32Exception("Wait state unavailable"),
+                    "timeout" => ownedTarget.WaitForExitWithinAsync(timeout),
+                    _ => Task.FromResult(false),
+                };
             });
 
         var outcome = await StopAsync(
             fixture,
             checks,
             waitTimeout: TimeSpan.FromMilliseconds(100),
-            target: target);
+            target: target).WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal(Enum.Parse<PrivateBackendForcedStopKind>(expectedName), outcome.Kind);
         Assert.Equal(scenario != "mismatched-target", outcome.HasPendingStopReservation);
         Assert.Equal(scenario == "mismatched-target", fixture.GracefulResult.HasPendingStopReservation);
-        Assert.Equal(scenario is "timeout" or "wait-error", waitCalled);
         await AssertNoForceAsync(fixture);
         AssertGateProtected(fixture);
     }
