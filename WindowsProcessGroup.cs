@@ -12,8 +12,10 @@ internal sealed class WindowsProcessGroup : IDisposable
     private const uint CtrlBreakEvent = 1;
     private const uint CreateNewProcessGroup = 0x00000200;
     private const uint CreateUnicodeEnvironment = 0x00000400;
+    private const uint ExtendedStartupInfoPresent = 0x00080000;
     private const uint StartfUseShowWindow = 0x00000001;
     private const uint StartfUseStdHandles = 0x00000100;
+    private const nint ProcThreadAttributeHandleList = 0x00020002;
     private const short SwHide = 0;
     private const int ErrorInvalidHandle = 6;
 
@@ -41,16 +43,13 @@ internal sealed class WindowsProcessGroup : IDisposable
     }
 
     internal int Id => process.Id;
-
     internal bool HasExited => process.HasExited;
-
     internal int ExitCode => process.ExitCode;
-
     internal StreamReader StandardOutput { get; }
-
     internal StreamReader StandardError { get; }
-
-    internal static WindowsProcessGroup Start(ProcessStartInfo startInfo)
+    internal static WindowsProcessGroup Start(
+        ProcessStartInfo startInfo,
+        Action<int>? afterProcessCreated = null)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
         if (!OperatingSystem.IsWindows())
@@ -74,6 +73,12 @@ internal sealed class WindowsProcessGroup : IDisposable
         {
             throw new ArgumentException("A child executable is required.", nameof(startInfo));
         }
+        if (!Path.IsPathFullyQualified(startInfo.FileName))
+        {
+            throw new ArgumentException(
+                "The child executable path must be fully qualified.",
+                nameof(startInfo));
+        }
 
         EnsureConsole();
         using var standardInput = new AnonymousPipeServerStream(
@@ -86,28 +91,46 @@ internal sealed class WindowsProcessGroup : IDisposable
             PipeDirection.In,
             HandleInheritability.Inheritable);
         var processInformation = default(ProcessInformation);
+        Process? process = null;
         var environmentBlock = IntPtr.Zero;
+        var attributeList = IntPtr.Zero;
+        var inheritedHandlesPin = default(GCHandle);
 
         try
         {
-            var startupInfo = new StartupInfo
+            var inheritedHandles = new[]
             {
-                Size = Marshal.SizeOf<StartupInfo>(),
-                Flags = StartfUseShowWindow | StartfUseStdHandles,
-                ShowWindow = SwHide,
-                StandardInput = ClientHandle(standardInput),
-                StandardOutput = ClientHandle(standardOutput),
-                StandardError = ClientHandle(standardError),
+                ClientHandle(standardInput),
+                ClientHandle(standardOutput),
+                ClientHandle(standardError),
+            };
+            inheritedHandlesPin = GCHandle.Alloc(inheritedHandles, GCHandleType.Pinned);
+            attributeList = CreateHandleList(inheritedHandlesPin, inheritedHandles.Length);
+            var startupInfo = new StartupInfoEx
+            {
+                StartupInfo = new StartupInfo
+                {
+                    Size = Marshal.SizeOf<StartupInfoEx>(),
+                    Flags = StartfUseShowWindow | StartfUseStdHandles,
+                    ShowWindow = SwHide,
+                    StandardInput = inheritedHandles[0],
+                    StandardOutput = inheritedHandles[1],
+                    StandardError = inheritedHandles[2],
+                },
+                AttributeList = attributeList,
             };
             environmentBlock = CreateEnvironmentBlock(startInfo);
             var commandLine = new StringBuilder(BuildCommandLine(startInfo));
             var created = CreateProcess(
-                applicationName: null,
+                Path.GetFullPath(startInfo.FileName),
                 commandLine,
                 processAttributes: IntPtr.Zero,
                 threadAttributes: IntPtr.Zero,
                 inheritHandles: true,
-                creationFlags: CreateNewProcessGroup | CreateUnicodeEnvironment,
+                creationFlags:
+                    CreateNewProcessGroup |
+                    CreateUnicodeEnvironment |
+                    ExtendedStartupInfoPresent,
                 environmentBlock,
                 string.IsNullOrWhiteSpace(startInfo.WorkingDirectory)
                     ? null
@@ -121,24 +144,49 @@ internal sealed class WindowsProcessGroup : IDisposable
                     $"Could not start {startInfo.FileName} in a Windows process group.");
             }
 
-            Process process;
             try
             {
                 process = Process.GetProcessById(checked((int)processInformation.ProcessId));
+                afterProcessCreated?.Invoke(process.Id);
             }
             catch
             {
                 TerminateProcess(processInformation.Process, exitCode: 1);
+                if (process is not null)
+                {
+                    WaitForTerminatedProcess(process);
+                    process.Dispose();
+                    process = null;
+                }
                 throw;
             }
 
             standardInput.DisposeLocalCopyOfClientHandle();
             standardOutput.DisposeLocalCopyOfClientHandle();
             standardError.DisposeLocalCopyOfClientHandle();
-            return new WindowsProcessGroup(process, standardOutput, standardError);
+            return new WindowsProcessGroup(
+                process ?? throw new InvalidOperationException("The child process was not captured."),
+                standardOutput,
+                standardError);
         }
         catch
         {
+            if (process is not null)
+            {
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.Kill(entireProcessTree: true);
+                    }
+                    WaitForTerminatedProcess(process);
+                }
+                catch (Exception exception) when (
+                    exception is InvalidOperationException or Win32Exception)
+                {
+                }
+                process.Dispose();
+            }
             standardOutput.Dispose();
             standardError.Dispose();
             throw;
@@ -156,6 +204,15 @@ internal sealed class WindowsProcessGroup : IDisposable
             if (environmentBlock != IntPtr.Zero)
             {
                 Marshal.FreeHGlobal(environmentBlock);
+            }
+            if (attributeList != IntPtr.Zero)
+            {
+                DeleteProcThreadAttributeList(attributeList);
+                Marshal.FreeHGlobal(attributeList);
+            }
+            if (inheritedHandlesPin.IsAllocated)
+            {
+                inheritedHandlesPin.Free();
             }
         }
     }
@@ -218,8 +275,74 @@ internal sealed class WindowsProcessGroup : IDisposable
         }
     }
 
+    private static void WaitForTerminatedProcess(Process process)
+    {
+        try
+        {
+            process.WaitForExit(milliseconds: 5000);
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
     private static IntPtr ClientHandle(AnonymousPipeServerStream pipe) =>
         new(long.Parse(pipe.GetClientHandleAsString(), CultureInfo.InvariantCulture));
+
+    private static IntPtr CreateHandleList(GCHandle inheritedHandlesPin, int handleCount)
+    {
+        nuint attributeListSize = 0;
+        InitializeProcThreadAttributeList(
+            attributeList: IntPtr.Zero,
+            attributeCount: 1,
+            flags: 0,
+            ref attributeListSize);
+        if (attributeListSize == 0)
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "Could not size the child handle allowlist.");
+        }
+        var attributeList = Marshal.AllocHGlobal(checked((int)attributeListSize));
+        var initialized = false;
+        try
+        {
+            if (!InitializeProcThreadAttributeList(
+                    attributeList,
+                    attributeCount: 1,
+                    flags: 0,
+                    ref attributeListSize))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not initialize the child handle allowlist.");
+            }
+            initialized = true;
+            if (!UpdateProcThreadAttribute(
+                    attributeList,
+                    flags: 0,
+                    ProcThreadAttributeHandleList,
+                    inheritedHandlesPin.AddrOfPinnedObject(),
+                    checked((nuint)(handleCount * IntPtr.Size)),
+                    previousValue: IntPtr.Zero,
+                    returnSize: IntPtr.Zero))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not restrict inherited child handles.");
+            }
+            return attributeList;
+        }
+        catch
+        {
+            if (initialized)
+            {
+                DeleteProcThreadAttributeList(attributeList);
+            }
+            Marshal.FreeHGlobal(attributeList);
+            throw;
+        }
+    }
 
     private static IntPtr CreateEnvironmentBlock(ProcessStartInfo startInfo)
     {
@@ -275,11 +398,9 @@ internal sealed class WindowsProcessGroup : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool AllocConsole();
-
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
-
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CreateProcess(
@@ -291,29 +412,42 @@ internal sealed class WindowsProcessGroup : IDisposable
         uint creationFlags,
         IntPtr environmentBlock,
         string? currentDirectory,
-        ref StartupInfo startupInfo,
+        ref StartupInfoEx startupInfo,
         out ProcessInformation processInformation);
-
+    [DllImport("kernel32.dll")]
+    private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GenerateConsoleCtrlEvent(uint controlEvent, uint processGroupId);
-
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint GetConsoleProcessList(
         [Out] uint[] processIds,
         uint processCount);
-
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool InitializeProcThreadAttributeList(
+        IntPtr attributeList,
+        uint attributeCount,
+        uint flags,
+        ref nuint size);
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetConsoleWindow();
-
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool TerminateProcess(IntPtr process, uint exitCode);
-
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ShowWindow(IntPtr window, int command);
-
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UpdateProcThreadAttribute(
+        IntPtr attributeList,
+        uint flags,
+        IntPtr attribute,
+        IntPtr value,
+        nuint size,
+        IntPtr previousValue,
+        IntPtr returnSize);
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct StartupInfo
     {
@@ -336,7 +470,12 @@ internal sealed class WindowsProcessGroup : IDisposable
         internal IntPtr StandardOutput;
         internal IntPtr StandardError;
     }
-
+    [StructLayout(LayoutKind.Sequential)]
+    private struct StartupInfoEx
+    {
+        internal StartupInfo StartupInfo;
+        internal IntPtr AttributeList;
+    }
     [StructLayout(LayoutKind.Sequential)]
     private struct ProcessInformation
     {

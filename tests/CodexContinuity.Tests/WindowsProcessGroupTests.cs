@@ -14,6 +14,7 @@ public sealed class WindowsProcessGroupTests
             Path.GetTempPath(),
             $"codex continuity process group {Guid.NewGuid():N}");
         Directory.CreateDirectory(testDirectory);
+        Process? harness = null;
         try
         {
             var startInfo = new ProcessStartInfo("dotnet.exe")
@@ -27,7 +28,7 @@ public sealed class WindowsProcessGroupTests
             startInfo.ArgumentList.Add("process-group-parent");
             startInfo.ArgumentList.Add(testDirectory);
 
-            using var harness = Process.Start(startInfo)
+            harness = Process.Start(startInfo)
                 ?? throw new InvalidOperationException("Could not start process harness.");
             var output = harness.StandardOutput.ReadToEndAsync();
             var error = harness.StandardError.ReadToEndAsync();
@@ -42,39 +43,96 @@ public sealed class WindowsProcessGroupTests
                     ControlEvent: "ControlBreak",
                     ConsoleVisible: false,
                     UnrelatedProcessStayedRunning: true,
-                    Output: string.Empty,
-                    Error: string.Empty),
+                    UnlistedHandleInherited: false,
+                    Output: "out:quoted \"value\" with trailing slash \\|continuity-\u96ea",
+                    Error: "error:quoted \"value\" with trailing slash \\|continuity-\u96ea"),
                 result);
         }
         finally
         {
-            Directory.Delete(testDirectory, recursive: true);
+            if (harness is { HasExited: false })
+            {
+                harness.Kill(entireProcessTree: true);
+                await harness.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            harness?.Dispose();
+            DeleteTestDirectory(testDirectory);
         }
     }
 
-    [Theory]
-    [InlineData("", "\"\"")]
-    [InlineData("plain", "plain")]
-    [InlineData("two words", "\"two words\"")]
-    [InlineData("quoted\"value", "\"quoted\\\"value\"")]
-    public void QuotesWindowsArguments(string argument, string expected)
-    {
-        Assert.Equal(expected, WindowsProcessGroup.QuoteArgument(argument));
-    }
-
     [Fact]
-    public void DoublesTrailingSlashBeforeClosingQuote()
+    public void RejectsRelativeExecutablePaths()
     {
-        Assert.Equal(
-            $"\"trailing slash {new string('\\', 2)}\"",
-            WindowsProcessGroup.QuoteArgument("trailing slash \\"));
-    }
+        var startInfo = new ProcessStartInfo("dotnet.exe")
+        {
+            UseShellExecute = false,
+        };
 
+        var exception = Assert.Throws<ArgumentException>(
+            () => WindowsProcessGroup.Start(startInfo));
+
+        Assert.Contains("fully qualified", exception.Message);
+    }
+    [Fact]
+    public void TerminatesChildWhenPostCreateSetupFails()
+    {
+        var powershell = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "System32",
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
+        var startInfo = new ProcessStartInfo(powershell)
+        {
+            UseShellExecute = false,
+        };
+        startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-Command");
+        startInfo.ArgumentList.Add("Start-Sleep -Seconds 30");
+        var childProcessId = 0;
+
+        Assert.Throws<InvalidOperationException>(() =>
+            WindowsProcessGroup.Start(startInfo, processId =>
+            {
+                childProcessId = processId;
+                throw new InvalidOperationException("Injected post-create failure.");
+            }));
+
+        Assert.NotEqual(0, childProcessId);
+        Assert.False(ProcessIsRunning(childProcessId));
+    }
+    private static bool ProcessIsRunning(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+    private static void DeleteTestDirectory(string path)
+    {
+        for (var attempt = 1; Directory.Exists(path); attempt++)
+        {
+            try
+            {
+                Directory.Delete(path, recursive: true);
+            }
+            catch (IOException) when (attempt < 6)
+            {
+                Thread.Sleep(TimeSpan.FromMilliseconds(100 * attempt));
+            }
+        }
+    }
     private sealed record ProcessGroupResult(
         int ExitCode,
         string ControlEvent,
         bool ConsoleVisible,
         bool UnrelatedProcessStayedRunning,
+        bool UnlistedHandleInherited,
         string Output,
         string Error);
 }
