@@ -146,6 +146,7 @@ internal static class OwnedSupervisorRuntime
                 var leaseActive = recovered;
                 var preserveBackend = false;
                 var lifecycleCompleted = false;
+                var ownershipDefinitivelyLost = false;
                 Volatile.Write(ref activeBackendProcessId, process.Id);
                 try
                 {
@@ -187,6 +188,7 @@ internal static class OwnedSupervisorRuntime
                             preserveBackend = recovered && ownership == BackendOwnership.Unknown;
                             publishStopped = false;
                             var ownershipLost = ownership == BackendOwnership.Lost;
+                            ownershipDefinitivelyLost = ownershipLost;
                             var detail = ownershipLost
                                 ? "The private listener is not owned by the supervised backend."
                                 : recovered
@@ -245,6 +247,7 @@ internal static class OwnedSupervisorRuntime
                                 {
                                     var ownershipLost =
                                         backendOutcome == BackendWaitOutcome.OwnershipLost;
+                                    ownershipDefinitivelyLost = ownershipLost;
                                     preserveBackend = !ownershipLost;
                                     publishStopped = false;
                                     await relay.CloseGateAsync();
@@ -296,7 +299,10 @@ internal static class OwnedSupervisorRuntime
                     }
                     lifecycleCompleted = true;
                 }
-                catch when (recovered && !shutdownToken.IsCancellationRequested)
+                catch when (
+                    recovered &&
+                    !ownershipDefinitivelyLost &&
+                    !shutdownToken.IsCancellationRequested)
                 {
                     preserveBackend = true;
                     publishStopped = false;
