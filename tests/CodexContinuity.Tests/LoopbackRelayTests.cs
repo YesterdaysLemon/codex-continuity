@@ -207,28 +207,61 @@ public sealed class LoopbackRelayTests
         await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
         var cancellationObserved = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishCancellation = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
 
-        await Assert.ThrowsAsync<TimeoutException>(() =>
-            GatedHandoffTransition.CloseAndRecomputeAsync(
-                relay,
-                async cancellationToken =>
+        var transition = GatedHandoffTransition.CloseAndRecomputeAsync(
+            relay,
+            async cancellationToken =>
+            {
+                try
                 {
-                    try
-                    {
-                        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-                        return Plan(transitionReady: true);
-                    }
-                    finally
-                    {
-                        cancellationObserved.SetResult();
-                    }
-                },
-                TimeSpan.FromMilliseconds(20)));
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                    return Plan(transitionReady: true);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    cancellationObserved.SetResult();
+                    await finishCancellation.Task;
+                    throw;
+                }
+            },
+            TimeSpan.FromMilliseconds(20));
 
         await cancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(transition.IsCompleted);
+        Assert.True(relay.IsGated);
+        using (var refused = await ConnectAsync(publicPort))
+        {
+            await AssertConnectionClosedAsync(refused);
+        }
+
+        finishCancellation.SetResult();
+        await Assert.ThrowsAsync<TimeoutException>(() => transition);
         Assert.False(relay.IsGated);
         using var client = await ConnectAsync(publicPort);
         Assert.Equal("backend:resumed", await RoundTripAsync(client, "resumed"));
+    }
+
+    [Fact]
+    public async Task UncooperativeTimedOutRecomputationLeavesRelayGated()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+        var neverCompletes = new TaskCompletionSource<ContinuityHandoffPlan>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var error = await Assert.ThrowsAsync<TimeoutException>(() =>
+            GatedHandoffTransition.CloseAndRecomputeAsync(
+                relay,
+                _ => neverCompletes.Task,
+                TimeSpan.FromMilliseconds(20)));
+
+        Assert.Contains("relay remains gated", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(relay.IsGated);
+        using var refused = await ConnectAsync(publicPort);
+        await AssertConnectionClosedAsync(refused);
     }
 
     [Theory]

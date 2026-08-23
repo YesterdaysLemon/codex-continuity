@@ -6,6 +6,8 @@ internal sealed record GatedHandoffDecision(
 
 internal static class GatedHandoffTransition
 {
+    private static readonly TimeSpan CancellationDrainTimeout = TimeSpan.FromSeconds(1);
+
     internal static async Task<GatedHandoffDecision> CloseAndRecomputeAsync(
         LoopbackRelay relay,
         Func<CancellationToken, Task<ContinuityHandoffPlan>> recomputePlan,
@@ -25,13 +27,26 @@ internal static class GatedHandoffTransition
         {
             gateLease = await relay.CloseGateExclusivelyAsync();
             using var timeout = new CancellationTokenSource(effectiveTimeout);
+            var recomputation = recomputePlan(timeout.Token);
             ContinuityHandoffPlan plan;
             try
             {
-                plan = await recomputePlan(timeout.Token).WaitAsync(timeout.Token);
+                plan = await recomputation.WaitAsync(timeout.Token);
             }
             catch (OperationCanceledException) when (timeout.IsCancellationRequested)
             {
+                await Task.WhenAny(
+                    recomputation,
+                    Task.Delay(CancellationDrainTimeout));
+                if (!recomputation.IsCompleted)
+                {
+                    keepGateClosed = true;
+                    throw new TimeoutException(
+                        $"Handoff-plan recomputation did not stop within " +
+                        $"{CancellationDrainTimeout} after cancellation. The relay remains gated.");
+                }
+
+                _ = recomputation.Exception;
                 throw new TimeoutException(
                     $"Handoff-plan recomputation exceeded {effectiveTimeout}.");
             }
