@@ -1095,16 +1095,20 @@ internal static class Program
             .Select(directory => Path.Combine(directory, "codex.exe"))
             .Where(File.Exists));
 
-        var selected = candidates
+        var selected = SelectCodexExecutable(candidates);
+        return selected ?? throw new FileNotFoundException(
+            "Could not find a user-executable codex.exe. Set CODEX_CONTINUITY_CODEX_PATH.");
+    }
+
+    internal static string? SelectCodexExecutable(IEnumerable<string> candidates) =>
+        candidates
+            .Select(Path.GetFullPath)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Where(candidate => !candidate.Contains(
                 @"\WindowsApps\OpenAI.Codex_",
                 StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(File.GetLastWriteTimeUtc)
             .FirstOrDefault();
-        return selected ?? throw new FileNotFoundException(
-            "Could not find a user-executable codex.exe. Set CODEX_CONTINUITY_CODEX_PATH.");
-    }
 
     private static async Task<JsonObject?> ReadInstalledPackageAsync()
     {
