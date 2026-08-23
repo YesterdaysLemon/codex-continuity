@@ -64,6 +64,10 @@ internal sealed record ContinuityHandoffPlan(
     HandoffBlockerCounts Blockers,
     IReadOnlyList<string> Reasons);
 
+internal sealed record ContinuityThreadSnapshot(
+    bool BackendReady,
+    IReadOnlyList<ThreadLifecycleStatus> Threads);
+
 internal enum ContinuitySelectedBuildLoadKind
 {
     Loaded,
@@ -89,6 +93,10 @@ internal static class ContinuitySelectedBuildReader
             if (state is null)
             {
                 return new(ContinuitySelectedBuildLoadKind.MissingInstallState, Build: null);
+            }
+            if (state.SchemaVersion != InstallStateStore.CurrentSchemaVersion)
+            {
+                return new(ContinuitySelectedBuildLoadKind.InvalidInstallState, Build: null);
             }
             if (state.Lifecycle != InstallLifecycle.Installed)
             {
@@ -231,7 +239,7 @@ internal static class ContinuityHandoffPlanner
             transitionReady ? pendingUpdate ? "applyUpdate" : "handoff" : "wait",
             transitionReady,
             backendReady,
-            updateState.Kind.ToString(),
+            UpdateStateName(updateState.Kind),
             pendingUpdate,
             threads.Count,
             blockers,
@@ -285,4 +293,14 @@ internal static class ContinuityHandoffPlanner
             ? (true, null)
             : (false, "selectedUpdateUnverified");
     }
+
+    private static string UpdateStateName(ContinuityUpdateStateLoadKind kind) => kind switch
+    {
+        ContinuityUpdateStateLoadKind.Loaded => "loaded",
+        ContinuityUpdateStateLoadKind.Missing => "missing",
+        ContinuityUpdateStateLoadKind.Invalid => "invalid",
+        ContinuityUpdateStateLoadKind.UnsupportedSchema => "unsupportedSchema",
+        ContinuityUpdateStateLoadKind.Unreadable => "unreadable",
+        _ => throw new InvalidOperationException("Unknown update-state load outcome."),
+    };
 }

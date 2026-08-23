@@ -42,7 +42,7 @@ public sealed class HandoffPlanningTests
                 "handoff",
                 TransitionReady: true,
                 BackendReady: true,
-                "Loaded",
+                "loaded",
                 PendingUpdate: false,
                 ThreadCount: 2,
                 new HandoffBlockerCounts(0, 0, 0, 0, 0),
@@ -64,6 +64,20 @@ public sealed class HandoffPlanningTests
         Assert.True(plan.TransitionReady);
         Assert.True(plan.PendingUpdate);
         Assert.Empty(plan.Reasons);
+    }
+
+    [Fact]
+    public void BusyThreadsTakePrecedenceOverAVerifiedSelectedUpdate()
+    {
+        var plan = ContinuityHandoffPlanner.Create(
+            backendReady: true,
+            [Status("active")],
+            LoadedUpdateState("0.3.0", "0.4.0", staged: true),
+            LoadedSelectedBuild("0.4.0", 'a'));
+
+        Assert.Equal("wait", plan.Action);
+        Assert.True(plan.PendingUpdate);
+        Assert.Equal(["runningTurns"], plan.Reasons);
     }
 
     [Fact]
@@ -205,12 +219,67 @@ public sealed class HandoffPlanningTests
                     build),
                 ContinuitySelectedBuildReader.Load(root));
 
+            store.Save(InstallState(executable, build.ExecutableSha256) with
+            {
+                SchemaVersion = int.MaxValue,
+            });
+            Assert.Equal(
+                ContinuitySelectedBuildLoadKind.InvalidInstallState,
+                ContinuitySelectedBuildReader.Load(root).Kind);
+
             store.Save(InstallState(executable, new string('f', 64)));
             Assert.Equal(
                 new ContinuitySelectedBuildLoadResult(
                     ContinuitySelectedBuildLoadKind.UnverifiedExecutable,
                     Build: null),
                 ContinuitySelectedBuildReader.Load(root));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task HandoffCommandLoadsStateAndWritesStableReadOnlyJson()
+    {
+        var root = TemporaryDirectory();
+        try
+        {
+            var executable = typeof(AutomaticUpdateRunner).Assembly.Location;
+            var build = AutomaticUpdateRunner.ResolveBuildIdentity(executable);
+            Assert.NotNull(build);
+            new InstallStateStore(ContinuityPaths.InstallStateFile(root)).Save(
+                InstallState(executable, build.ExecutableSha256));
+            new ContinuityUpdateStateStore(ContinuityPaths.UpdateStatusFile(root)).Save(
+                LoadedUpdateState(
+                    build.Version,
+                    build.Version,
+                    runningSha256: build.ExecutableSha256).State!);
+            var installBefore = File.ReadAllBytes(ContinuityPaths.InstallStateFile(root));
+            var updateBefore = File.ReadAllBytes(ContinuityPaths.UpdateStatusFile(root));
+            using var output = new StringWriter();
+
+            var exitCode = await Program.PrintHandoffPlanAsync(
+                root,
+                () => Task.FromResult(new ContinuityThreadSnapshot(
+                    BackendReady: true,
+                    Threads: [Status("idle")])),
+                output);
+            var json = JsonNode.Parse(output.ToString())!.AsObject();
+
+            Assert.Equal(0, exitCode);
+            Assert.Equal("handoff-plan", Program.ResolveCommand(
+                setupExecutable: false,
+                ["handoff-plan"]));
+            Assert.Equal("handoff", json["action"]!.GetValue<string>());
+            Assert.True(json["transitionReady"]!.GetValue<bool>());
+            Assert.Equal("loaded", json["updateState"]!.GetValue<string>());
+            Assert.Null(json["Action"]);
+            Assert.Equal(
+                installBefore,
+                File.ReadAllBytes(ContinuityPaths.InstallStateFile(root)));
+            Assert.Equal(updateBefore, File.ReadAllBytes(ContinuityPaths.UpdateStatusFile(root)));
         }
         finally
         {
@@ -278,7 +347,8 @@ public sealed class HandoffPlanningTests
         string runningVersion,
         string selectedVersion,
         bool staged = false,
-        bool runningProcessObserved = true)
+        bool runningProcessObserved = true,
+        string? runningSha256 = null)
     {
         var releases = staged
             ? new TrackedContinuityRelease[]
@@ -309,6 +379,6 @@ public sealed class HandoffPlanningTests
                 staged ? 1 : 0,
                 0,
                 releases,
-                RunningExecutableSha256: new string('b', 64)));
+                RunningExecutableSha256: runningSha256 ?? new string('b', 64)));
     }
 }

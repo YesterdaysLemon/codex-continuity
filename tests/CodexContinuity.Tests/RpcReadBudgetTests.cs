@@ -20,6 +20,7 @@ public sealed class RpcReadBudgetTests
         var malformedStatus = Assert.Single(Program.RpcClient.ParseThreadData(JsonNode.Parse(
             """[{"id":"thread-1","status":{"type":12}}]""")));
         Assert.Equal("unknown", malformedStatus.Status);
+        Assert.True(malformedStatus.Activity.Malformed);
 
         Assert.Equal(
             [new Program.ThreadSummary(
@@ -69,7 +70,7 @@ public sealed class RpcReadBudgetTests
             await RespondAsync(socket, first, new JsonObject
             {
                 ["data"] = JsonNode.Parse(
-                    """[{"id":"thread-1","name":"First","status":{"type":"active"}}]"""),
+                    """[{"id":"thread-1","name":"First","status":{"type":"active","activeFlags":[]}}]"""),
                 ["nextCursor"] = "second-page",
             });
             var second = await ReceiveAsync(socket);
@@ -85,12 +86,11 @@ public sealed class RpcReadBudgetTests
         });
 
         await using var client = await Program.RpcClient.ConnectAsync(url);
+        var threads = await client.ListThreadsAsync();
         Assert.Equal(
-            [
-                new Program.ThreadSummary("thread-1", "First", "active"),
-                new Program.ThreadSummary("thread-2", "Second", "idle"),
-            ],
-            await client.ListThreadsAsync());
+            [("thread-1", "First", "active"), ("thread-2", "Second", "idle")],
+            threads.Select(thread => (thread.Id, thread.Name, thread.Status)));
+        Assert.All(threads, thread => Assert.False(thread.Activity.Malformed));
         await server;
     }
 

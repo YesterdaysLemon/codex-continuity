@@ -10,7 +10,6 @@ namespace CodexContinuity;
 internal static class Program
 {
     private const int DefaultPort = LoopbackEndpoint.DefaultPort;
-    private const int MaximumLifecycleThreads = 10_000;
     private const string UpdateManifestUrl =
         "https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json";
 
@@ -226,37 +225,55 @@ internal static class Program
         return 0;
     }
 
-    private static async Task<int> PrintHandoffPlanAsync(int port)
-    {
-        var backendReady = await IsReadyAsync(port, TimeSpan.FromSeconds(2));
-        var threads = new List<ThreadLifecycleStatus>();
-        if (backendReady)
-        {
-            try
-            {
-                await using var client = await RpcClient.ConnectAsync(
-                    LoopbackEndpoint.WebSocketUrl(port));
-                threads.AddRange((await client.ListThreadsAsync(MaximumLifecycleThreads)).Select(
-                    thread => thread.Activity));
-            }
-            catch (Exception exception) when (
-                exception is HttpRequestException or JsonException or InvalidOperationException or
-                    OperationCanceledException or WebSocketException)
-            {
-                backendReady = false;
-            }
-        }
+    private static Task<int> PrintHandoffPlanAsync(int port) => PrintHandoffPlanAsync(
+        ContinuityPaths.StateDirectory,
+        () => ObserveThreadLifecyclesAsync(port),
+        Console.Out);
 
+    internal static async Task<int> PrintHandoffPlanAsync(
+        string stateDirectory,
+        Func<Task<ContinuityThreadSnapshot>> observeThreads,
+        TextWriter output)
+    {
+        var snapshot = await observeThreads();
         var updateState = new ContinuityUpdateStateStore(
-            ContinuityPaths.UpdateStatusFile(ContinuityPaths.StateDirectory)).Load();
-        var selectedBuild = ContinuitySelectedBuildReader.Load(ContinuityPaths.StateDirectory);
+            ContinuityPaths.UpdateStatusFile(stateDirectory)).Load();
+        var selectedBuild = ContinuitySelectedBuildReader.Load(stateDirectory);
         var plan = ContinuityHandoffPlanner.Create(
-            backendReady,
-            threads,
+            snapshot.BackendReady,
+            snapshot.Threads,
             updateState,
             selectedBuild);
-        Console.WriteLine(JsonSerializer.Serialize(plan, JsonOptions));
+        await output.WriteLineAsync(JsonSerializer.Serialize(plan, HandoffJsonOptions));
         return 0;
+    }
+
+    private static async Task<ContinuityThreadSnapshot> ObserveThreadLifecyclesAsync(int port)
+    {
+        var status = LoadSupervisorStatus();
+        if (status is null ||
+            !await IsManagedEndpointReadyAsync(port, status.SupervisorProcessId))
+        {
+            return new(BackendReady: false, Threads: []);
+        }
+
+        try
+        {
+            await using var client = await RpcClient.ConnectAsync(
+                LoopbackEndpoint.WebSocketUrl(port));
+            var threads = (await client.ListThreadsAsync()).Select(
+                thread => thread.Activity).ToList();
+            return Equals(status, LoadSupervisorStatus()) &&
+                await IsManagedEndpointReadyAsync(port, status.SupervisorProcessId)
+                    ? new(BackendReady: true, threads)
+                    : new(BackendReady: false, Threads: []);
+        }
+        catch (Exception exception) when (
+            exception is HttpRequestException or JsonException or InvalidOperationException or
+                OperationCanceledException or WebSocketException)
+        {
+            return new(BackendReady: false, Threads: []);
+        }
     }
 
     private static Task<int> ServeAsync(int port) =>
@@ -1145,6 +1162,11 @@ internal static class Program
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
+        WriteIndented = true,
+    };
+    private static readonly JsonSerializerOptions HandoffJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = true,
     };
 
