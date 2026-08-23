@@ -671,6 +671,135 @@ public sealed class SupervisorRelayTests : IDisposable
     }
 
     [Fact]
+    public async Task OngoingOwnershipLossClosesRelayAndStopsBackend()
+    {
+        var publicPort = FindAvailablePort();
+        var backendPort = 0;
+        var backendProcessId = 0;
+        var ownershipLost = 0;
+        var ownershipChecks = new BackendOwnershipChecks(
+            (_, processId) => processId == Volatile.Read(ref backendProcessId) &&
+                Volatile.Read(ref ownershipLost) == 0,
+            (_, processId) => processId == Volatile.Read(ref backendProcessId))
+        {
+            PollInterval = TimeSpan.FromMilliseconds(20),
+        };
+        using var shutdown = new CancellationTokenSource();
+        var supervisor = OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            shutdown.Token,
+            port =>
+            {
+                backendPort = port;
+                var process = StartHarnessBackend(
+                    port,
+                    Path.Combine(root, "fixture-started.txt"));
+                Volatile.Write(ref backendProcessId, process.Id);
+                return process;
+            },
+            ownershipChecks: ownershipChecks);
+        try
+        {
+            Assert.Equal($"backend:{backendPort}", await ReadWhenReadyAsync(publicPort));
+            Volatile.Write(ref ownershipLost, 1);
+
+            Assert.Equal(1, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.False(ProcessIsRunning(backendProcessId));
+            Assert.Equal(
+                BackendLeaseLoadKind.Missing,
+                new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(root)).Load().Kind);
+            var status = await ReadStatusAsync("backendOwnershipLost");
+            Assert.Equal(
+                new SupervisorStatus(
+                    State: "backendOwnershipLost",
+                    SupervisorProcessId: Environment.ProcessId,
+                    BackendProcessId: backendProcessId,
+                    Port: publicPort,
+                    CodexHome: FutureProcessEnvironment.ResolveCodexHome(),
+                    ConsecutiveFailures: 0,
+                    LastExitCode: null,
+                    UpdatedAtUtc: status.UpdatedAtUtc,
+                    NextRetryAtUtc: null,
+                    Detail: "The private listener is no longer owned by the supervised backend.",
+                    SupervisorStartedAtUtc: status.SupervisorStartedAtUtc,
+                    SupervisorExecutable: status.SupervisorExecutable),
+                status);
+            Assert.True(CanBind(publicPort));
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await supervisor.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+    }
+
+    [Fact]
+    public async Task OngoingUnknownOwnershipPreservesVerifiedBackendAndLease()
+    {
+        var publicPort = FindAvailablePort();
+        var backendProcessId = 0;
+        var inspectionUnavailable = 0;
+        var ownershipChecks = new BackendOwnershipChecks(
+            (_, processId) => Volatile.Read(ref inspectionUnavailable) == 0
+                ? processId == Volatile.Read(ref backendProcessId)
+                : throw new Win32Exception(5, "ownership inspection unavailable"),
+            (_, processId) => processId == Volatile.Read(ref backendProcessId))
+        {
+            PollInterval = TimeSpan.FromMilliseconds(20),
+        };
+        using var shutdown = new CancellationTokenSource();
+        var leaseStore = new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(root));
+        var supervisor = OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            shutdown.Token,
+            port =>
+            {
+                var process = StartHarnessBackend(
+                    port,
+                    Path.Combine(root, "fixture-started.txt"));
+                Volatile.Write(ref backendProcessId, process.Id);
+                return process;
+            },
+            ownershipChecks: ownershipChecks);
+        try
+        {
+            await ReadStatusAsync("running");
+            var verifiedLease = leaseStore.Load();
+            Assert.Equal(BackendLeaseLoadKind.Loaded, verifiedLease.Kind);
+            Volatile.Write(ref inspectionUnavailable, 1);
+
+            Assert.Equal(1, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.True(ProcessIsRunning(backendProcessId));
+            Assert.Equal(verifiedLease, leaseStore.Load());
+            var status = await ReadStatusAsync("backendOwnershipUnknown");
+            Assert.Equal(
+                new SupervisorStatus(
+                    State: "backendOwnershipUnknown",
+                    SupervisorProcessId: Environment.ProcessId,
+                    BackendProcessId: backendProcessId,
+                    Port: publicPort,
+                    CodexHome: FutureProcessEnvironment.ResolveCodexHome(),
+                    ConsecutiveFailures: 0,
+                    LastExitCode: null,
+                    UpdatedAtUtc: status.UpdatedAtUtc,
+                    NextRetryAtUtc: null,
+                    Detail: "Private listener ownership could not be inspected; " +
+                        "preserving the verified backend lease.",
+                    SupervisorStartedAtUtc: status.SupervisorStartedAtUtc,
+                    SupervisorExecutable: status.SupervisorExecutable),
+                status);
+            Assert.True(CanBind(publicPort));
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await supervisor.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+    }
+
+    [Fact]
     public async Task BackendRestartKeepsPublicEndpointGatedUntilReplacementIsReady()
     {
         var publicPort = FindAvailablePort();

@@ -6,6 +6,8 @@ internal sealed record BackendOwnershipChecks(
     Func<int, int, bool> IsListenerOwnedBy,
     Func<TcpClient, int, bool> IsConnectionAcceptedBy)
 {
+    internal TimeSpan PollInterval { get; init; } = TimeSpan.FromMilliseconds(100);
+
     internal static BackendOwnershipChecks Native { get; } = new(
         WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy,
         WindowsTcpPortOwnership.IsLoopbackConnectionAcceptedBy);
@@ -14,6 +16,10 @@ internal sealed record BackendOwnershipChecks(
     {
         ArgumentNullException.ThrowIfNull(IsListenerOwnedBy);
         ArgumentNullException.ThrowIfNull(IsConnectionAcceptedBy);
+        if (PollInterval <= TimeSpan.Zero || PollInterval > TimeSpan.FromSeconds(5))
+        {
+            throw new ArgumentOutOfRangeException(nameof(PollInterval));
+        }
     }
 }
 
@@ -230,7 +236,37 @@ internal static class OwnedSupervisorRuntime
                             Console.WriteLine($"Continuity backend ready (PID {process.Id}).");
                             try
                             {
-                                await process.WaitForExitAsync(shutdownToken);
+                                var backendOutcome = await WaitForBackendOutcomeAsync(
+                                    backendPort,
+                                    process,
+                                    ownershipChecks,
+                                    shutdownToken);
+                                if (backendOutcome != BackendWaitOutcome.Exited)
+                                {
+                                    var ownershipLost =
+                                        backendOutcome == BackendWaitOutcome.OwnershipLost;
+                                    preserveBackend = !ownershipLost;
+                                    publishStopped = false;
+                                    await relay.CloseGateAsync();
+                                    var detail = ownershipLost
+                                        ? "The private listener is no longer owned by the " +
+                                            "supervised backend."
+                                        : "Private listener ownership could not be inspected; " +
+                                            "preserving the verified backend lease.";
+                                    statusStore.Write(Program.NewSupervisorStatus(
+                                        ownershipLost
+                                            ? "backendOwnershipLost"
+                                            : "backendOwnershipUnknown",
+                                        publicPort,
+                                        codexHome,
+                                        process.Id,
+                                        consecutiveFailures,
+                                        lastExitCode: null,
+                                        nextRetryAtUtc: null,
+                                        detail));
+                                    Console.Error.WriteLine(detail);
+                                    return 1;
+                                }
                             }
                             catch (OperationCanceledException) when (
                                 shutdownToken.IsCancellationRequested)
@@ -412,10 +448,54 @@ internal static class OwnedSupervisorRuntime
         }
     }
 
+    private static async Task<BackendWaitOutcome> WaitForBackendOutcomeAsync(
+        int port,
+        WindowsProcessGroup process,
+        BackendOwnershipChecks ownershipChecks,
+        CancellationToken cancellationToken)
+    {
+        while (!process.HasExited)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var ownership = InspectBackendOwnership(
+                port,
+                process.Id,
+                ownershipChecks.IsListenerOwnedBy);
+            if (ownership == BackendOwnership.Unknown)
+            {
+                return process.HasExited
+                    ? BackendWaitOutcome.Exited
+                    : BackendWaitOutcome.OwnershipUnknown;
+            }
+            if (ownership == BackendOwnership.Lost)
+            {
+                if (!process.HasExited)
+                {
+                    await Task.WhenAny(
+                        process.WaitForExitAsync(),
+                        Task.Delay(ownershipChecks.PollInterval, cancellationToken));
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+                return process.HasExited
+                    ? BackendWaitOutcome.Exited
+                    : BackendWaitOutcome.OwnershipLost;
+            }
+            await Task.Delay(ownershipChecks.PollInterval, cancellationToken);
+        }
+        return BackendWaitOutcome.Exited;
+    }
+
     private enum BackendOwnership
     {
         Owned,
         Lost,
         Unknown,
+    }
+
+    private enum BackendWaitOutcome
+    {
+        Exited,
+        OwnershipLost,
+        OwnershipUnknown,
     }
 }
