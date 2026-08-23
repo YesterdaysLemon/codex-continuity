@@ -216,6 +216,31 @@ public sealed class BackendLeaseTests : IDisposable
                 ValidLease().CodexHome));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void LivePidWithMismatchedIdentityIsStale(bool mismatchStartTime)
+    {
+        var lease = CurrentProcessLease(backendPort: 45124);
+        lease = mismatchStartTime
+            ? lease with { BackendStartedAtUtc = lease.BackendStartedAtUtc.AddSeconds(-1) }
+            : lease with { BackendExecutable = $"{lease.BackendExecutable}.different" };
+        var store = Store();
+        store.Write(lease);
+
+        Assert.Equal(
+            new BackendRecoveryResult(
+                BackendRecoveryKind.Stale,
+                Backend: null,
+                lease,
+                "The leased process identity is stale."),
+            BackendLeaseRecovery.TryRecover(
+                store,
+                lease.PublicPort,
+                lease.BackendExecutable,
+                lease.CodexHome));
+    }
+
     [Fact]
     public void RejectsRecoveryWhileRecordedSupervisorIsAlive()
     {
