@@ -50,20 +50,24 @@ internal sealed class RelayGateLease(LoopbackRelay relay, long ownedEpoch)
 internal sealed class RelayBackendStopReservation(
     LoopbackRelay relay,
     long ownedEpoch,
+    long reservationToken,
     int backendPort) : IDisposable
 {
     private int disposed;
 
     internal int BackendPort => backendPort;
 
-    internal bool IsCurrent =>
-        relay.IsBackendStopReservationCurrent(ownedEpoch, backendPort);
+    internal bool IsCurrent => Volatile.Read(ref disposed) == 0 &&
+        relay.IsBackendStopReservationCurrent(
+            ownedEpoch,
+            reservationToken,
+            backendPort);
 
     public void Dispose()
     {
         if (Interlocked.Exchange(ref disposed, 1) == 0)
         {
-            relay.ReleaseBackendStopReservation(ownedEpoch);
+            relay.ReleaseBackendStopReservation(reservationToken);
         }
     }
 }
@@ -82,7 +86,8 @@ internal sealed class LoopbackRelay : IAsyncDisposable
     private int backendPort;
     private long gateEpoch;
     private long? exclusiveGateEpoch;
-    private long? backendStopReservationEpoch;
+    private long nextBackendStopReservationToken;
+    private long? activeBackendStopReservationToken;
     private bool gated;
     private bool disposed;
 
@@ -197,7 +202,6 @@ internal sealed class LoopbackRelay : IAsyncDisposable
             gated = true;
             ownedEpoch = ++gateEpoch;
             exclusiveGateEpoch = ownedEpoch;
-            backendStopReservationEpoch = null;
             snapshot = [.. connections];
         }
 
@@ -221,7 +225,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
                 !gated ||
                 gateEpoch != ownedEpoch ||
                 exclusiveGateEpoch != ownedEpoch ||
-                backendStopReservationEpoch is not null)
+                activeBackendStopReservationToken is not null)
             {
                 return false;
             }
@@ -245,7 +249,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
                 !gated ||
                 gateEpoch != ownedEpoch ||
                 exclusiveGateEpoch != ownedEpoch ||
-                backendStopReservationEpoch is not null)
+                activeBackendStopReservationToken is not null)
             {
                 return null;
             }
@@ -254,12 +258,20 @@ internal sealed class LoopbackRelay : IAsyncDisposable
                 throw new InvalidOperationException(
                     "The relay backend cannot stop until old connections have drained.");
             }
-            backendStopReservationEpoch = ownedEpoch;
-            return new RelayBackendStopReservation(this, ownedEpoch, backendPort);
+            var reservationToken = checked(++nextBackendStopReservationToken);
+            activeBackendStopReservationToken = reservationToken;
+            return new RelayBackendStopReservation(
+                this,
+                ownedEpoch,
+                reservationToken,
+                backendPort);
         }
     }
 
-    internal bool IsBackendStopReservationCurrent(long ownedEpoch, int ownedBackendPort)
+    internal bool IsBackendStopReservationCurrent(
+        long ownedEpoch,
+        long reservationToken,
+        int ownedBackendPort)
     {
         lock (sync)
         {
@@ -267,18 +279,18 @@ internal sealed class LoopbackRelay : IAsyncDisposable
                 gated &&
                 gateEpoch == ownedEpoch &&
                 exclusiveGateEpoch == ownedEpoch &&
-                backendStopReservationEpoch == ownedEpoch &&
+                activeBackendStopReservationToken == reservationToken &&
                 backendPort == ownedBackendPort;
         }
     }
 
-    internal void ReleaseBackendStopReservation(long ownedEpoch)
+    internal void ReleaseBackendStopReservation(long reservationToken)
     {
         lock (sync)
         {
-            if (backendStopReservationEpoch == ownedEpoch)
+            if (activeBackendStopReservationToken == reservationToken)
             {
-                backendStopReservationEpoch = null;
+                activeBackendStopReservationToken = null;
             }
         }
     }
@@ -292,7 +304,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
                 !gated ||
                 gateEpoch != ownedEpoch ||
                 exclusiveGateEpoch != ownedEpoch ||
-                backendStopReservationEpoch is not null)
+                activeBackendStopReservationToken is not null)
             {
                 return false;
             }
@@ -337,7 +349,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
                 throw new InvalidOperationException(
                     "The relay backend is owned by an exclusive gate transition.");
             }
-            if (backendStopReservationEpoch is not null)
+            if (activeBackendStopReservationToken is not null)
             {
                 throw new InvalidOperationException(
                     "The relay backend is reserved for a stop transition.");
@@ -361,7 +373,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
                 throw new InvalidOperationException(
                     "The relay gate is owned by an exclusive gate transition.");
             }
-            if (backendStopReservationEpoch is not null)
+            if (activeBackendStopReservationToken is not null)
             {
                 throw new InvalidOperationException(
                     "The relay gate is reserved for a backend stop transition.");

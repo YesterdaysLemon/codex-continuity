@@ -202,6 +202,11 @@ public sealed class LoopbackRelayTests
         Assert.False(result.GateLease.TryOpen());
         Assert.False(result.GateLease.TryRetargetAndOpen(replacement.Port));
         reservation.Dispose();
+        using var nextReservation = result.GateLease.TryReserveBackendStop();
+        Assert.NotNull(nextReservation);
+        Assert.False(reservation.IsCurrent);
+        Assert.True(nextReservation.IsCurrent);
+        nextReservation.Dispose();
         Assert.True(result.GateLease.TryRetargetAndOpen(replacement.Port));
     }
 
