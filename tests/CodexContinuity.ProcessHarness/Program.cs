@@ -20,7 +20,8 @@ internal static class Program
         {
             return FakeSelfTestAppServer.RunAsync(
                 int.Parse(args[1], CultureInfo.InvariantCulture),
-                args[2]).GetAwaiter().GetResult();
+                args[2],
+                args.Length > 3 ? args[3] : null).GetAwaiter().GetResult();
         }
 
         if (args.FirstOrDefault() == "socket-owner-server")

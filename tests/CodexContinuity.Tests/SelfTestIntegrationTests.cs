@@ -114,10 +114,49 @@ public sealed class SelfTestIntegrationTests : IDisposable
         Assert.Equal(unchecked((int)0xC000013A), process.ExitCode);
     }
 
+    [Fact]
+    public async Task CallerCancellationDuringGracefulStopDoesNotBecomeTimeout()
+    {
+        Directory.CreateDirectory(root);
+        var port = AvailablePort();
+        var signalMarkerPath = Path.Combine(root, "signal.txt");
+        using var process = StartFakeBackend(
+            port,
+            "ignore",
+            out _,
+            signalMarkerPath);
+        try
+        {
+            await WaitUntilReadyAsync(port);
+            using var cancellation = new CancellationTokenSource();
+            var stop = Program.StopAppServerWithCtrlBreakAsync(
+                process,
+                TimeSpan.FromSeconds(5),
+                cancellation.Token);
+            Assert.True(SpinWait.SpinUntil(
+                () => File.Exists(signalMarkerPath),
+                TimeSpan.FromSeconds(5)));
+            await cancellation.CancelAsync();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stop);
+
+            Assert.False(process.HasExited);
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill();
+                await process.WaitForExitAsync();
+            }
+        }
+    }
+
     private WindowsProcessGroup StartFakeBackend(
         int port,
         string stopBehavior,
-        out int processId)
+        out int processId,
+        string? signalMarkerPath = null)
     {
         var startInfo = new ProcessStartInfo(HarnessExecutable())
         {
@@ -127,6 +166,10 @@ public sealed class SelfTestIntegrationTests : IDisposable
         startInfo.ArgumentList.Add("fake-self-test-app-server");
         startInfo.ArgumentList.Add(port.ToString());
         startInfo.ArgumentList.Add(stopBehavior);
+        if (signalMarkerPath is not null)
+        {
+            startInfo.ArgumentList.Add(signalMarkerPath);
+        }
         var process = WindowsProcessGroup.Start(startInfo);
         processId = process.Id;
         return process;
