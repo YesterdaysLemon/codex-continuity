@@ -22,7 +22,11 @@ public sealed class RpcReadBudgetTests
         Assert.Equal("unknown", malformedStatus.Status);
 
         Assert.Equal(
-            [new Program.ThreadSummary("thread-2", "Fixture", "idle")],
+            [new Program.ThreadSummary(
+                "thread-2",
+                "Fixture",
+                "idle",
+                new ThreadLifecycleStatus("idle", [], Malformed: false))],
             Program.RpcClient.ParseThreadData(JsonNode.Parse(
                 """[{"id":"thread-2","name":"Fixture","status":{"type":"idle"}}]""")));
     }

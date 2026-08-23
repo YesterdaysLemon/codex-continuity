@@ -10,6 +10,7 @@ namespace CodexContinuity;
 internal static class Program
 {
     private const int DefaultPort = LoopbackEndpoint.DefaultPort;
+    private const int MaximumLifecycleThreads = 10_000;
     private const string UpdateManifestUrl =
         "https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json";
 
@@ -28,6 +29,7 @@ internal static class Program
                 "help" or "--help" or "-h" => PrintHelp(),
                 "probe" => await ProbeAsync(port),
                 "status" => await PrintStatusAsync(port),
+                "handoff-plan" => await PrintHandoffPlanAsync(port),
                 "update" => await UpdateAsync(),
                 "serve" => await ServeAsync(port),
                 "install" => await InstallAsync(
@@ -96,6 +98,7 @@ internal static class Program
             Commands:
               probe       Inspect the installed desktop, update manifest, and backend configuration.
               status      Check backend health and count active threads.
+              handoff-plan  Read whether lifecycle work must wait, apply an update, or may hand off.
               update      Check for and safely stage a verified Continuity release.
               serve       Supervise a loopback WebSocket app-server.
               install     Configure future desktop launches and start at user logon.
@@ -220,6 +223,39 @@ internal static class Program
                 JsonOptions),
         };
         Console.WriteLine(result.ToJsonString(JsonOptions));
+        return 0;
+    }
+
+    private static async Task<int> PrintHandoffPlanAsync(int port)
+    {
+        var backendReady = await IsReadyAsync(port, TimeSpan.FromSeconds(2));
+        var threads = new List<ThreadLifecycleStatus>();
+        if (backendReady)
+        {
+            try
+            {
+                await using var client = await RpcClient.ConnectAsync(
+                    LoopbackEndpoint.WebSocketUrl(port));
+                threads.AddRange((await client.ListThreadsAsync(MaximumLifecycleThreads)).Select(
+                    thread => thread.Activity));
+            }
+            catch (Exception exception) when (
+                exception is HttpRequestException or JsonException or InvalidOperationException or
+                    OperationCanceledException or WebSocketException)
+            {
+                backendReady = false;
+            }
+        }
+
+        var updateState = new ContinuityUpdateStateStore(
+            ContinuityPaths.UpdateStatusFile(ContinuityPaths.StateDirectory)).Load();
+        var selectedBuild = ContinuitySelectedBuildReader.Load(ContinuityPaths.StateDirectory);
+        var plan = ContinuityHandoffPlanner.Create(
+            backendReady,
+            threads,
+            updateState,
+            selectedBuild);
+        Console.WriteLine(JsonSerializer.Serialize(plan, JsonOptions));
         return 0;
     }
 
@@ -1113,7 +1149,11 @@ internal static class Program
     };
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
-    internal sealed record ThreadSummary(string Id, string? Name, string Status);
+    internal sealed record ThreadSummary(
+        string Id,
+        string? Name,
+        string Status,
+        ThreadLifecycleStatus Activity);
 
     internal sealed class RpcClient : IAsyncDisposable
     {
@@ -1219,15 +1259,12 @@ internal static class Program
                     throw new InvalidOperationException(
                         "thread/list returned a malformed thread entry.");
                 }
-                var status = thread["status"]?["type"] is JsonValue statusValue &&
-                    statusValue.TryGetValue<string>(out var parsedStatus) &&
-                    !string.IsNullOrWhiteSpace(parsedStatus)
-                        ? parsedStatus
-                        : "unknown";
+                var activity = ThreadLifecycleStatus.Parse(thread["status"]);
                 threads.Add(new ThreadSummary(
                     thread["id"]?.GetValue<string>() ?? string.Empty,
                     thread["name"]?.GetValue<string>(),
-                    status));
+                    activity.Type,
+                    activity));
             }
             return threads;
         }
