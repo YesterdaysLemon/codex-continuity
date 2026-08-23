@@ -204,6 +204,7 @@ public sealed class UpdateStateTests : IDisposable
         Assert.Equivalent(replacement, store.Load().State, strict: true);
         Assert.False(File.Exists(BoundedStateFile.TemporaryPath(path)));
         Assert.False(File.Exists(BoundedStateFile.BackupPath(path)));
+        Assert.False(File.Exists(BoundedStateFile.WritingPath(path)));
 
         File.Move(path, BoundedStateFile.BackupPath(path));
         Assert.Equivalent(replacement, store.Load().State, strict: true);

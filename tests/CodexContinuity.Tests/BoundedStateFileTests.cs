@@ -85,6 +85,19 @@ public sealed class BoundedStateFileTests : IDisposable
         Assert.Equal(newBytes, File.ReadAllBytes(path));
     }
 
+    [Fact]
+    public void CrashTruncatedWritingFileIsNeverPromoted()
+    {
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "state.json");
+        File.WriteAllText(BoundedStateFile.WritingPath(path), "{\"partial\":");
+
+        Assert.Throws<FileNotFoundException>(() =>
+            BoundedStateFile.Open(path, maximumBytes: 128));
+        Assert.False(File.Exists(path));
+        Assert.True(File.Exists(BoundedStateFile.WritingPath(path)));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(root))

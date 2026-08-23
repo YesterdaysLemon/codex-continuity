@@ -237,13 +237,7 @@ internal sealed class InstallStateStore(string path)
         BoundedStateFile.WriteAtomically(path, bytes);
     }
 
-    internal void Delete()
-    {
-        if (File.Exists(path))
-        {
-            File.Delete(path);
-        }
-    }
+    internal void Delete() => BoundedStateFile.DeleteAtomically(path);
 }
 
 internal sealed class InstallCoordinator(

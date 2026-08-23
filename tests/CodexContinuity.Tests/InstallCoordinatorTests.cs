@@ -69,9 +69,32 @@ public sealed class InstallCoordinatorTests : IDisposable
         Assert.Equal(replacement, store.Load());
         Assert.False(File.Exists(BoundedStateFile.TemporaryPath(path)));
         Assert.False(File.Exists(BoundedStateFile.BackupPath(path)));
+        Assert.False(File.Exists(BoundedStateFile.WritingPath(path)));
 
         File.Move(path, BoundedStateFile.BackupPath(path));
         Assert.Equal(replacement, store.Load());
+    }
+
+    [Fact]
+    public void InstallStateDeleteCannotBeUndoneByRecoveryArtifacts()
+    {
+        CreateCoordinator(new FakeInstallPlatform()).Install(
+            CreateSource("version-one"),
+            45123,
+            TrayInstallMode.Disabled);
+        var path = ContinuityPaths.InstallStateFile(root);
+        var store = new InstallStateStore(path);
+        File.WriteAllText(BoundedStateFile.WritingPath(path), "partial");
+        File.WriteAllText(BoundedStateFile.TemporaryPath(path), "replacement");
+        File.WriteAllText(BoundedStateFile.BackupPath(path), "backup");
+
+        store.Delete();
+
+        Assert.Null(store.Load());
+        Assert.False(File.Exists(path));
+        Assert.False(File.Exists(BoundedStateFile.WritingPath(path)));
+        Assert.False(File.Exists(BoundedStateFile.TemporaryPath(path)));
+        Assert.False(File.Exists(BoundedStateFile.BackupPath(path)));
     }
 
     [Fact]

@@ -68,13 +68,24 @@ internal sealed class BoundedStateFile : IDisposable
         RecoverInterruptedWrite(path);
         var temporaryPath = TemporaryPath(path);
         var backupPath = BackupPath(path);
+        var writingPath = WritingPath(path);
+        TryDelete(writingPath);
         TryDelete(temporaryPath);
         TryDelete(backupPath);
-        var temporaryComplete = false;
         try
         {
-            File.WriteAllBytes(temporaryPath, bytes);
-            temporaryComplete = true;
+            using (var writer = new FileStream(
+                       writingPath,
+                       FileMode.CreateNew,
+                       FileAccess.Write,
+                       FileShare.None,
+                       bufferSize: 4096,
+                       options: FileOptions.WriteThrough))
+            {
+                writer.Write(bytes);
+                writer.Flush(flushToDisk: true);
+            }
+            File.Move(writingPath, temporaryPath);
             if (File.Exists(path))
             {
                 try
@@ -97,15 +108,29 @@ internal sealed class BoundedStateFile : IDisposable
         }
         finally
         {
-            if (!temporaryComplete || File.Exists(path))
-            {
-                TryDelete(temporaryPath);
-            }
+            TryDelete(writingPath);
             if (File.Exists(path))
             {
+                TryDelete(temporaryPath);
                 TryDelete(backupPath);
             }
         }
+    }
+
+    internal static void DeleteAtomically(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        var directory = Path.GetDirectoryName(path)
+            ?? throw new InvalidOperationException($"State path has no directory: {path}");
+        if (!Directory.Exists(directory))
+        {
+            return;
+        }
+        using var recoveryLock = AcquireRecoveryLock(path);
+        File.Delete(WritingPath(path));
+        File.Delete(TemporaryPath(path));
+        File.Delete(BackupPath(path));
+        File.Delete(path);
     }
 
     internal static StateFileRecoveryKind RecoverInterruptedWrite(string path)
@@ -132,6 +157,8 @@ internal sealed class BoundedStateFile : IDisposable
     internal static string TemporaryPath(string path) => $"{path}.tmp";
 
     internal static string BackupPath(string path) => $"{path}.bak";
+
+    internal static string WritingPath(string path) => $"{path}.writing";
 
     public void Dispose() => stream.Dispose();
 
