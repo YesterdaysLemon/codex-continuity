@@ -147,6 +147,8 @@ internal interface IInstallPlatform
 
 internal sealed class InstallStateStore(string path)
 {
+    private const int MaximumDiscoveryStateBytes = 512 * 1024;
+    private const int MaximumPathCharacters = 32767;
     internal const int CurrentSchemaVersion = 4;
 
     private static readonly JsonSerializerOptions SerializerOptions = new()
@@ -164,6 +166,81 @@ internal sealed class InstallStateStore(string path)
 
         return JsonSerializer.Deserialize<InstallState>(File.ReadAllText(path), SerializerOptions)
             ?? throw new InvalidDataException($"Install state at {path} is empty or invalid.");
+    }
+
+    internal IReadOnlyList<string> LoadSupervisorExecutablePaths()
+    {
+        try
+        {
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            if (stream.Length > MaximumDiscoveryStateBytes)
+            {
+                throw new InvalidDataException();
+            }
+            var bytes = new byte[MaximumDiscoveryStateBytes + 1];
+            var total = 0;
+            while (total < bytes.Length)
+            {
+                var read = stream.Read(bytes, total, bytes.Length - total);
+                if (read == 0)
+                {
+                    break;
+                }
+                total += read;
+            }
+            if (total > MaximumDiscoveryStateBytes)
+            {
+                throw new InvalidDataException();
+            }
+
+            using var document = JsonDocument.Parse(bytes.AsMemory(0, total));
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty(
+                    "installedExecutable",
+                    out var installedElement) ||
+                installedElement.ValueKind != JsonValueKind.String)
+            {
+                throw new InvalidDataException();
+            }
+            var installedExecutable = installedElement.GetString();
+            if (string.IsNullOrWhiteSpace(installedExecutable) ||
+                installedExecutable.Length > MaximumPathCharacters)
+            {
+                throw new InvalidDataException();
+            }
+            var executablePaths = new List<string> { installedExecutable };
+            if (document.RootElement.TryGetProperty(
+                    "previousInstalledExecutable",
+                    out var previousElement) &&
+                previousElement.ValueKind != JsonValueKind.Null)
+            {
+                if (previousElement.ValueKind != JsonValueKind.String ||
+                    previousElement.GetString() is not { } previousExecutable ||
+                    string.IsNullOrWhiteSpace(previousExecutable) ||
+                    previousExecutable.Length > MaximumPathCharacters)
+                {
+                    throw new InvalidDataException();
+                }
+                executablePaths.Add(previousExecutable);
+            }
+            return executablePaths;
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return [];
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or JsonException or
+                InvalidDataException)
+        {
+            throw new InvalidDataException(
+                InstallCoordinator.SupervisorDiscoveryFailureMessage);
+        }
     }
 
     internal void Save(InstallState state)
@@ -201,6 +278,9 @@ internal sealed class InstallCoordinator(
     InstallStateStore stateStore,
     string? legacyStateDirectory = null)
 {
+    private const int MaximumKnownVersionsPerStateDirectory = 128;
+    internal const string SupervisorDiscoveryFailureMessage =
+        "Persisted Continuity process-discovery evidence cannot be trusted.";
     internal const string AppServerUrlVariable = "CODEX_APP_SERVER_WS_URL";
     internal const string DisableUpdaterVariable = "CODEX_SPARKLE_ENABLED";
     internal const string PathVariable = "Path";
@@ -212,6 +292,75 @@ internal sealed class InstallCoordinator(
             return null;
         }
         return LoadLegacyState()?.Port ?? LegacyInstalledPort(platform.GetStartupCommand());
+    }
+
+    internal IReadOnlyList<string> KnownSupervisorExecutables()
+    {
+        try
+        {
+            var candidates = new List<string?>();
+            candidates.AddRange(stateStore.LoadSupervisorExecutablePaths());
+            var legacyStateStore = LegacyStateStore();
+            if (legacyStateStore is not null)
+            {
+                candidates.AddRange(legacyStateStore.LoadSupervisorExecutablePaths());
+            }
+            candidates.Add(LegacyInstalledExecutable(platform.GetStartupCommand()));
+            candidates.AddRange(LegacyExecutableCandidates());
+            candidates.Add(ContinuityPaths.CommandExecutable(stateDirectory));
+            if (legacyStateDirectory is not null &&
+                !PathsEqual(stateDirectory, legacyStateDirectory))
+            {
+                candidates.Add(ContinuityPaths.CommandExecutable(legacyStateDirectory));
+            }
+            foreach (var directory in new[] { stateDirectory, legacyStateDirectory }
+                         .OfType<string>()
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                var versionsDirectory = ContinuityPaths.VersionsDirectory(directory);
+                string[] versionEntries;
+                try
+                {
+                    versionEntries = Directory.EnumerateFileSystemEntries(versionsDirectory)
+                        .Take(MaximumKnownVersionsPerStateDirectory + 1)
+                        .ToArray();
+                }
+                catch (DirectoryNotFoundException)
+                {
+                    continue;
+                }
+                if (versionEntries.Length > MaximumKnownVersionsPerStateDirectory)
+                {
+                    throw new InvalidDataException();
+                }
+                candidates.AddRange(versionEntries
+                    .Where(versionEntry =>
+                        (File.GetAttributes(versionEntry) & FileAttributes.Directory) != 0)
+                    .Select(versionDirectory =>
+                        Path.Combine(versionDirectory, "CodexContinuity.exe")));
+            }
+
+            var normalized = new List<string>();
+            foreach (var candidate in candidates.OfType<string>())
+            {
+                if (!Path.IsPathFullyQualified(candidate) ||
+                    !Path.GetFileName(candidate).Equals(
+                        "CodexContinuity.exe",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException();
+                }
+                normalized.Add(Path.GetFullPath(candidate));
+            }
+            return normalized.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or InvalidDataException or
+                ArgumentException or NotSupportedException or PathTooLongException or
+                System.Security.SecurityException)
+        {
+            throw new InvalidDataException(SupervisorDiscoveryFailureMessage);
+        }
     }
 
     internal InstallOutcome Install(
