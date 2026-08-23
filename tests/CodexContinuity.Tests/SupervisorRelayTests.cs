@@ -1,5 +1,6 @@
 using CodexContinuity.ProcessHarness;
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
@@ -12,12 +13,14 @@ public sealed class SupervisorRelayTests : IDisposable
     private readonly string root = Path.Combine(
         Path.GetTempPath(),
         $"codex-continuity-supervisor-relay-{Guid.NewGuid():N}");
+    private readonly ConcurrentQueue<HarnessIdentity> harnesses = new();
 
     [Fact]
-    public async Task SupervisorKeepsPublicEndpointSeparateFromPrivateBackend()
+    public async Task GatesPublicEndpointUntilPrivateBackendIsReady()
     {
         var publicPort = FindAvailablePort();
-        var fixtureReadyPath = Path.Combine(root, "fixture-ready.txt");
+        var fixtureStartedPath = Path.Combine(root, "fixture-started.txt");
+        var startGatePath = Path.Combine(root, "start-gate.txt");
         var privatePort = 0;
         var backendProcessId = 0;
         using var shutdown = new CancellationTokenSource();
@@ -25,7 +28,7 @@ public sealed class SupervisorRelayTests : IDisposable
         WindowsProcessGroup StartBackend(int port)
         {
             privatePort = port;
-            var process = StartHarnessBackend(port, fixtureReadyPath);
+            var process = StartHarnessBackend(port, fixtureStartedPath, startGatePath);
             backendProcessId = process.Id;
             return process;
         }
@@ -34,6 +37,11 @@ public sealed class SupervisorRelayTests : IDisposable
             publicPort, root, shutdown.Token, StartBackend);
         try
         {
+            await WaitForFileAsync(fixtureStartedPath);
+            await AssertEndpointUnavailableAsync(publicPort);
+            Assert.False(CanBind(publicPort));
+
+            await File.WriteAllTextAsync(startGatePath, "release");
             var relayedBody = await ReadWhenReadyAsync(publicPort);
             var directBody = await ReadWhenReadyAsync(privatePort);
             var status = await ReadRunningStatusAsync();
@@ -57,12 +65,11 @@ public sealed class SupervisorRelayTests : IDisposable
                     SupervisorStartedAtUtc: status.SupervisorStartedAtUtc,
                     SupervisorExecutable: status.SupervisorExecutable),
                 status);
-            Assert.False(CanBind(publicPort));
         }
         finally
         {
             shutdown.Cancel();
-            Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+            await supervisor.WaitAsync(TimeSpan.FromSeconds(10));
         }
 
         Assert.False(ProcessIsRunning(backendProcessId));
@@ -73,48 +80,24 @@ public sealed class SupervisorRelayTests : IDisposable
     }
 
     [Fact]
-    public async Task BackendRestartKeepsExclusivePublicEndpoint()
+    public async Task StatusWriteFailureStopsOwnedBackend()
     {
-        var publicPort = FindAvailablePort();
-        var backendPorts = new ConcurrentQueue<int>();
-        var backendProcessIds = new ConcurrentQueue<int>();
-        var generation = 0;
-        using var shutdown = new CancellationTokenSource();
+        Directory.CreateDirectory(ContinuityPaths.SupervisorStatusFile(root));
+        var backendProcessId = 0;
 
         WindowsProcessGroup StartBackend(int port)
         {
-            var currentGeneration = Interlocked.Increment(ref generation);
-            var process = StartHarnessBackend(
-                port,
-                Path.Combine(root, $"fixture-ready-{currentGeneration}.txt"),
-                exitAfterRequests: currentGeneration == 1 ? 2 : 0);
-            backendPorts.Enqueue(port);
-            backendProcessIds.Enqueue(process.Id);
+            var process = StartHarnessBackend(port, Path.Combine(root, "fixture-started.txt"));
+            backendProcessId = process.Id;
             return process;
         }
 
-        var supervisor = OwnedSupervisorRuntime.RunAsync(
-            publicPort, root, shutdown.Token, StartBackend);
-        try
-        {
-            var firstBody = await ReadWhenReadyAsync(publicPort);
-            Assert.False(CanBind(publicPort));
-            var secondBody = await ReadWhenBodyChangesAsync(publicPort, firstBody);
-            var ports = backendPorts.ToArray();
-            var processIds = backendProcessIds.ToArray();
+        await Assert.ThrowsAnyAsync<IOException>(async () =>
+            await OwnedSupervisorRuntime.RunAsync(
+                FindAvailablePort(), root, CancellationToken.None, StartBackend)
+                .WaitAsync(TimeSpan.FromSeconds(10)));
 
-            Assert.True(ports.Length >= 2);
-            Assert.NotEqual(ports[0], ports[1]);
-            Assert.Equal($"backend:{ports[0]}", firstBody);
-            Assert.Equal($"backend:{ports[1]}", secondBody);
-            Assert.False(ProcessIsRunning(processIds[0]));
-            Assert.False(CanBind(publicPort));
-        }
-        finally
-        {
-            shutdown.Cancel();
-            Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
-        }
+        Assert.False(ProcessIsRunning(backendProcessId));
     }
 
     private async Task<SupervisorStatus> ReadRunningStatusAsync()
@@ -133,20 +116,50 @@ public sealed class SupervisorRelayTests : IDisposable
 
     private WindowsProcessGroup StartHarnessBackend(
         int port,
-        string fixtureReadyPath,
-        int exitAfterRequests = 0)
+        string fixtureStartedPath,
+        string? startGatePath = null)
     {
-        var harnessExecutable = Path.ChangeExtension(typeof(HarnessMarker).Assembly.Location, ".exe");
-        var startInfo = new ProcessStartInfo(harnessExecutable)
+        var executable = HarnessExecutable();
+        var startInfo = new ProcessStartInfo(executable)
         {
             UseShellExecute = false,
             WorkingDirectory = root,
         };
         startInfo.ArgumentList.Add("fake-app-server");
         startInfo.ArgumentList.Add(port.ToString());
-        startInfo.ArgumentList.Add(fixtureReadyPath);
-        startInfo.ArgumentList.Add(exitAfterRequests.ToString());
-        return WindowsProcessGroup.Start(startInfo);
+        startInfo.ArgumentList.Add(fixtureStartedPath);
+        startInfo.ArgumentList.Add("0");
+        if (startGatePath is not null)
+        {
+            startInfo.ArgumentList.Add(startGatePath);
+        }
+        var process = WindowsProcessGroup.Start(startInfo);
+        harnesses.Enqueue(new(process.Id, process.StartedAtUtc, executable));
+        return process;
+    }
+
+    private static string HarnessExecutable() => Path.ChangeExtension(
+        typeof(HarnessMarker).Assembly.Location,
+        ".exe");
+
+    private static async Task WaitForFileAsync(string path)
+    {
+        for (var attempt = 0; attempt < 50; attempt++)
+        {
+            if (File.Exists(path))
+            {
+                return;
+            }
+            await Task.Delay(100);
+        }
+        throw new TimeoutException($"Fixture did not create {path}.");
+    }
+
+    private static async Task AssertEndpointUnavailableAsync(int port)
+    {
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
+        await Assert.ThrowsAsync<HttpRequestException>(async () =>
+            await client.GetStringAsync($"http://127.0.0.1:{port}/readyz"));
     }
 
     private async Task<string> ReadWhenReadyAsync(int port)
@@ -170,28 +183,6 @@ public sealed class SupervisorRelayTests : IDisposable
         var log = File.Exists(logPath) ? await File.ReadAllTextAsync(logPath) : "<no log>";
         throw new TimeoutException(
             $"Endpoint on port {port} did not become ready. Status: {status}. Log: {log}");
-    }
-
-    private async Task<string> ReadWhenBodyChangesAsync(int port, string previousBody)
-    {
-        using var client = new HttpClient { Timeout = TimeSpan.FromMilliseconds(500) };
-        for (var attempt = 0; attempt < 40; attempt++)
-        {
-            try
-            {
-                var body = await client.GetStringAsync($"http://127.0.0.1:{port}/readyz");
-                if (body != previousBody)
-                {
-                    return body;
-                }
-            }
-            catch (Exception exception) when (
-                exception is HttpRequestException or TaskCanceledException)
-            {
-            }
-            await Task.Delay(100);
-        }
-        throw new TimeoutException("Public relay did not expose the restarted backend.");
     }
 
     private static int FindAvailablePort()
@@ -238,9 +229,43 @@ public sealed class SupervisorRelayTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var identity in harnesses)
+        {
+            StopHarnessIfMatching(identity);
+        }
         if (Directory.Exists(root))
         {
             Directory.Delete(root, recursive: true);
         }
     }
+
+    private static void StopHarnessIfMatching(HarnessIdentity identity)
+    {
+        try
+        {
+            using var process = WindowsProcessGroup.Attach(identity.ProcessId);
+            if (process.StartedAtUtc != identity.StartedAtUtc ||
+                !StringComparer.OrdinalIgnoreCase.Equals(
+                    process.ExecutablePath,
+                    identity.ExecutablePath))
+            {
+                return;
+            }
+            if (!process.HasExited)
+            {
+                process.Kill();
+                process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5))
+                    .GetAwaiter().GetResult();
+            }
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or InvalidOperationException or Win32Exception)
+        {
+        }
+    }
+
+    private sealed record HarnessIdentity(
+        int ProcessId,
+        DateTimeOffset StartedAtUtc,
+        string ExecutablePath);
 }

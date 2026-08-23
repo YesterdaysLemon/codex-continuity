@@ -37,7 +37,8 @@ internal static class Program
                 args[2],
                 args.Length > 3
                     ? int.Parse(args[3], CultureInfo.InvariantCulture)
-                    : 0).GetAwaiter().GetResult();
+                    : 0,
+                args.Length > 4 ? args[4] : null).GetAwaiter().GetResult();
         }
 
         if (args.FirstOrDefault() == "process-group-parent")
@@ -133,7 +134,8 @@ internal static class Program
     private static async Task<int> RunFakeAppServerAsync(
         int port,
         string readyPath,
-        int exitAfterRequests)
+        int exitAfterRequests,
+        string? startGatePath)
     {
         using var shutdown = new CancellationTokenSource();
         ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
@@ -143,13 +145,17 @@ internal static class Program
         };
         Console.CancelKeyPress += cancelHandler;
         var listener = new TcpListener(IPAddress.Loopback, port);
-        listener.Start();
         await File.WriteAllTextAsync(
             readyPath,
             Environment.ProcessId.ToString(CultureInfo.InvariantCulture));
         var requestCount = 0;
         try
         {
+            while (startGatePath is not null && !File.Exists(startGatePath))
+            {
+                await Task.Delay(25, shutdown.Token);
+            }
+            listener.Start();
             while (!shutdown.IsCancellationRequested)
             {
                 try
