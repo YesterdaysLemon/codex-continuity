@@ -6,9 +6,10 @@ namespace CodexContinuity;
 internal sealed record SupervisorCompatibilityScope(
     IReadOnlyList<string> StateDirectories)
 {
+    internal IReadOnlyList<string> ExpectedExecutables { get; init; } = [];
+
     internal static SupervisorCompatibilityScope ForStateDirectory(string stateDirectory) =>
         new([stateDirectory]);
-
 }
 
 internal enum RecordedSupervisorState
@@ -18,8 +19,47 @@ internal enum RecordedSupervisorState
     Unsafe,
 }
 
+internal enum ExpectedSupervisorProcessState
+{
+    Missing,
+    Active,
+    Unsafe,
+}
+
+internal sealed record SupervisorProcessSnapshot(
+    int ProcessId,
+    string? ExecutablePath);
+
 internal static class SupervisorCompatibilityGuard
 {
+    internal static void EnsureInactive(
+        SupervisorCompatibilityScope scope,
+        string operation) => EnsureInactive(
+            scope,
+            operation,
+            candidates => InspectExpectedExecutables(candidates, SnapshotProcesses));
+
+    internal static void EnsureInactive(
+        SupervisorCompatibilityScope scope,
+        string operation,
+        Func<IReadOnlyList<string>, ExpectedSupervisorProcessState> inspectProcesses)
+    {
+        EnsureNoActiveRecord(scope, operation);
+        var processState = inspectProcesses(scope.ExpectedExecutables);
+        if (processState == ExpectedSupervisorProcessState.Active)
+        {
+            throw new InvalidOperationException(
+                $"A previous Continuity supervisor executable is still active. " +
+                $"Refusing to {operation}.");
+        }
+        if (processState == ExpectedSupervisorProcessState.Unsafe)
+        {
+            throw new InvalidOperationException(
+                $"A running CodexContinuity process could not be identified safely. " +
+                $"Refusing to {operation}.");
+        }
+    }
+
     internal static void EnsureNoActiveRecord(
         SupervisorCompatibilityScope scope,
         string operation)
@@ -114,4 +154,74 @@ internal static class SupervisorCompatibilityGuard
         Path.GetFullPath(first).Equals(
             Path.GetFullPath(second),
             StringComparison.OrdinalIgnoreCase);
+
+    internal static ExpectedSupervisorProcessState InspectExpectedExecutables(
+        IReadOnlyList<string> candidates,
+        Func<string, IReadOnlyList<SupervisorProcessSnapshot>> snapshotProcesses)
+    {
+        var normalizedCandidates = candidates
+            .Select(Path.GetFullPath)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var processName in normalizedCandidates
+                     .Select(Path.GetFileNameWithoutExtension)
+                     .OfType<string>()
+                     .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var process in snapshotProcesses(processName))
+            {
+                if (process.ProcessId == Environment.ProcessId)
+                {
+                    continue;
+                }
+                if (process.ExecutablePath is not { } executable)
+                {
+                    return ExpectedSupervisorProcessState.Unsafe;
+                }
+                if (normalizedCandidates.Contains(Path.GetFullPath(executable)))
+                {
+                    return ExpectedSupervisorProcessState.Active;
+                }
+            }
+        }
+        return ExpectedSupervisorProcessState.Missing;
+    }
+
+    private static IReadOnlyList<SupervisorProcessSnapshot> SnapshotProcesses(string processName)
+    {
+        var processes = Process.GetProcessesByName(processName);
+        var snapshots = new List<SupervisorProcessSnapshot>(processes.Length);
+        try
+        {
+            foreach (var process in processes)
+            {
+                var processId = process.Id;
+                if (processId == Environment.ProcessId)
+                {
+                    snapshots.Add(new(processId, Environment.ProcessPath));
+                    continue;
+                }
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        snapshots.Add(new(processId, process.MainModule?.FileName));
+                    }
+                }
+                catch (Exception exception) when (
+                    exception is ArgumentException or InvalidOperationException or
+                        NotSupportedException or Win32Exception)
+                {
+                    snapshots.Add(new(processId, ExecutablePath: null));
+                }
+            }
+        }
+        finally
+        {
+            foreach (var process in processes)
+            {
+                process.Dispose();
+            }
+        }
+        return snapshots;
+    }
 }

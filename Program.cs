@@ -278,21 +278,77 @@ internal static class Program
         }
     }
 
-    private static Task<int> ServeAsync(int port) =>
-        ServeAsync(port, ContinuityPaths.StateDirectory);
+    private static Task<int> ServeAsync(int port)
+    {
+        var stateDirectory = ContinuityPaths.StateDirectory;
+        var stateDirectories = LifecycleStateDirectories();
+        return ServeAsync(
+            port,
+            stateDirectory,
+            stateDirectories,
+            CreateInstallCoordinator(stateDirectory),
+            AutomaticUpdateRunner.RunAsync,
+            Fail);
+    }
 
     internal static Task<int> ServeAsync(int port, string stateDirectory) =>
         ServeAsync(port, stateDirectory, AutomaticUpdateRunner.RunAsync);
 
-    internal static async Task<int> ServeAsync(
+    internal static Task<int> ServeAsync(
         int port,
         string stateDirectory,
         Func<string, string, CancellationToken, Task> runUpdates)
+        => ServeAsync(
+            port,
+            stateDirectory,
+            SupervisorCompatibilityScope.ForStateDirectory(stateDirectory),
+            runUpdates);
+
+    internal static Task<int> ServeAsync(
+        int port,
+        string stateDirectory,
+        IReadOnlyList<string> lifecycleStateDirectories,
+        InstallCoordinator coordinator,
+        Func<string, string, CancellationToken, Task> runUpdates,
+        Func<string, int> reportFailure) => ServeAsync(
+            port,
+            stateDirectory,
+            ProductionSupervisorCompatibilityScope(lifecycleStateDirectories, coordinator),
+            runUpdates,
+            reportFailure);
+
+    internal static Task<int> ServeAsync(
+        int port,
+        string stateDirectory,
+        SupervisorCompatibilityScope compatibilityScope,
+        Func<string, string, CancellationToken, Task> runUpdates) => ServeAsync(
+            port,
+            stateDirectory,
+            compatibilityScope,
+            runUpdates,
+            Fail);
+
+    private static async Task<int> ServeAsync(
+        int port,
+        string stateDirectory,
+        SupervisorCompatibilityScope compatibilityScope,
+        Func<string, string, CancellationToken, Task> runUpdates,
+        Func<string, int> reportFailure)
     {
         using var supervisorLock = TryAcquireSupervisorLock(stateDirectory);
         if (supervisorLock is null)
         {
-            return Fail($"A Codex Continuity supervisor already owns port {port}.");
+            return reportFailure($"A Codex Continuity supervisor already owns port {port}.");
+        }
+        try
+        {
+            SupervisorCompatibilityGuard.EnsureInactive(
+                compatibilityScope,
+                "start another supervisor");
+        }
+        catch (InvalidOperationException exception)
+        {
+            return reportFailure(exception.Message);
         }
         using var mutex = new Mutex(
             initiallyOwned: true,
@@ -300,7 +356,7 @@ internal static class Program
             out var ownsMutex);
         if (!ownsMutex)
         {
-            return Fail($"A Codex Continuity supervisor already owns port {port}.");
+            return reportFailure($"A Codex Continuity supervisor already owns port {port}.");
         }
 
         Directory.CreateDirectory(stateDirectory);
@@ -332,7 +388,7 @@ internal static class Program
                     lastExitCode: null,
                     nextRetryAtUtc: null,
                     "An endpoint not owned by this supervisor already uses the configured port."));
-                return Fail(
+                return reportFailure(
                     "The configured loopback port is already owned by another endpoint; refusing to adopt its thread store.");
             }
 
@@ -510,6 +566,7 @@ internal static class Program
             : null;
         var existingState = LoadInstallState();
         var coordinator = CreateInstallCoordinator(stateDirectory);
+        var lifecycleStateDirectories = LifecycleStateDirectories();
         var portSelection = await PrepareInstallPortChangeAsync(
             existingState,
             coordinator,
@@ -536,7 +593,8 @@ internal static class Program
             LifecycleLockOwnership.AlreadyHeld);
         var outcome = RunInstallMutation(
             stateDirectory,
-            LifecycleStateDirectories(),
+            lifecycleStateDirectories,
+            coordinator,
             portSelection.InstalledPort,
             port,
             Install);
@@ -680,8 +738,42 @@ internal static class Program
         IReadOnlyList<string> leaseStateDirectories,
         int? installedPort,
         int requestedPort,
+        Func<T> mutation) => RunInstallMutation(
+            stateDirectory,
+            leaseStateDirectories,
+            new SupervisorCompatibilityScope(leaseStateDirectories),
+            installedPort,
+            requestedPort,
+            mutation);
+
+    internal static T RunInstallMutation<T>(
+        string stateDirectory,
+        IReadOnlyList<string> leaseStateDirectories,
+        InstallCoordinator coordinator,
+        int? installedPort,
+        int requestedPort,
         Func<T> mutation) => installedPort is { } port && port != requestedPort
-            ? RunPortChangeMutation(stateDirectory, leaseStateDirectories, port, mutation)
+            ? RunPortChangeMutation(
+                stateDirectory,
+                leaseStateDirectories,
+                ProductionSupervisorCompatibilityScope(leaseStateDirectories, coordinator),
+                port,
+                mutation)
+            : mutation();
+
+    internal static T RunInstallMutation<T>(
+        string stateDirectory,
+        IReadOnlyList<string> leaseStateDirectories,
+        SupervisorCompatibilityScope compatibilityScope,
+        int? installedPort,
+        int requestedPort,
+        Func<T> mutation) => installedPort is { } port && port != requestedPort
+            ? RunPortChangeMutation(
+                stateDirectory,
+                leaseStateDirectories,
+                compatibilityScope,
+                port,
+                mutation)
             : mutation();
 
     internal static T RunPortChangeMutation<T>(
@@ -697,11 +789,26 @@ internal static class Program
         string stateDirectory,
         IReadOnlyList<string> leaseStateDirectories,
         int port,
+        Func<T> mutation) => RunPortChangeMutation(
+            stateDirectory,
+            leaseStateDirectories,
+            new SupervisorCompatibilityScope(leaseStateDirectories),
+            port,
+            mutation);
+
+    private static T RunPortChangeMutation<T>(
+        string stateDirectory,
+        IReadOnlyList<string> leaseStateDirectories,
+        SupervisorCompatibilityScope compatibilityScope,
+        int port,
         Func<T> mutation) => RunLifecycleMutationWithInactiveSupervisor(
             stateDirectory,
             leaseStateDirectories,
             port,
             "change the configured port",
+            () => SupervisorCompatibilityGuard.EnsureInactive(
+                compatibilityScope,
+                "change the configured port"),
             mutation);
 
     internal static T RunUninstallMutation<T>(
@@ -719,6 +826,20 @@ internal static class Program
         IReadOnlyList<string> leaseStateDirectories,
         int port,
         string operation,
+        Func<T> mutation) => RunLifecycleMutationWithInactiveSupervisor(
+            stateDirectory,
+            leaseStateDirectories,
+            port,
+            operation,
+            static () => { },
+            mutation);
+
+    private static T RunLifecycleMutationWithInactiveSupervisor<T>(
+        string stateDirectory,
+        IReadOnlyList<string> leaseStateDirectories,
+        int port,
+        string operation,
+        Action compatibilityCheck,
         Func<T> mutation)
     {
         using var supervisorLock = TryAcquireSupervisorLock(stateDirectory);
@@ -744,6 +865,7 @@ internal static class Program
                 throw new InvalidOperationException(
                     $"The Continuity supervisor on port {port} is still active. Refusing to {operation}.");
             }
+            compatibilityCheck();
             var staleStores = new List<BackendLeaseStore>();
             foreach (var leaseStateDirectory in leaseStateDirectories
                          .Distinct(StringComparer.OrdinalIgnoreCase))
@@ -811,6 +933,13 @@ internal static class Program
         ContinuityPaths.StateDirectory,
         ContinuityPaths.LegacyOpenAiStateDirectory,
     ];
+
+    internal static SupervisorCompatibilityScope ProductionSupervisorCompatibilityScope(
+        IReadOnlyList<string> stateDirectories,
+        InstallCoordinator coordinator) => new(stateDirectories)
+        {
+            ExpectedExecutables = coordinator.KnownSupervisorExecutables(),
+        };
 
     private static DateTimeOffset GetProcessStartedAtUtc()
     {

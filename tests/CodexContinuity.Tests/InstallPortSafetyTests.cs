@@ -354,12 +354,13 @@ public sealed class InstallPortSafetyTests : IDisposable
     public async Task StatelessLegacyStartupFeedsThePortChangeGuard()
     {
         var legacyRoot = Path.Combine(root, "legacy");
+        var legacyExecutable = Path.Combine(legacyRoot, "CodexContinuity.exe");
         var legacyPort = FindAvailablePort();
         var requestedPort = FindAvailablePort(legacyPort);
         var platform = new StartupOnlyInstallPlatform
         {
             StartupCommand = StartupCommandBuilder.Build(
-                Path.Combine(legacyRoot, "CodexContinuity.exe"),
+                legacyExecutable,
                 legacyPort),
         };
         var coordinator = new InstallCoordinator(
@@ -384,6 +385,7 @@ public sealed class InstallPortSafetyTests : IDisposable
             () => mutationRan = true));
 
         Assert.Equal((legacyPort, legacyPort), selection);
+        Assert.Contains(legacyExecutable, coordinator.KnownSupervisorExecutables());
         Assert.False(mutationRan);
         var samePortSelection = await Program.PrepareInstallPortChangeAsync(
             existingState: null,
@@ -571,7 +573,7 @@ public sealed class InstallPortSafetyTests : IDisposable
 
     private sealed class InjectedMutationException : Exception;
 
-    private sealed class StartupOnlyInstallPlatform : IInstallPlatform
+    internal sealed class StartupOnlyInstallPlatform : IInstallPlatform
     {
         internal string? StartupCommand { get; init; }
 
