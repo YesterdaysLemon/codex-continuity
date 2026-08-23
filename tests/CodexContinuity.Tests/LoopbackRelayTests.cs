@@ -105,32 +105,26 @@ public sealed class LoopbackRelayTests
         await using var backend = new TaggedBackend("backend:");
         var publicPort = AvailablePort();
         await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
-        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var attempts = Enumerable.Range(0, 32).Select(async index =>
+        var contenders = await Task.WhenAll(Enumerable.Range(0, 32).Select(
+            _ => ConnectAsync(publicPort)));
+        try
         {
-            await start.Task;
-            try
-            {
-                using var client = await ConnectAsync(publicPort);
-                await RoundTripAsync(client, $"request-{index}");
-            }
-            catch (Exception exception) when (
-                exception is IOException or SocketException)
-            {
-            }
-        }).ToArray();
+            await WaitUntilAsync(() => relay.ActiveConnectionCount > 0);
+            await relay.CloseGateAsync();
 
-        start.SetResult();
-        await relay.CloseGateAsync();
-        await Task.WhenAll(attempts);
-        var completedRequests = backend.CompletedRequestCount;
-        await Task.Delay(100);
-
-        Assert.True(relay.IsGated);
-        Assert.Equal(0, relay.ActiveConnectionCount);
-        Assert.Equal(completedRequests, backend.CompletedRequestCount);
-        using var refused = await ConnectAsync(publicPort);
-        await AssertConnectionClosedAsync(refused);
+            Assert.True(relay.IsGated);
+            Assert.Equal(0, relay.ActiveConnectionCount);
+            await Task.WhenAll(contenders.Select(AssertConnectionClosedAsync));
+            using var refused = await ConnectAsync(publicPort);
+            await AssertConnectionClosedAsync(refused);
+        }
+        finally
+        {
+            foreach (var contender in contenders)
+            {
+                contender.Dispose();
+            }
+        }
     }
 
     [Fact]
@@ -316,7 +310,6 @@ public sealed class LoopbackRelayTests
         private readonly CancellationTokenSource shutdown = new();
         private readonly Task acceptLoop;
         private readonly List<Task> connections = [];
-        private int completedRequestCount;
 
         internal TaggedBackend(string prefix)
         {
@@ -326,8 +319,6 @@ public sealed class LoopbackRelayTests
         }
 
         internal int Port => ((IPEndPoint)listener.LocalEndpoint).Port;
-
-        internal int CompletedRequestCount => Volatile.Read(ref completedRequestCount);
 
         public async ValueTask DisposeAsync()
         {
@@ -386,7 +377,6 @@ public sealed class LoopbackRelayTests
                         var response = Encoding.UTF8.GetBytes(
                             prefix + Encoding.UTF8.GetString(request));
                         await WriteFrameAsync(stream, response, shutdown.Token);
-                        Interlocked.Increment(ref completedRequestCount);
                     }
                 }
                 catch (Exception exception) when (
