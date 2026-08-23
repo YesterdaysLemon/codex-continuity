@@ -15,7 +15,7 @@ internal sealed record LoopbackRelayOptions(
 
     internal void Validate()
     {
-        if (MaximumConnections <= 0)
+        if (MaximumConnections is < 1 or > 256)
         {
             throw new ArgumentOutOfRangeException(nameof(MaximumConnections));
         }
@@ -23,11 +23,13 @@ internal sealed record LoopbackRelayOptions(
         {
             throw new ArgumentOutOfRangeException(nameof(BufferBytes));
         }
-        if (EffectiveConnectTimeout <= TimeSpan.Zero)
+        if (EffectiveConnectTimeout <= TimeSpan.Zero ||
+            EffectiveConnectTimeout > TimeSpan.FromSeconds(30))
         {
             throw new ArgumentOutOfRangeException(nameof(ConnectTimeout));
         }
-        if (EffectiveGateDrainTimeout <= TimeSpan.Zero)
+        if (EffectiveGateDrainTimeout <= TimeSpan.Zero ||
+            EffectiveGateDrainTimeout > TimeSpan.FromSeconds(30))
         {
             throw new ArgumentOutOfRangeException(nameof(GateDrainTimeout));
         }
@@ -163,6 +165,11 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         lock (sync)
         {
             ThrowIfDisposed();
+            if (connections.Count != 0)
+            {
+                throw new InvalidOperationException(
+                    "The relay gate cannot open until old connections have drained.");
+            }
             gated = false;
         }
     }
@@ -213,6 +220,10 @@ internal sealed class LoopbackRelay : IAsyncDisposable
                 break;
             }
             catch (SocketException) when (shutdown.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (ObjectDisposedException) when (shutdown.IsCancellationRequested)
             {
                 break;
             }

@@ -91,11 +91,20 @@ public sealed class LoopbackRelayTests
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             new LoopbackRelayOptions(MaximumConnections: 0).Validate());
         Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new LoopbackRelayOptions(MaximumConnections: 257).Validate());
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
             new LoopbackRelayOptions(BufferBytes: 1024 * 1024 + 1).Validate());
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new LoopbackRelayOptions(ConnectTimeout: TimeSpan.FromSeconds(31)).Validate());
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new LoopbackRelayOptions(GateDrainTimeout: TimeSpan.FromSeconds(31)).Validate());
 
         await using var backend = new TaggedBackend("backend:");
         var publicPort = AvailablePort();
         await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+        using var client = await ConnectAsync(publicPort);
+        await WaitUntilAsync(() => relay.ActiveConnectionCount == 1);
+        Assert.Throws<InvalidOperationException>(relay.OpenGate);
         Assert.Throws<InvalidOperationException>(() => relay.SetBackendPort(AvailablePort()));
         await relay.CloseGateAsync();
         Assert.Throws<ArgumentException>(() => relay.SetBackendPort(publicPort));
@@ -147,6 +156,16 @@ public sealed class LoopbackRelayTests
         {
             listener.Stop();
         }
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (!condition() && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+        Assert.True(condition());
     }
 
     private sealed class TaggedBackend : IAsyncDisposable
