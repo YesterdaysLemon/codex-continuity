@@ -25,6 +25,37 @@ internal sealed class PrivateBackendStopTarget
             timeout,
             cancellationToken);
 
+    internal bool TryForceStop()
+    {
+        try
+        {
+            if (process.HasExited)
+            {
+                return false;
+            }
+            process.Kill();
+            return true;
+        }
+        catch (InvalidOperationException) when (process.HasExited)
+        {
+            return false;
+        }
+    }
+
+    internal async Task<bool> WaitForExitWithinAsync(TimeSpan timeout)
+    {
+        using var timeoutCancellation = new CancellationTokenSource(timeout);
+        try
+        {
+            await process.WaitForExitAsync(timeoutCancellation.Token);
+            return true;
+        }
+        catch (OperationCanceledException) when (timeoutCancellation.IsCancellationRequested)
+        {
+            return false;
+        }
+    }
+
     internal static PrivateBackendStopTarget FromOwnedLease(
         BackendLease lease,
         WindowsProcessGroup process)
