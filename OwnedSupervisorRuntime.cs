@@ -8,24 +8,60 @@ internal static class OwnedSupervisorRuntime
         CancellationToken shutdownToken,
         Func<int, WindowsProcessGroup> startBackend,
         Func<int, TimeSpan>? delayForFailure = null,
-        Func<TimeSpan, CancellationToken, Task<bool>>? waitForRestart = null)
+        Func<TimeSpan, CancellationToken, Task<bool>>? waitForRestart = null,
+        TimeSpan? readinessTimeout = null)
     {
         Directory.CreateDirectory(stateDirectory);
         var logPath = ContinuityPaths.AppServerLogFile(stateDirectory);
         var logWriter = new RollingLogWriter(logPath);
         var statusStore = new SupervisorStatusStore(
             ContinuityPaths.SupervisorStatusFile(stateDirectory));
+        var leaseStore = new BackendLeaseStore(
+            ContinuityPaths.BackendLeaseFile(stateDirectory));
         var backoff = new RestartBackoffPolicy();
         delayForFailure ??= failure => backoff.DelayForFailure(
             failure,
             Random.Shared.NextDouble());
         waitForRestart ??= Program.WaitForRestartAsync;
+        var effectiveReadinessTimeout = readinessTimeout ?? TimeSpan.FromSeconds(20);
+        if (effectiveReadinessTimeout <= TimeSpan.Zero ||
+            effectiveReadinessTimeout > TimeSpan.FromSeconds(30))
+        {
+            throw new ArgumentOutOfRangeException(nameof(readinessTimeout));
+        }
         var codexHome = FutureProcessEnvironment.ResolveCodexHome();
         var consecutiveFailures = 0;
         Console.WriteLine(
             $"Supervising {LoopbackEndpoint.WebSocketUrl(publicPort)} with logs at {logPath}");
 
-        var backendPort = Program.FindAvailablePort(publicPort);
+        var recovery = BackendLeaseRecovery.TryRecover(
+            leaseStore,
+            publicPort,
+            codexHome);
+        if (recovery.Kind == BackendRecoveryKind.Unsafe)
+        {
+            statusStore.Write(Program.NewSupervisorStatus(
+                "unsafeBackendLease",
+                publicPort,
+                codexHome,
+                recovery.Lease?.BackendProcessId,
+                consecutiveFailures,
+                lastExitCode: null,
+                nextRetryAtUtc: null,
+                recovery.Detail));
+            Console.Error.WriteLine(
+                $"Backend ownership could not be recovered safely: {recovery.Detail}");
+            return 1;
+        }
+        if (recovery.Kind == BackendRecoveryKind.Stale)
+        {
+            leaseStore.Delete();
+        }
+
+        var recoveredBackend = recovery.Backend;
+        var backendPort = recovery.Kind == BackendRecoveryKind.Recovered
+            ? recovery.Lease!.BackendPort
+            : Program.FindAvailablePort(publicPort);
         LoopbackRelay relay;
         try
         {
@@ -39,6 +75,7 @@ internal static class OwnedSupervisorRuntime
         catch (System.Net.Sockets.SocketException exception) when (
             exception.SocketErrorCode == System.Net.Sockets.SocketError.AddressAlreadyInUse)
         {
+            recoveredBackend?.Dispose();
             statusStore.Write(Program.NewSupervisorStatus(
                 "foreignEndpoint",
                 publicPort,
@@ -53,31 +90,61 @@ internal static class OwnedSupervisorRuntime
                 "refusing to adopt its thread store.");
             return 1;
         }
+        catch
+        {
+            recoveredBackend?.Dispose();
+            throw;
+        }
         await using var ownedRelay = relay;
 
+        var publishStopped = true;
         try
         {
             while (!shutdownToken.IsCancellationRequested)
             {
                 relay.SetBackendPort(backendPort);
-                using var process = startBackend(backendPort);
+                var recovered = recoveredBackend is not null;
+                using var process = recoveredBackend ?? startBackend(backendPort);
+                recoveredBackend = null;
                 var startedAt = DateTimeOffset.UtcNow;
-                var stdout = Program.PumpLogAsync(
-                    process.StandardOutput,
-                    logWriter,
-                    shutdownToken);
-                var stderr = Program.PumpLogAsync(
-                    process.StandardError,
-                    logWriter,
-                    shutdownToken);
+                var stdout = Task.CompletedTask;
+                var stderr = Task.CompletedTask;
+                var leaseActive = recovered;
+                var preserveBackend = false;
+                var lifecycleCompleted = false;
                 try
                 {
-                    if (await Program.WaitUntilReadyAsync(
-                            backendPort,
-                            process,
-                            TimeSpan.FromSeconds(20),
-                            shutdownToken))
+                    var backendExecutable = recovered
+                        ? recovery.Lease!.BackendExecutable
+                        : process.ExecutablePath;
+                    var backendStartedAtUtc = recovered
+                        ? recovery.Lease!.BackendStartedAtUtc
+                        : process.StartedAtUtc;
+                    stdout = Program.PumpLogAsync(
+                        process.StandardOutput,
+                        logWriter,
+                        shutdownToken);
+                    stderr = Program.PumpLogAsync(
+                        process.StandardError,
+                        logWriter,
+                        shutdownToken);
+                    var ready = await Program.WaitUntilReadyAsync(
+                        backendPort,
+                        process,
+                        effectiveReadinessTimeout,
+                        shutdownToken);
+                    if (ready && !process.HasExited)
                     {
+                        leaseStore.Write(new BackendLease(
+                            BackendLease.CurrentSchemaVersion,
+                            OwnerSupervisorProcessId: Environment.ProcessId,
+                            BackendProcessId: process.Id,
+                            PublicPort: publicPort,
+                            BackendPort: backendPort,
+                            BackendExecutable: backendExecutable,
+                            CodexHome: codexHome,
+                            BackendStartedAtUtc: backendStartedAtUtc));
+                        leaseActive = true;
                         relay.OpenGate();
                         statusStore.Write(Program.NewSupervisorStatus(
                             "running",
@@ -87,8 +154,10 @@ internal static class OwnedSupervisorRuntime
                             consecutiveFailures,
                             lastExitCode: null,
                             nextRetryAtUtc: null,
-                            $"Relaying {LoopbackEndpoint.WebSocketUrl(publicPort)} " +
-                            "to an owned private backend."));
+                            recovered
+                                ? "Recovered the verified private backend behind the stable endpoint."
+                                : $"Relaying {LoopbackEndpoint.WebSocketUrl(publicPort)} " +
+                                    "to an owned private backend."));
                         Console.WriteLine($"Continuity backend ready (PID {process.Id}).");
                         try
                         {
@@ -99,6 +168,33 @@ internal static class OwnedSupervisorRuntime
                         {
                         }
                     }
+                    else if (recovered &&
+                        !process.HasExited &&
+                        !shutdownToken.IsCancellationRequested)
+                    {
+                        preserveBackend = true;
+                        publishStopped = false;
+                        const string detail =
+                            "The verified recovered backend is not ready; refusing to replace it.";
+                        statusStore.Write(Program.NewSupervisorStatus(
+                            "recoveredBackendUnavailable",
+                            publicPort,
+                            codexHome,
+                            process.Id,
+                            consecutiveFailures,
+                            lastExitCode: null,
+                            nextRetryAtUtc: null,
+                            detail));
+                        Console.Error.WriteLine(detail);
+                        return 1;
+                    }
+                    lifecycleCompleted = true;
+                }
+                catch when (recovered && !shutdownToken.IsCancellationRequested)
+                {
+                    preserveBackend = true;
+                    publishStopped = false;
+                    throw;
                 }
                 finally
                 {
@@ -111,12 +207,40 @@ internal static class OwnedSupervisorRuntime
                     }
                     finally
                     {
-                        if (!process.HasExited)
+                        if (process.HasExited)
+                        {
+                            leaseStore.Delete();
+                            leaseActive = false;
+                        }
+                        if (shutdownToken.IsCancellationRequested && leaseActive)
+                        {
+                            if (!process.HasExited)
+                            {
+                                process.Kill();
+                                await process.WaitForExitAsync();
+                            }
+                            leaseStore.Delete();
+                            leaseActive = false;
+                        }
+                        if (!lifecycleCompleted && !preserveBackend && leaseActive)
+                        {
+                            if (!process.HasExited)
+                            {
+                                process.Kill();
+                                await process.WaitForExitAsync();
+                            }
+                            leaseStore.Delete();
+                            leaseActive = false;
+                        }
+                        if (!leaseActive && !process.HasExited)
                         {
                             process.Kill();
                             await process.WaitForExitAsync();
                         }
-                        await Program.AwaitLogPumpsAsync(stdout, stderr);
+                        if (!preserveBackend)
+                        {
+                            await Program.AwaitLogPumpsAsync(stdout, stderr);
+                        }
                     }
                 }
 
@@ -161,15 +285,37 @@ internal static class OwnedSupervisorRuntime
         }
         finally
         {
-            statusStore.Write(Program.NewSupervisorStatus(
-                "stopped",
-                publicPort,
-                codexHome,
-                backendProcessId: null,
-                consecutiveFailures,
-                lastExitCode: null,
-                nextRetryAtUtc: null,
-                "Supervisor stopped without changing future-launch configuration."));
+            if (recoveredBackend is not null)
+            {
+                try
+                {
+                    if (shutdownToken.IsCancellationRequested)
+                    {
+                        if (!recoveredBackend.HasExited)
+                        {
+                            recoveredBackend.Kill();
+                            await recoveredBackend.WaitForExitAsync();
+                        }
+                        leaseStore.Delete();
+                    }
+                }
+                finally
+                {
+                    recoveredBackend.Dispose();
+                }
+            }
+            if (publishStopped)
+            {
+                statusStore.Write(Program.NewSupervisorStatus(
+                    "stopped",
+                    publicPort,
+                    codexHome,
+                    backendProcessId: null,
+                    consecutiveFailures,
+                    lastExitCode: null,
+                    nextRetryAtUtc: null,
+                    "Supervisor stopped without changing future-launch configuration."));
+            }
         }
         return 0;
     }
