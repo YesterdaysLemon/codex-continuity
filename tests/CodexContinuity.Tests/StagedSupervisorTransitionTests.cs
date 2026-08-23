@@ -419,7 +419,8 @@ public sealed class StagedSupervisorTransitionTests
         internal SupervisorExecutableIdentity? ResolvedRollback { get; set; }
         internal Func<string, SupervisorExecutableIdentity?>? ResolveExecutable { get; set; }
         internal Func<string, IReadOnlyList<string>, CancellationToken, Task>?
-            VerifyMatchingPublisher { get; set; }
+            VerifyMatchingPublisher
+        { get; set; }
 
         internal Task<StagedSupervisorTransitionLoadResult> LoadAsync() =>
             StagedSupervisorTransitionReader.LoadAsync(
