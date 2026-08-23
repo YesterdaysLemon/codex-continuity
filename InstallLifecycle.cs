@@ -141,6 +141,8 @@ internal interface IInstallPlatform
 
 internal sealed class InstallStateStore(string path)
 {
+    internal const int CurrentSchemaVersion = 4;
+
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,

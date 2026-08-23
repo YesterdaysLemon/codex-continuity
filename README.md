@@ -200,6 +200,7 @@ the executable that currently owns active agents.
 | Command | Purpose |
 | --- | --- |
 | `status` | Check backend health and list active thread count. |
+| `handoff-plan` | Read the fail-closed lifecycle decision without stopping work or changing configuration. |
 | `probe` | Inspect desktop version, update manifest, and configuration. |
 | `update` | Check stable releases now and safely stage a verified newer build. |
 | `serve` | Run the background supervisor. |
@@ -209,6 +210,13 @@ the executable that currently owns active agents.
 | `uninstall` | Restore owned configuration now and remove installed files at next sign-in, without killing work. |
 | `rollback` | Select the previous known-good build for the next safe supervisor start. |
 | `self-test` | Prove reconnect behavior in an isolated temporary Codex home. |
+
+`handoff-plan` reports only aggregate lifecycle blockers. The desktop is a client;
+the supervised app-server owns running turns. A `handoff` result means the observed
+backend is quiescent and no verified staged build is selected. It does not stop a
+process or prove that the running desktop can switch backends. Any transition built
+on this plan must keep the already-running Codex desktop open and fail closed if a
+live switch cannot be verified.
 
 ## Local evidence
 

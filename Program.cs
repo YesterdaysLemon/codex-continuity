@@ -28,6 +28,7 @@ internal static class Program
                 "help" or "--help" or "-h" => PrintHelp(),
                 "probe" => await ProbeAsync(port),
                 "status" => await PrintStatusAsync(port),
+                "handoff-plan" => await PrintHandoffPlanAsync(port),
                 "update" => await UpdateAsync(),
                 "serve" => await ServeAsync(port),
                 "install" => await InstallAsync(
@@ -96,6 +97,7 @@ internal static class Program
             Commands:
               probe       Inspect the installed desktop, update manifest, and backend configuration.
               status      Check backend health and count active threads.
+              handoff-plan  Read whether lifecycle work must wait, apply an update, or may hand off.
               update      Check for and safely stage a verified Continuity release.
               serve       Supervise a loopback WebSocket app-server.
               install     Configure future desktop launches and start at user logon.
@@ -221,6 +223,57 @@ internal static class Program
         };
         Console.WriteLine(result.ToJsonString(JsonOptions));
         return 0;
+    }
+
+    private static Task<int> PrintHandoffPlanAsync(int port) => PrintHandoffPlanAsync(
+        ContinuityPaths.StateDirectory,
+        () => ObserveThreadLifecyclesAsync(port),
+        Console.Out);
+
+    internal static async Task<int> PrintHandoffPlanAsync(
+        string stateDirectory,
+        Func<Task<ContinuityThreadSnapshot>> observeThreads,
+        TextWriter output)
+    {
+        var snapshot = await observeThreads();
+        var updateState = new ContinuityUpdateStateStore(
+            ContinuityPaths.UpdateStatusFile(stateDirectory)).Load();
+        var selectedBuild = ContinuitySelectedBuildReader.Load(stateDirectory);
+        var plan = ContinuityHandoffPlanner.Create(
+            snapshot.BackendReady,
+            snapshot.Threads,
+            updateState,
+            selectedBuild);
+        await output.WriteLineAsync(JsonSerializer.Serialize(plan, HandoffJsonOptions));
+        return 0;
+    }
+
+    private static async Task<ContinuityThreadSnapshot> ObserveThreadLifecyclesAsync(int port)
+    {
+        var status = LoadSupervisorStatus();
+        if (status is null ||
+            !await IsManagedEndpointReadyAsync(port, status.SupervisorProcessId))
+        {
+            return new(BackendReady: false, Threads: []);
+        }
+
+        try
+        {
+            await using var client = await RpcClient.ConnectAsync(
+                LoopbackEndpoint.WebSocketUrl(port));
+            var threads = (await client.ListThreadsAsync()).Select(
+                thread => thread.Activity).ToList();
+            return Equals(status, LoadSupervisorStatus()) &&
+                await IsManagedEndpointReadyAsync(port, status.SupervisorProcessId)
+                    ? new(BackendReady: true, threads)
+                    : new(BackendReady: false, Threads: []);
+        }
+        catch (Exception exception) when (
+            exception is HttpRequestException or JsonException or InvalidOperationException or
+                OperationCanceledException or WebSocketException)
+        {
+            return new(BackendReady: false, Threads: []);
+        }
     }
 
     private static Task<int> ServeAsync(int port) =>
@@ -1111,9 +1164,18 @@ internal static class Program
     {
         WriteIndented = true,
     };
+    private static readonly JsonSerializerOptions HandoffJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true,
+    };
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
-    internal sealed record ThreadSummary(string Id, string? Name, string Status);
+    internal sealed record ThreadSummary(
+        string Id,
+        string? Name,
+        string Status,
+        ThreadLifecycleStatus Activity);
 
     internal sealed class RpcClient : IAsyncDisposable
     {
@@ -1219,15 +1281,12 @@ internal static class Program
                     throw new InvalidOperationException(
                         "thread/list returned a malformed thread entry.");
                 }
-                var status = thread["status"]?["type"] is JsonValue statusValue &&
-                    statusValue.TryGetValue<string>(out var parsedStatus) &&
-                    !string.IsNullOrWhiteSpace(parsedStatus)
-                        ? parsedStatus
-                        : "unknown";
+                var activity = ThreadLifecycleStatus.Parse(thread["status"]);
                 threads.Add(new ThreadSummary(
                     thread["id"]?.GetValue<string>() ?? string.Empty,
                     thread["name"]?.GetValue<string>(),
-                    status));
+                    activity.Type,
+                    activity));
             }
             return threads;
         }
