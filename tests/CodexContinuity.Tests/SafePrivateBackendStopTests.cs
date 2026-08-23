@@ -1,13 +1,69 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using CodexContinuity;
+using CodexContinuity.ProcessHarness;
 using Xunit;
 
 namespace CodexContinuity.Tests;
 
 public sealed class SafePrivateBackendStopTests
 {
+    [Fact]
+    public async Task NativeTargetStopsOnlyTheProcessOwningTheRelayedBackend()
+    {
+        var testDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"codex-continuity-safe-stop-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(testDirectory);
+        var publicPort = AvailablePort();
+        var backendPort = AvailablePort();
+        while (backendPort == publicPort)
+        {
+            backendPort = AvailablePort();
+        }
+        await using var relay = LoopbackRelay.Start(publicPort, backendPort);
+        WindowsProcessGroup? process = null;
+        try
+        {
+            var startInfo = new ProcessStartInfo(HarnessExecutable())
+            {
+                UseShellExecute = false,
+                WorkingDirectory = testDirectory,
+            };
+            startInfo.ArgumentList.Add("fake-self-test-app-server");
+            startInfo.ArgumentList.Add(backendPort.ToString());
+            startInfo.ArgumentList.Add("clean");
+            process = WindowsProcessGroup.Start(startInfo);
+            await WaitUntilReadyAsync(backendPort);
+            var decision = await GatedHandoffTransition.CloseAndRecomputeAsync(
+                relay,
+                _ => Task.FromResult(Plan(transitionReady: true)));
+
+            Assert.Equal(
+                PrivateBackendStopKind.GracefulExit,
+                await SafePrivateBackendStop.StopAsync(
+                    decision,
+                    PrivateBackendStopTarget.From(process),
+                    TimeSpan.FromSeconds(5),
+                    TimeSpan.FromSeconds(1),
+                    CancellationToken.None));
+            Assert.True(process.HasExited);
+            Assert.True(relay.IsGated);
+        }
+        finally
+        {
+            if (process is { HasExited: false })
+            {
+                process.Kill();
+                await process.WaitForExitAsync();
+            }
+            process?.Dispose();
+            Directory.Delete(testDirectory, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task UnsafeOrStalePlanNeverTouchesTheBackend()
     {
@@ -76,6 +132,15 @@ public sealed class SafePrivateBackendStopTests
                     TimeSpan.FromSeconds(1),
                     CancellationToken.None,
                     (_, _) => throw new Win32Exception(5, "inspection unavailable")));
+            Assert.Equal(
+                PrivateBackendStopKind.BackendOwnershipUnknown,
+                await SafePrivateBackendStop.StopAsync(
+                    unknownDecision,
+                    target,
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.FromSeconds(1),
+                    CancellationToken.None,
+                    (_, _) => throw new InvalidDataException("invalid owner table")));
         }
 
         Assert.Equal(0, gracefulCalls);
@@ -85,14 +150,17 @@ public sealed class SafePrivateBackendStopTests
     public async Task CleanGracefulStopNeverForces()
     {
         var gracefulCalls = 0;
+        var backendPort = 0;
+        var (relay, decision) = await SafeDecisionAsync(port => backendPort = port);
         var target = Target(
             stopGracefully: (_, _) =>
             {
                 gracefulCalls++;
+                Assert.False(decision.GateLease!.TryOpen());
+                Assert.False(decision.GateLease.TryRetargetAndOpen(AvailablePort()));
                 return Task.FromResult(Program.AppServerStopDisposition.CleanExit);
             },
             forceStop: () => throw new InvalidOperationException("must not force"));
-        var (relay, decision) = await SafeDecisionAsync();
         await using (relay)
         {
             Assert.Equal(
@@ -103,7 +171,8 @@ public sealed class SafePrivateBackendStopTests
                     TimeSpan.FromSeconds(1),
                     TimeSpan.FromSeconds(1),
                     CancellationToken.None,
-                    (_, _) => true));
+                    (port, _) => port == backendPort));
+            Assert.True(decision.GateLease!.TryOpen());
         }
 
         Assert.Equal(1, gracefulCalls);
@@ -115,17 +184,22 @@ public sealed class SafePrivateBackendStopTests
         var ownershipChecks = 0;
         var forceCalls = 0;
         var waitCalls = 0;
+        var (relay, decision) = await SafeDecisionAsync();
         var target = Target(
             stopGracefully: (_, _) => Task.FromResult(
                 Program.AppServerStopDisposition.TimedOut),
-            forceStop: () => forceCalls++,
+            forceStop: () =>
+            {
+                Assert.False(decision.GateLease!.TryOpen());
+                Assert.False(decision.GateLease.TryRetargetAndOpen(AvailablePort()));
+                forceCalls++;
+            },
             waitForExit: cancellationToken =>
             {
                 Assert.True(cancellationToken.CanBeCanceled);
                 waitCalls++;
                 return Task.CompletedTask;
             });
-        var (relay, decision) = await SafeDecisionAsync();
         await using (relay)
         {
             Assert.Equal(
@@ -141,6 +215,7 @@ public sealed class SafePrivateBackendStopTests
                         ownershipChecks++;
                         return true;
                     }));
+            Assert.True(decision.GateLease!.TryOpen());
         }
 
         Assert.Equal(2, ownershipChecks);
@@ -281,7 +356,6 @@ public sealed class SafePrivateBackendStopTests
     }
 
     private static PrivateBackendStopTarget UntouchableTarget() => new(
-        Port: 45124,
         ProcessId: 42,
         HasExited: () => throw new InvalidOperationException("must not inspect process"),
         StopGracefully: (_, _) => throw new InvalidOperationException("must not stop"),
@@ -292,7 +366,6 @@ public sealed class SafePrivateBackendStopTests
         Func<TimeSpan, CancellationToken, Task<Program.AppServerStopDisposition>> stopGracefully,
         Action? forceStop = null,
         Func<CancellationToken, Task>? waitForExit = null) => new(
-            Port: 45124,
             ProcessId: 42,
             HasExited: () => false,
             StopGracefully: stopGracefully,
@@ -300,7 +373,7 @@ public sealed class SafePrivateBackendStopTests
             WaitForExit: waitForExit ?? (_ => Task.CompletedTask));
 
     private static async Task<(LoopbackRelay Relay, GatedHandoffDecision Decision)>
-        SafeDecisionAsync()
+        SafeDecisionAsync(Action<int>? captureBackendPort = null)
     {
         var publicPort = AvailablePort();
         var backendPort = AvailablePort();
@@ -308,6 +381,7 @@ public sealed class SafePrivateBackendStopTests
         {
             backendPort = AvailablePort();
         }
+        captureBackendPort?.Invoke(backendPort);
         var relay = LoopbackRelay.Start(publicPort, backendPort);
         try
         {
@@ -341,4 +415,21 @@ public sealed class SafePrivateBackendStopTests
         listener.Stop();
         return port;
     }
+
+    private static async Task WaitUntilReadyAsync(int port)
+    {
+        for (var attempt = 0; attempt < 50; attempt++)
+        {
+            if (await Program.IsReadyAsync(port, TimeSpan.FromMilliseconds(200)))
+            {
+                return;
+            }
+            await Task.Delay(50);
+        }
+        throw new TimeoutException("The private test backend did not become ready.");
+    }
+
+    private static string HarnessExecutable() => Path.ChangeExtension(
+        typeof(HarnessMarker).Assembly.Location,
+        ".exe");
 }

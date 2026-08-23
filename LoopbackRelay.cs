@@ -38,12 +38,34 @@ internal sealed record LoopbackRelayOptions(
 
 internal sealed class RelayGateLease(LoopbackRelay relay, long ownedEpoch)
 {
-    internal bool IsCurrent => relay.IsGateLeaseCurrent(ownedEpoch);
+    internal RelayBackendStopReservation? TryReserveBackendStop() =>
+        relay.TryReserveBackendStop(ownedEpoch);
 
     internal bool TryOpen() => relay.TryOpenGate(ownedEpoch);
 
     internal bool TryRetargetAndOpen(int backendPort) =>
         relay.TryRetargetAndOpenGate(ownedEpoch, backendPort);
+}
+
+internal sealed class RelayBackendStopReservation(
+    LoopbackRelay relay,
+    long ownedEpoch,
+    int backendPort) : IDisposable
+{
+    private int disposed;
+
+    internal int BackendPort => backendPort;
+
+    internal bool IsCurrent =>
+        relay.IsBackendStopReservationCurrent(ownedEpoch, backendPort);
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref disposed, 1) == 0)
+        {
+            relay.ReleaseBackendStopReservation(ownedEpoch);
+        }
+    }
 }
 
 internal sealed class LoopbackRelay : IAsyncDisposable
@@ -60,6 +82,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
     private int backendPort;
     private long gateEpoch;
     private long? exclusiveGateEpoch;
+    private long? backendStopReservationEpoch;
     private bool gated;
     private bool disposed;
 
@@ -140,6 +163,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
             gated = true;
             gateEpoch++;
             exclusiveGateEpoch = null;
+            backendStopReservationEpoch = null;
             snapshot = [.. connections];
         }
 
@@ -174,6 +198,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
             gated = true;
             ownedEpoch = ++gateEpoch;
             exclusiveGateEpoch = ownedEpoch;
+            backendStopReservationEpoch = null;
             snapshot = [.. connections];
         }
 
@@ -196,7 +221,8 @@ internal sealed class LoopbackRelay : IAsyncDisposable
             if (disposed ||
                 !gated ||
                 gateEpoch != ownedEpoch ||
-                exclusiveGateEpoch != ownedEpoch)
+                exclusiveGateEpoch != ownedEpoch ||
+                backendStopReservationEpoch is not null)
             {
                 return false;
             }
@@ -212,14 +238,49 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         }
     }
 
-    internal bool IsGateLeaseCurrent(long ownedEpoch)
+    internal RelayBackendStopReservation? TryReserveBackendStop(long ownedEpoch)
+    {
+        lock (sync)
+        {
+            if (disposed ||
+                !gated ||
+                gateEpoch != ownedEpoch ||
+                exclusiveGateEpoch != ownedEpoch ||
+                backendStopReservationEpoch is not null)
+            {
+                return null;
+            }
+            if (connections.Count != 0)
+            {
+                throw new InvalidOperationException(
+                    "The relay backend cannot stop until old connections have drained.");
+            }
+            backendStopReservationEpoch = ownedEpoch;
+            return new RelayBackendStopReservation(this, ownedEpoch, backendPort);
+        }
+    }
+
+    internal bool IsBackendStopReservationCurrent(long ownedEpoch, int ownedBackendPort)
     {
         lock (sync)
         {
             return !disposed &&
                 gated &&
                 gateEpoch == ownedEpoch &&
-                exclusiveGateEpoch == ownedEpoch;
+                exclusiveGateEpoch == ownedEpoch &&
+                backendStopReservationEpoch == ownedEpoch &&
+                backendPort == ownedBackendPort;
+        }
+    }
+
+    internal void ReleaseBackendStopReservation(long ownedEpoch)
+    {
+        lock (sync)
+        {
+            if (backendStopReservationEpoch == ownedEpoch)
+            {
+                backendStopReservationEpoch = null;
+            }
         }
     }
 
@@ -231,7 +292,8 @@ internal sealed class LoopbackRelay : IAsyncDisposable
             if (disposed ||
                 !gated ||
                 gateEpoch != ownedEpoch ||
-                exclusiveGateEpoch != ownedEpoch)
+                exclusiveGateEpoch != ownedEpoch ||
+                backendStopReservationEpoch is not null)
             {
                 return false;
             }

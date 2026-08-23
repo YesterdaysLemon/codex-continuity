@@ -17,20 +17,16 @@ internal enum PrivateBackendStopKind
 }
 
 internal sealed record PrivateBackendStopTarget(
-    int Port,
     int ProcessId,
     Func<bool> HasExited,
     Func<TimeSpan, CancellationToken, Task<Program.AppServerStopDisposition>> StopGracefully,
     Action ForceStop,
     Func<CancellationToken, Task> WaitForExit)
 {
-    internal static PrivateBackendStopTarget From(
-        int port,
-        WindowsProcessGroup process)
+    internal static PrivateBackendStopTarget From(WindowsProcessGroup process)
     {
         ArgumentNullException.ThrowIfNull(process);
         return new(
-            port,
             process.Id,
             () => process.HasExited,
             (timeout, cancellationToken) => Program.StopAppServerWithCtrlBreakAsync(
@@ -43,7 +39,6 @@ internal sealed record PrivateBackendStopTarget(
 
     internal void Validate()
     {
-        LoopbackEndpoint.ValidatePort(Port);
         if (ProcessId <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(ProcessId));
@@ -84,7 +79,8 @@ internal static class SafePrivateBackendStop
         {
             return PrivateBackendStopKind.BlockedByPlan;
         }
-        if (!gateLease.IsCurrent)
+        using var stopReservation = gateLease.TryReserveBackendStop();
+        if (stopReservation is null)
         {
             return PrivateBackendStopKind.GateOwnershipLost;
         }
@@ -93,13 +89,16 @@ internal static class SafePrivateBackendStop
             return PrivateBackendStopKind.AlreadyExited;
         }
 
-        var ownership = InspectOwnership(target, isListenerOwnedBy);
+        var ownership = InspectOwnership(
+            stopReservation.BackendPort,
+            target,
+            isListenerOwnedBy);
         if (ownership != PrivateBackendOwnership.Owned)
         {
             return OwnershipFailure(ownership);
         }
         cancellationToken.ThrowIfCancellationRequested();
-        if (!gateLease.IsCurrent)
+        if (!stopReservation.IsCurrent)
         {
             return PrivateBackendStopKind.GateOwnershipLost;
         }
@@ -124,7 +123,7 @@ internal static class SafePrivateBackendStop
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        if (!gateLease.IsCurrent)
+        if (!stopReservation.IsCurrent)
         {
             return PrivateBackendStopKind.GateOwnershipLost;
         }
@@ -132,13 +131,16 @@ internal static class SafePrivateBackendStop
         {
             return PrivateBackendStopKind.AlreadyExited;
         }
-        ownership = InspectOwnership(target, isListenerOwnedBy);
+        ownership = InspectOwnership(
+            stopReservation.BackendPort,
+            target,
+            isListenerOwnedBy);
         if (ownership != PrivateBackendOwnership.Owned)
         {
             return OwnershipFailure(ownership);
         }
         cancellationToken.ThrowIfCancellationRequested();
-        if (!gateLease.IsCurrent)
+        if (!stopReservation.IsCurrent)
         {
             return PrivateBackendStopKind.GateOwnershipLost;
         }
@@ -157,16 +159,18 @@ internal static class SafePrivateBackendStop
     }
 
     private static PrivateBackendOwnership InspectOwnership(
+        int backendPort,
         PrivateBackendStopTarget target,
         Func<int, int, bool> isListenerOwnedBy)
     {
         try
         {
-            return isListenerOwnedBy(target.Port, target.ProcessId)
+            return isListenerOwnedBy(backendPort, target.ProcessId)
                 ? PrivateBackendOwnership.Owned
                 : PrivateBackendOwnership.Lost;
         }
-        catch (Exception exception) when (exception is Win32Exception or IOException)
+        catch (Exception exception) when (
+            exception is Win32Exception or IOException or InvalidDataException)
         {
             return PrivateBackendOwnership.Unknown;
         }
