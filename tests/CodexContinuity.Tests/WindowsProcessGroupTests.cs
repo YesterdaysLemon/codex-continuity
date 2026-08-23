@@ -325,6 +325,9 @@ public sealed class WindowsProcessGroupTests
                     process,
                     TimeSpan.FromSeconds(5),
                     canceled.Token));
+            Assert.False(SpinWait.SpinUntil(
+                () => File.Exists(Path.Combine(testDirectory, "signal.txt")),
+                TimeSpan.FromMilliseconds(500)));
             Assert.False(process.HasExited);
 
             Assert.Equal(

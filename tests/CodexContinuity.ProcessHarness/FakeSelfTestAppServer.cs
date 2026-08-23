@@ -12,7 +12,10 @@ internal static class FakeSelfTestAppServer
     private const string WebSocketMagic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     private const int MaximumHeaderBytes = 32 * 1024;
 
-    internal static async Task<int> RunAsync(int port, string stopBehavior)
+    internal static async Task<int> RunAsync(
+        int port,
+        string stopBehavior,
+        string? signalMarkerPath)
     {
         using var shutdown = new CancellationTokenSource();
         var exitCode = stopBehavior switch
@@ -24,6 +27,10 @@ internal static class FakeSelfTestAppServer
         ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
         {
             eventArgs.Cancel = true;
+            if (signalMarkerPath is not null)
+            {
+                File.WriteAllText(signalMarkerPath, eventArgs.SpecialKey.ToString());
+            }
             if (stopBehavior != "ignore")
             {
                 shutdown.Cancel();
