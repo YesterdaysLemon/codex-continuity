@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO.Pipes;
+using Microsoft.Win32.SafeHandles;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -18,35 +19,103 @@ internal sealed class WindowsProcessGroup : IDisposable
     private const nint ProcThreadAttributeHandleList = 0x00020002;
     private const short SwHide = 0;
     private const int ErrorInvalidHandle = 6;
+    private const uint ProcessQueryLimitedInformation = 0x00001000;
+    private const uint Synchronize = 0x00100000;
+    private const uint WaitObject0 = 0;
+    private const uint WaitTimeout = 258;
 
+    private readonly SafeProcessHandle nativeHandle;
     private readonly Process process;
     private int disposed;
 
     private WindowsProcessGroup(
         Process process,
-        AnonymousPipeServerStream standardOutput,
-        AnonymousPipeServerStream standardError)
+        SafeProcessHandle nativeHandle,
+        StreamReader standardOutput,
+        StreamReader standardError)
     {
         this.process = process;
-        StandardOutput = new StreamReader(
-            standardOutput,
-            Encoding.UTF8,
-            detectEncodingFromByteOrderMarks: true,
-            bufferSize: 4096,
-            leaveOpen: false);
-        StandardError = new StreamReader(
-            standardError,
-            Encoding.UTF8,
-            detectEncodingFromByteOrderMarks: true,
-            bufferSize: 4096,
-            leaveOpen: false);
+        this.nativeHandle = nativeHandle;
+        StandardOutput = standardOutput;
+        StandardError = standardError;
     }
 
     internal int Id => process.Id;
-    internal bool HasExited => process.HasExited;
-    internal int ExitCode => process.ExitCode;
+    internal bool HasExited => IsSignaled();
+    internal int ExitCode
+    {
+        get
+        {
+            if (!HasExited)
+            {
+                throw new InvalidOperationException("The process group is still running.");
+            }
+            if (!GetExitCodeProcess(nativeHandle, out var exitCode))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not read exit code for process group {process.Id}.");
+            }
+            return unchecked((int)exitCode);
+        }
+    }
+    internal DateTimeOffset StartedAtUtc => process.StartTime.ToUniversalTime();
+    internal string ExecutablePath
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(disposed != 0, this);
+            var path = new StringBuilder(capacity: 32 * 1024);
+            var length = path.Capacity;
+            if (!QueryFullProcessImageName(nativeHandle, flags: 0, path, ref length))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not resolve executable path for process group {process.Id}.");
+            }
+            return path.ToString();
+        }
+    }
     internal StreamReader StandardOutput { get; }
     internal StreamReader StandardError { get; }
+
+    internal static WindowsProcessGroup Attach(int processId)
+    {
+        if (processId <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(processId));
+        }
+
+        var process = Process.GetProcessById(processId);
+        SafeProcessHandle? nativeHandle = null;
+        try
+        {
+            nativeHandle = OpenProcess(
+                ProcessQueryLimitedInformation | Synchronize,
+                inheritHandle: false,
+                checked((uint)processId));
+            if (nativeHandle.IsInvalid)
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not attach to process group {processId}.");
+            }
+            var attachment = new WindowsProcessGroup(
+                process,
+                nativeHandle,
+                StreamReader.Null,
+                StreamReader.Null);
+            nativeHandle = null;
+            process = null!;
+            return attachment;
+        }
+        finally
+        {
+            nativeHandle?.Dispose();
+            process?.Dispose();
+        }
+    }
+
     internal static WindowsProcessGroup Start(
         ProcessStartInfo startInfo,
         Action<int>? afterProcessCreated = null)
@@ -95,6 +164,7 @@ internal sealed class WindowsProcessGroup : IDisposable
         var environmentBlock = IntPtr.Zero;
         var attributeList = IntPtr.Zero;
         var inheritedHandlesPin = default(GCHandle);
+        SafeProcessHandle? nativeHandle = null;
 
         try
         {
@@ -151,9 +221,13 @@ internal sealed class WindowsProcessGroup : IDisposable
             }
             catch
             {
-                TerminateProcess(processInformation.Process, exitCode: 1);
+                var terminated = TerminateProcess(processInformation.Process, exitCode: 1);
                 if (process is not null)
                 {
+                    if (!terminated && !process.HasExited)
+                    {
+                        process.Kill(entireProcessTree: true);
+                    }
                     WaitForTerminatedProcess(process);
                     process.Dispose();
                     process = null;
@@ -164,10 +238,13 @@ internal sealed class WindowsProcessGroup : IDisposable
             standardInput.DisposeLocalCopyOfClientHandle();
             standardOutput.DisposeLocalCopyOfClientHandle();
             standardError.DisposeLocalCopyOfClientHandle();
+            nativeHandle = new SafeProcessHandle(processInformation.Process, ownsHandle: true);
+            processInformation.Process = IntPtr.Zero;
             return new WindowsProcessGroup(
                 process ?? throw new InvalidOperationException("The child process was not captured."),
-                standardOutput,
-                standardError);
+                nativeHandle,
+                CreateReader(standardOutput),
+                CreateReader(standardError));
         }
         catch
         {
@@ -187,6 +264,7 @@ internal sealed class WindowsProcessGroup : IDisposable
                 }
                 process.Dispose();
             }
+            nativeHandle?.Dispose();
             standardOutput.Dispose();
             standardError.Dispose();
             throw;
@@ -220,15 +298,19 @@ internal sealed class WindowsProcessGroup : IDisposable
     internal void SendCtrlBreak()
     {
         ObjectDisposedException.ThrowIf(disposed != 0, this);
-        if (process.HasExited)
+        if (HasExited)
         {
-            throw new InvalidOperationException("The process group has already exited.");
+            return;
         }
         if (!GenerateConsoleCtrlEvent(CtrlBreakEvent, checked((uint)process.Id)))
         {
-            throw new Win32Exception(
-                Marshal.GetLastWin32Error(),
-                $"Could not send Ctrl+Break to process group {process.Id}.");
+            var error = Marshal.GetLastWin32Error();
+            if (!HasExited)
+            {
+                throw new Win32Exception(
+                    error,
+                    $"Could not send Ctrl+Break to process group {process.Id}.");
+            }
         }
     }
 
@@ -246,6 +328,7 @@ internal sealed class WindowsProcessGroup : IDisposable
         StandardOutput.Dispose();
         StandardError.Dispose();
         process.Dispose();
+        nativeHandle.Dispose();
     }
 
     private static void EnsureConsole()
@@ -285,6 +368,26 @@ internal sealed class WindowsProcessGroup : IDisposable
         {
         }
     }
+
+    private bool IsSignaled()
+    {
+        ObjectDisposedException.ThrowIf(disposed != 0, this);
+        return WaitForSingleObject(nativeHandle, milliseconds: 0) switch
+        {
+            WaitObject0 => true,
+            WaitTimeout => false,
+            _ => throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                $"Could not wait for process group {process.Id}."),
+        };
+    }
+
+    private static StreamReader CreateReader(AnonymousPipeServerStream stream) => new(
+        stream,
+        Encoding.UTF8,
+        detectEncodingFromByteOrderMarks: true,
+        bufferSize: 4096,
+        leaveOpen: false);
 
     private static IntPtr ClientHandle(AnonymousPipeServerStream pipe) =>
         new(long.Parse(pipe.GetClientHandleAsString(), CultureInfo.InvariantCulture));
@@ -423,6 +526,27 @@ internal sealed class WindowsProcessGroup : IDisposable
     private static extern uint GetConsoleProcessList(
         [Out] uint[] processIds,
         uint processCount);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetExitCodeProcess(
+        SafeProcessHandle process,
+        out uint exitCode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        uint processId);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(
+        SafeProcessHandle handle,
+        uint milliseconds);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryFullProcessImageName(
+        SafeProcessHandle process,
+        uint flags,
+        StringBuilder executableName,
+        ref int size);
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool InitializeProcThreadAttributeList(
