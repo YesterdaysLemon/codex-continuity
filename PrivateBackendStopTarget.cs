@@ -18,6 +18,13 @@ internal sealed class PrivateBackendStopTarget
 
     internal bool HasExited => process.HasExited;
 
+    internal Task<Program.AppServerStopDisposition> StopGracefullyAsync(
+        TimeSpan timeout,
+        CancellationToken cancellationToken) => Program.StopAppServerWithCtrlBreakAsync(
+            process,
+            timeout,
+            cancellationToken);
+
     internal static PrivateBackendStopTarget FromOwnedLease(
         BackendLease lease,
         WindowsProcessGroup process)
