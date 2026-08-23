@@ -339,7 +339,7 @@ internal static class Program
             {
                 if (!process.HasExited)
                 {
-                    process.Kill(entireProcessTree: true);
+                    process.Kill();
                 }
                 await process.WaitForExitAsync();
             }
@@ -363,7 +363,7 @@ internal static class Program
                 {
                     if (!process.HasExited)
                     {
-                        process.Kill(entireProcessTree: true);
+                        process.Kill();
                         await process.WaitForExitAsync();
                     }
                 }
@@ -760,7 +760,8 @@ internal static class Program
     private static async Task<int> SelfTestAsync()
     {
         var codexPath = FindCodexExecutable();
-        var port = FindAvailablePort();
+        var publicPort = FindAvailablePort();
+        var backendPort = FindAvailablePort(publicPort);
         var testRoot = Path.Combine(
             Path.GetTempPath(),
             $"codex-continuity-self-test-{Guid.NewGuid():N}");
@@ -769,23 +770,33 @@ internal static class Program
         Directory.CreateDirectory(codexHome);
         Directory.CreateDirectory(workspace);
 
-        Process? process = null;
+        WindowsProcessGroup? process = null;
+        LoopbackRelay? relay = null;
         try
         {
-            process = StartAppServer(codexPath, port, codexHome);
+            relay = LoopbackRelay.Start(
+                publicPort,
+                backendPort,
+                startGated: true);
+            process = StartAppServer(codexPath, backendPort, codexHome);
             var stdout = process.StandardOutput.ReadToEndAsync();
             var stderr = process.StandardError.ReadToEndAsync();
-            if (!await WaitUntilReadyAsync(port, process, TimeSpan.FromSeconds(20), CancellationToken.None))
+            if (!await WaitUntilReadyAsync(
+                    backendPort,
+                    process,
+                    TimeSpan.FromSeconds(20),
+                    CancellationToken.None))
             {
-                process.Kill(entireProcessTree: true);
+                process.Kill();
                 await process.WaitForExitAsync();
                 throw new InvalidOperationException(
                     $"Isolated app-server failed to start: {await stderr}");
             }
+            relay.OpenGate();
 
             string threadId;
             await using (var firstConnection = await RpcClient.ConnectAsync(
-                             LoopbackEndpoint.WebSocketUrl(port)))
+                             LoopbackEndpoint.WebSocketUrl(publicPort)))
             {
                 var response = await firstConnection.RequestAsync("thread/start", new JsonObject
                 {
@@ -803,7 +814,7 @@ internal static class Program
             }
 
             await using (var secondConnection = await RpcClient.ConnectAsync(
-                             LoopbackEndpoint.WebSocketUrl(port)))
+                             LoopbackEndpoint.WebSocketUrl(publicPort)))
             {
                 var response = await secondConnection.RequestAsync(
                     "thread/loaded/list",
@@ -824,41 +835,81 @@ internal static class Program
                 }
             }
 
-            Console.WriteLine(new JsonObject
+            var result = new JsonObject
             {
                 ["passed"] = true,
                 ["isolated"] = true,
                 ["appServerPid"] = process.Id,
                 ["threadId"] = threadId,
+                ["relayed"] = true,
                 ["reconnected"] = true,
                 ["threadPersistedAcrossReconnect"] = true,
-            }.ToJsonString(JsonOptions));
-
-            process.Kill(entireProcessTree: true);
-            await process.WaitForExitAsync();
+            };
+            await relay.CloseGateAsync();
+            if (!await StopAppServerGracefullyAsync(process, TimeSpan.FromSeconds(10)))
+            {
+                throw new InvalidOperationException(
+                    "The isolated app-server did not honor bounded graceful shutdown.");
+            }
             await Task.WhenAll(stdout, stderr);
+            result["gracefulStop"] = true;
+            Console.WriteLine(result.ToJsonString(JsonOptions));
             return 0;
         }
         finally
         {
-            if (process is { HasExited: false })
+            try
             {
-                process.Kill(entireProcessTree: true);
-                await process.WaitForExitAsync();
+                if (relay is { IsGated: false })
+                {
+                    await relay.CloseGateAsync();
+                }
+                if (process is { HasExited: false })
+                {
+                    process.Kill();
+                    await process.WaitForExitAsync();
+                }
             }
-            process?.Dispose();
-            await DeleteSelfTestDirectoryAsync(testRoot);
+            finally
+            {
+                process?.Dispose();
+                if (relay is not null)
+                {
+                    await relay.DisposeAsync();
+                }
+                await DeleteSelfTestDirectoryAsync(testRoot);
+            }
         }
     }
 
-    private static Process StartAppServer(string executable, int port, string? codexHome = null)
+    internal static async Task<bool> StopAppServerGracefullyAsync(
+        WindowsProcessGroup process,
+        TimeSpan timeout)
+    {
+        if (process.HasExited)
+        {
+            return true;
+        }
+        process.SendCtrlBreak();
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(timeout);
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
+    }
+
+    private static WindowsProcessGroup StartAppServer(
+        string executable,
+        int port,
+        string? codexHome = null)
     {
         var startInfo = new ProcessStartInfo(executable)
         {
             UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
         };
         FutureProcessEnvironment.ApplyTo(startInfo);
         startInfo.ArgumentList.Add("-c");
@@ -872,13 +923,12 @@ internal static class Program
             startInfo.Environment["CODEX_HOME"] = codexHome;
         }
 
-        return Process.Start(startInfo)
-            ?? throw new InvalidOperationException($"Could not start {executable}.");
+        return WindowsProcessGroup.Start(startInfo);
     }
 
     private static async Task<bool> WaitUntilReadyAsync(
         int port,
-        Process process,
+        WindowsProcessGroup process,
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
@@ -889,7 +939,14 @@ internal static class Program
             {
                 return true;
             }
-            await Task.Delay(100, cancellationToken);
+            try
+            {
+                await Task.Delay(100, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return false;
+            }
         }
         return false;
     }
@@ -1110,11 +1167,18 @@ internal static class Program
         return new ProcessResult(process.ExitCode, await stdout, await stderr);
     }
 
-    private static int FindAvailablePort()
+    private static int FindAvailablePort(params int[] excludedPorts)
     {
-        using var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        return ((IPEndPoint)listener.LocalEndpoint).Port;
+        while (true)
+        {
+            using var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            if (!excludedPorts.Contains(port))
+            {
+                return port;
+            }
+        }
     }
 
     private static async Task DeleteSelfTestDirectoryAsync(string path)
