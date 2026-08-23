@@ -10,6 +10,7 @@ namespace CodexContinuity;
 internal static class Program
 {
     private const int DefaultPort = LoopbackEndpoint.DefaultPort;
+    private const int StatusControlCExit = unchecked((int)0xC000013A);
     private const string UpdateManifestUrl =
         "https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json";
 
@@ -339,7 +340,7 @@ internal static class Program
             {
                 if (!process.HasExited)
                 {
-                    process.Kill(entireProcessTree: true);
+                    process.Kill();
                 }
                 await process.WaitForExitAsync();
             }
@@ -363,7 +364,7 @@ internal static class Program
                 {
                     if (!process.HasExited)
                     {
-                        process.Kill(entireProcessTree: true);
+                        process.Kill();
                         await process.WaitForExitAsync();
                     }
                 }
@@ -760,7 +761,19 @@ internal static class Program
     private static async Task<int> SelfTestAsync()
     {
         var codexPath = FindCodexExecutable();
-        var port = FindAvailablePort();
+        var result = await RunSelfTestAsync(
+            startBackend: (port, codexHome) => StartAppServer(codexPath, port, codexHome),
+            boundedStopTimeout: TimeSpan.FromSeconds(10));
+        Console.WriteLine(result.ToJsonString(JsonOptions));
+        return 0;
+    }
+
+    internal static async Task<JsonObject> RunSelfTestAsync(
+        Func<int, string, WindowsProcessGroup> startBackend,
+        TimeSpan boundedStopTimeout)
+    {
+        var publicPort = FindAvailablePort();
+        var backendPort = FindAvailablePort(publicPort);
         var testRoot = Path.Combine(
             Path.GetTempPath(),
             $"codex-continuity-self-test-{Guid.NewGuid():N}");
@@ -769,23 +782,33 @@ internal static class Program
         Directory.CreateDirectory(codexHome);
         Directory.CreateDirectory(workspace);
 
-        Process? process = null;
+        WindowsProcessGroup? process = null;
+        LoopbackRelay? relay = null;
         try
         {
-            process = StartAppServer(codexPath, port, codexHome);
+            relay = LoopbackRelay.Start(
+                publicPort,
+                backendPort,
+                startGated: true);
+            process = startBackend(backendPort, codexHome);
             var stdout = process.StandardOutput.ReadToEndAsync();
             var stderr = process.StandardError.ReadToEndAsync();
-            if (!await WaitUntilReadyAsync(port, process, TimeSpan.FromSeconds(20), CancellationToken.None))
+            if (!await WaitUntilReadyAsync(
+                    backendPort,
+                    process,
+                    TimeSpan.FromSeconds(20),
+                    CancellationToken.None))
             {
-                process.Kill(entireProcessTree: true);
+                process.Kill();
                 await process.WaitForExitAsync();
                 throw new InvalidOperationException(
                     $"Isolated app-server failed to start: {await stderr}");
             }
+            relay.OpenGate();
 
             string threadId;
             await using (var firstConnection = await RpcClient.ConnectAsync(
-                             LoopbackEndpoint.WebSocketUrl(port)))
+                             LoopbackEndpoint.WebSocketUrl(publicPort)))
             {
                 var response = await firstConnection.RequestAsync("thread/start", new JsonObject
                 {
@@ -803,7 +826,7 @@ internal static class Program
             }
 
             await using (var secondConnection = await RpcClient.ConnectAsync(
-                             LoopbackEndpoint.WebSocketUrl(port)))
+                             LoopbackEndpoint.WebSocketUrl(publicPort)))
             {
                 var response = await secondConnection.RequestAsync(
                     "thread/loaded/list",
@@ -824,41 +847,112 @@ internal static class Program
                 }
             }
 
-            Console.WriteLine(new JsonObject
+            var result = new JsonObject
             {
                 ["passed"] = true,
                 ["isolated"] = true,
                 ["appServerPid"] = process.Id,
                 ["threadId"] = threadId,
+                ["relayed"] = true,
                 ["reconnected"] = true,
                 ["threadPersistedAcrossReconnect"] = true,
-            }.ToJsonString(JsonOptions));
-
-            process.Kill(entireProcessTree: true);
-            await process.WaitForExitAsync();
+            };
+            await relay.CloseGateAsync();
+            var stopDisposition = await StopAppServerWithCtrlBreakAsync(
+                process,
+                boundedStopTimeout);
+            if (stopDisposition is not (
+                    AppServerStopDisposition.CleanExit or
+                    AppServerStopDisposition.WindowsControlExit))
+            {
+                throw new InvalidOperationException(
+                    "The isolated app-server did not honor bounded Ctrl+Break shutdown.");
+            }
             await Task.WhenAll(stdout, stderr);
-            return 0;
+            result["boundedStop"] = true;
+            result["stopDisposition"] =
+                stopDisposition == AppServerStopDisposition.CleanExit
+                    ? "cleanExit"
+                    : "windowsControlExit";
+            return result;
+        }
+        finally
+        {
+            try
+            {
+                await CleanupSelfTestAsync(relay, process, CancellationToken.None);
+            }
+            finally
+            {
+                process?.Dispose();
+                if (relay is not null)
+                {
+                    await relay.DisposeAsync();
+                }
+                await DeleteSelfTestDirectoryAsync(testRoot);
+            }
+        }
+    }
+
+    internal static async Task CleanupSelfTestAsync(
+        LoopbackRelay? relay,
+        WindowsProcessGroup? process,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (relay is { IsGated: false })
+            {
+                await relay.CloseGateAsync(cancellationToken);
+            }
         }
         finally
         {
             if (process is { HasExited: false })
             {
-                process.Kill(entireProcessTree: true);
+                process.Kill();
                 await process.WaitForExitAsync();
             }
-            process?.Dispose();
-            await DeleteSelfTestDirectoryAsync(testRoot);
         }
     }
 
-    private static Process StartAppServer(string executable, int port, string? codexHome = null)
+    internal static async Task<AppServerStopDisposition> StopAppServerWithCtrlBreakAsync(
+        WindowsProcessGroup process,
+        TimeSpan timeout)
+    {
+        if (process.HasExited)
+        {
+            return AppServerStopDisposition.AlreadyExited;
+        }
+        if (!process.SendCtrlBreak())
+        {
+            return AppServerStopDisposition.AlreadyExited;
+        }
+        using var timeoutCancellation = new CancellationTokenSource(timeout);
+        try
+        {
+            await process.WaitForExitAsync(timeoutCancellation.Token);
+            return process.ExitCode switch
+            {
+                0 => AppServerStopDisposition.CleanExit,
+                StatusControlCExit => AppServerStopDisposition.WindowsControlExit,
+                _ => AppServerStopDisposition.UnexpectedExit,
+            };
+        }
+        catch (OperationCanceledException) when (timeoutCancellation.IsCancellationRequested)
+        {
+            return AppServerStopDisposition.TimedOut;
+        }
+    }
+
+    private static WindowsProcessGroup StartAppServer(
+        string executable,
+        int port,
+        string? codexHome = null)
     {
         var startInfo = new ProcessStartInfo(executable)
         {
             UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
         };
         FutureProcessEnvironment.ApplyTo(startInfo);
         startInfo.ArgumentList.Add("-c");
@@ -872,13 +966,12 @@ internal static class Program
             startInfo.Environment["CODEX_HOME"] = codexHome;
         }
 
-        return Process.Start(startInfo)
-            ?? throw new InvalidOperationException($"Could not start {executable}.");
+        return WindowsProcessGroup.Start(startInfo);
     }
 
     private static async Task<bool> WaitUntilReadyAsync(
         int port,
-        Process process,
+        WindowsProcessGroup process,
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
@@ -889,7 +982,14 @@ internal static class Program
             {
                 return true;
             }
-            await Task.Delay(100, cancellationToken);
+            try
+            {
+                await Task.Delay(100, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return false;
+            }
         }
         return false;
     }
@@ -1038,16 +1138,20 @@ internal static class Program
             .Select(directory => Path.Combine(directory, "codex.exe"))
             .Where(File.Exists));
 
-        var selected = candidates
+        var selected = SelectCodexExecutable(candidates);
+        return selected ?? throw new FileNotFoundException(
+            "Could not find a user-executable codex.exe. Set CODEX_CONTINUITY_CODEX_PATH.");
+    }
+
+    internal static string? SelectCodexExecutable(IEnumerable<string> candidates) =>
+        candidates
+            .Select(Path.GetFullPath)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Where(candidate => !candidate.Contains(
                 @"\WindowsApps\OpenAI.Codex_",
                 StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(File.GetLastWriteTimeUtc)
             .FirstOrDefault();
-        return selected ?? throw new FileNotFoundException(
-            "Could not find a user-executable codex.exe. Set CODEX_CONTINUITY_CODEX_PATH.");
-    }
 
     private static async Task<JsonObject?> ReadInstalledPackageAsync()
     {
@@ -1110,11 +1214,18 @@ internal static class Program
         return new ProcessResult(process.ExitCode, await stdout, await stderr);
     }
 
-    private static int FindAvailablePort()
+    private static int FindAvailablePort(params int[] excludedPorts)
     {
-        using var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        return ((IPEndPoint)listener.LocalEndpoint).Port;
+        while (true)
+        {
+            using var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            if (!excludedPorts.Contains(port))
+            {
+                return port;
+            }
+        }
     }
 
     private static async Task DeleteSelfTestDirectoryAsync(string path)
@@ -1171,6 +1282,14 @@ internal static class Program
     };
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
+    internal enum AppServerStopDisposition
+    {
+        CleanExit,
+        WindowsControlExit,
+        AlreadyExited,
+        TimedOut,
+        UnexpectedExit,
+    }
     internal sealed record ThreadSummary(
         string Id,
         string? Name,

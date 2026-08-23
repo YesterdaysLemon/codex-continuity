@@ -14,6 +14,13 @@ internal static class Program
 {
     private static int Main(string[] args)
     {
+        if (args.FirstOrDefault() == "fake-self-test-app-server")
+        {
+            return FakeSelfTestAppServer.RunAsync(
+                int.Parse(args[1], CultureInfo.InvariantCulture),
+                args[2]).GetAwaiter().GetResult();
+        }
+
         if (args.FirstOrDefault() == "process-group-parent")
         {
             return RunProcessGroupParent(args[1]);

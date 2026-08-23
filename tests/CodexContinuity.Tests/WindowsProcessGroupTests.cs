@@ -234,6 +234,55 @@ public sealed class WindowsProcessGroupTests
         Assert.Equal(3, calls);
     }
 
+    [Fact]
+    public async Task BoundedStopDeliversCtrlBreakAndReturnsCleanExit()
+    {
+        var testDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"codex-continuity-graceful-stop-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(testDirectory);
+        WindowsProcessGroup? process = null;
+        try
+        {
+            var harnessExecutable = Path.ChangeExtension(
+                typeof(HarnessMarker).Assembly.Location,
+                ".exe");
+            var startInfo = new ProcessStartInfo(harnessExecutable)
+            {
+                UseShellExecute = false,
+                WorkingDirectory = testDirectory,
+            };
+            startInfo.ArgumentList.Add("process-group-child");
+            startInfo.ArgumentList.Add(testDirectory);
+            startInfo.ArgumentList.Add("graceful-stop");
+            startInfo.ArgumentList.Add("-1");
+            process = WindowsProcessGroup.Start(startInfo);
+            Assert.True(SpinWait.SpinUntil(
+                () => File.Exists(Path.Combine(testDirectory, "ready.txt")),
+                TimeSpan.FromSeconds(5)));
+
+            Assert.Equal(
+                Program.AppServerStopDisposition.CleanExit,
+                await Program.StopAppServerWithCtrlBreakAsync(
+                    process,
+                    TimeSpan.FromSeconds(5)));
+            Assert.Equal(
+                "ControlBreak",
+                await File.ReadAllTextAsync(Path.Combine(testDirectory, "signal.txt")));
+            Assert.Equal(0, process.ExitCode);
+        }
+        finally
+        {
+            if (process is { HasExited: false })
+            {
+                process.Kill();
+                await process.WaitForExitAsync();
+            }
+            process?.Dispose();
+            DeleteTestDirectory(testDirectory);
+        }
+    }
+
     private static bool ProcessIsRunning(int processId)
     {
         try
