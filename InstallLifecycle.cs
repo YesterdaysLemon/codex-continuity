@@ -162,15 +162,18 @@ internal sealed class InstallStateStore(string path)
 
     internal InstallState? Load()
     {
-        if (!File.Exists(path))
+        try
+        {
+            using var stateFile = BoundedStateFile.Open(path, MaximumStateBytes);
+            var bytes = stateFile.Read();
+            return JsonSerializer.Deserialize<InstallState>(bytes.Span, SerializerOptions)
+                ?? throw new InvalidDataException($"Install state at {path} is empty or invalid.");
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
         {
             return null;
         }
-
-        using var stateFile = BoundedStateFile.Open(path, MaximumStateBytes);
-        var bytes = stateFile.Read();
-        return JsonSerializer.Deserialize<InstallState>(bytes.Span, SerializerOptions)
-            ?? throw new InvalidDataException($"Install state at {path} is empty or invalid.");
     }
 
     internal IReadOnlyList<string> LoadSupervisorExecutablePaths()

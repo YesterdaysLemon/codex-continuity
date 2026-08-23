@@ -1,5 +1,13 @@
 namespace CodexContinuity;
 
+internal enum StateFileRecoveryKind
+{
+    None,
+    CanonicalPresent,
+    BackupRestored,
+    ReplacementPromoted,
+}
+
 internal sealed class BoundedStateFile : IDisposable
 {
     private readonly FileStream stream;
@@ -15,6 +23,12 @@ internal sealed class BoundedStateFile : IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumBytes);
+        if (!File.Exists(path) &&
+            (File.Exists(TemporaryPath(path)) || File.Exists(BackupPath(path))))
+        {
+            using var recoveryLock = AcquireRecoveryLock(path);
+            RecoverInterruptedWrite(path);
+        }
         return new(
             new FileStream(
                 path,
@@ -40,16 +54,22 @@ internal sealed class BoundedStateFile : IDisposable
         return bytes;
     }
 
-    internal static void WriteAtomically(string path, byte[] bytes)
+    internal static void WriteAtomically(
+        string path,
+        byte[] bytes,
+        Action<string, string, string?>? replaceFile = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(bytes);
         var directory = Path.GetDirectoryName(path)
             ?? throw new InvalidOperationException($"State path has no directory: {path}");
         Directory.CreateDirectory(directory);
-        var suffix = Guid.NewGuid().ToString("N");
-        var temporaryPath = $"{path}.tmp-{suffix}";
-        var backupPath = $"{path}.bak-{suffix}";
+        using var recoveryLock = AcquireRecoveryLock(path);
+        RecoverInterruptedWrite(path);
+        var temporaryPath = TemporaryPath(path);
+        var backupPath = BackupPath(path);
+        TryDelete(temporaryPath);
+        TryDelete(backupPath);
         var temporaryComplete = false;
         try
         {
@@ -59,12 +79,15 @@ internal sealed class BoundedStateFile : IDisposable
             {
                 try
                 {
-                    File.Replace(temporaryPath, path, backupPath);
+                    (replaceFile ?? File.Replace)(temporaryPath, path, backupPath);
                 }
                 catch
                 {
-                    RecoverFailedReplace(path, temporaryPath, backupPath);
-                    throw;
+                    if (RecoverInterruptedWrite(path) !=
+                        StateFileRecoveryKind.ReplacementPromoted)
+                    {
+                        throw;
+                    }
                 }
             }
             else
@@ -85,27 +108,38 @@ internal sealed class BoundedStateFile : IDisposable
         }
     }
 
-    internal static void RecoverFailedReplace(
-        string path,
-        string temporaryPath,
-        string backupPath)
+    internal static StateFileRecoveryKind RecoverInterruptedWrite(string path)
     {
         if (File.Exists(path))
         {
-            return;
+            return StateFileRecoveryKind.CanonicalPresent;
         }
+        var backupPath = BackupPath(path);
         if (File.Exists(backupPath))
         {
             File.Move(backupPath, path);
-            return;
+            return StateFileRecoveryKind.BackupRestored;
         }
+        var temporaryPath = TemporaryPath(path);
         if (File.Exists(temporaryPath))
         {
             File.Move(temporaryPath, path);
+            return StateFileRecoveryKind.ReplacementPromoted;
         }
+        return StateFileRecoveryKind.None;
     }
 
+    internal static string TemporaryPath(string path) => $"{path}.tmp";
+
+    internal static string BackupPath(string path) => $"{path}.bak";
+
     public void Dispose() => stream.Dispose();
+
+    private static FileStream AcquireRecoveryLock(string path) => new(
+        $"{path}.lock",
+        FileMode.OpenOrCreate,
+        FileAccess.ReadWrite,
+        FileShare.None);
 
     private static void TryDelete(string path)
     {

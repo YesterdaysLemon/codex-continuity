@@ -38,12 +38,12 @@ public sealed class BoundedStateFileTests : IDisposable
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void FailedReplaceRecoveryPublishesACompleteSurvivingFile(bool backupSurvived)
+    public void OpenRecoversACompleteInterruptedWrite(bool backupSurvived)
     {
         Directory.CreateDirectory(root);
         var path = Path.Combine(root, "state.json");
-        var temporaryPath = Path.Combine(root, "state.json.tmp");
-        var backupPath = Path.Combine(root, "state.json.bak");
+        var temporaryPath = BoundedStateFile.TemporaryPath(path);
+        var backupPath = BoundedStateFile.BackupPath(path);
         var oldBytes = "{\"value\":\"old\"}"u8.ToArray();
         var newBytes = "{\"value\":\"new\"}"u8.ToArray();
         File.WriteAllBytes(temporaryPath, newBytes);
@@ -52,9 +52,37 @@ public sealed class BoundedStateFileTests : IDisposable
             File.WriteAllBytes(backupPath, oldBytes);
         }
 
-        BoundedStateFile.RecoverFailedReplace(path, temporaryPath, backupPath);
+        using var recovered = BoundedStateFile.Open(path, maximumBytes: 128);
 
-        Assert.Equal(backupSurvived ? oldBytes : newBytes, File.ReadAllBytes(path));
+        Assert.Equal(backupSurvived ? oldBytes : newBytes, recovered.Read().ToArray());
+        Assert.True(File.Exists(path));
+    }
+
+    [Fact]
+    public void PromotedReplacementHasSuccessSemanticsWhileRestoredBackupRethrows()
+    {
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "state.json");
+        var oldBytes = "{\"value\":\"old\"}"u8.ToArray();
+        var newBytes = "{\"value\":\"new\"}"u8.ToArray();
+        File.WriteAllBytes(path, oldBytes);
+
+        BoundedStateFile.WriteAtomically(path, newBytes, (_, canonical, _) =>
+        {
+            File.Delete(canonical);
+            throw new IOException("injected temp-only replacement failure");
+        });
+        Assert.Equal(newBytes, File.ReadAllBytes(path));
+
+        Assert.Throws<IOException>(() => BoundedStateFile.WriteAtomically(
+            path,
+            oldBytes,
+            (_, canonical, backup) =>
+            {
+                File.Move(canonical, backup!);
+                throw new IOException("injected backup replacement failure");
+            }));
+        Assert.Equal(newBytes, File.ReadAllBytes(path));
     }
 
     public void Dispose()

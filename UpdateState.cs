@@ -180,11 +180,6 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
 
     internal ContinuityUpdateStateLoadResult Load()
     {
-        if (!File.Exists(path))
-        {
-            return new(ContinuityUpdateStateLoadKind.Missing, State: null);
-        }
-
         try
         {
             using var stateFile = BoundedStateFile.Open(path, MaximumStateBytes);
@@ -213,6 +208,11 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
         catch (Exception exception) when (exception is JsonException or InvalidDataException)
         {
             return new(ContinuityUpdateStateLoadKind.Invalid, State: null);
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return new(ContinuityUpdateStateLoadKind.Missing, State: null);
         }
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException)

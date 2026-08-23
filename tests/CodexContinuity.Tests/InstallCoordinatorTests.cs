@@ -67,8 +67,11 @@ public sealed class InstallCoordinatorTests : IDisposable
         previousSnapshot.ReadExactly(observedPrevious);
         Assert.Equal(previousBytes, observedPrevious);
         Assert.Equal(replacement, store.Load());
-        Assert.Empty(Directory.EnumerateFiles(root, "install-state.json.tmp-*"));
-        Assert.Empty(Directory.EnumerateFiles(root, "install-state.json.bak-*"));
+        Assert.False(File.Exists(BoundedStateFile.TemporaryPath(path)));
+        Assert.False(File.Exists(BoundedStateFile.BackupPath(path)));
+
+        File.Move(path, BoundedStateFile.BackupPath(path));
+        Assert.Equal(replacement, store.Load());
     }
 
     [Fact]

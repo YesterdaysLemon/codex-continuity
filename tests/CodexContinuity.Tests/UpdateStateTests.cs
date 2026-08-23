@@ -145,20 +145,7 @@ public sealed class UpdateStateTests : IDisposable
         Assert.Equal(ContinuityUpdateStateLoadKind.UnsupportedSchema, store.Load().Kind);
 
         var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
-        store.Save(new ContinuityUpdateState(
-            1,
-            now,
-            now,
-            "1.0.0",
-            "1.0.0",
-            "1.0.0",
-            true,
-            null,
-            null,
-            0,
-            0,
-            0,
-            Releases: []));
+        store.Save(ValidState(now));
         File.WriteAllText(
             statePath,
             File.ReadAllText(statePath).PadRight((1024 * 1024) + 1));
@@ -172,20 +159,7 @@ public sealed class UpdateStateTests : IDisposable
         var store = new ContinuityUpdateStateStore(
             Path.Combine(root, "update-status.json"),
             retainedReleases: 256);
-        var baseline = new ContinuityUpdateState(
-            1,
-            now,
-            now,
-            "1.0.0",
-            "1.0.0",
-            "1.0.0",
-            true,
-            null,
-            null,
-            0,
-            0,
-            0,
-            Releases: []);
+        var baseline = ValidState(now);
         store.Save(baseline);
         var path = Path.Combine(root, "update-status.json");
         var persisted = File.ReadAllBytes(path);
@@ -210,20 +184,7 @@ public sealed class UpdateStateTests : IDisposable
     public void StoreAtomicallyPublishesACompleteReplacement()
     {
         var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
-        var state = new ContinuityUpdateState(
-            1,
-            now,
-            now,
-            "1.0.0",
-            "1.0.0",
-            "1.0.0",
-            true,
-            null,
-            null,
-            0,
-            0,
-            0,
-            Releases: []);
+        var state = ValidState(now);
         var store = Store();
         store.Save(state);
         var path = Path.Combine(root, "update-status.json");
@@ -241,8 +202,11 @@ public sealed class UpdateStateTests : IDisposable
         previousSnapshot.ReadExactly(observedPrevious);
         Assert.Equal(previousBytes, observedPrevious);
         Assert.Equivalent(replacement, store.Load().State, strict: true);
-        Assert.Empty(Directory.EnumerateFiles(root, "update-status.json.tmp-*"));
-        Assert.Empty(Directory.EnumerateFiles(root, "update-status.json.bak-*"));
+        Assert.False(File.Exists(BoundedStateFile.TemporaryPath(path)));
+        Assert.False(File.Exists(BoundedStateFile.BackupPath(path)));
+
+        File.Move(path, BoundedStateFile.BackupPath(path));
+        Assert.Equivalent(replacement, store.Load().State, strict: true);
     }
 
     [Fact]
@@ -350,4 +314,19 @@ public sealed class UpdateStateTests : IDisposable
         Directory.CreateDirectory(root);
         return new ContinuityUpdateStateStore(Path.Combine(root, "update-status.json"));
     }
+
+    private static ContinuityUpdateState ValidState(DateTimeOffset now) => new(
+        1,
+        now,
+        now,
+        "1.0.0",
+        "1.0.0",
+        "1.0.0",
+        true,
+        null,
+        null,
+        0,
+        0,
+        0,
+        Releases: []);
 }
