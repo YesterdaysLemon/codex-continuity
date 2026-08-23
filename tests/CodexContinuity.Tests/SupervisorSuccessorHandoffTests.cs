@@ -53,6 +53,32 @@ public sealed class SupervisorSuccessorHandoffTests
     }
 
     [Fact]
+    public void FutureDatedHandoffsFailClosedOutsideBoundedClockSkew()
+    {
+        var root = TemporaryDirectory();
+        try
+        {
+            var store = Store(root);
+            var future = Handoff() with
+            {
+                CreatedAtUtc = Now + SupervisorSuccessorHandoff.MaximumClockSkew +
+                    TimeSpan.FromTicks(1),
+                ExpiresAtUtc = Now + SupervisorSuccessorHandoff.MaximumClockSkew +
+                    TimeSpan.FromMinutes(1),
+            };
+            store.Write(future);
+
+            Assert.Equal(
+                SupervisorSuccessorHandoffLoadKind.Invalid,
+                store.Load(Now).Kind);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void BackendMustMatchThePreviousSupervisorEndpointAndCodexHome()
     {
         var handoff = Handoff();
@@ -128,6 +154,110 @@ public sealed class SupervisorSuccessorHandoffTests
             File.WriteAllText(
                 ContinuityPaths.SupervisorHandoffFile(root),
                 new string('x', 64 * 1024 + 1));
+
+            Assert.Equal(
+                SupervisorSuccessorHandoffLoadKind.Invalid,
+                Store(root).Load(Now).Kind);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void OversizedWritesCannotReplaceAnExistingHandoff()
+    {
+        var root = TemporaryDirectory();
+        try
+        {
+            var store = Store(root);
+            var original = Handoff();
+            store.Write(original);
+            var oversized = original with
+            {
+                SelectedBuild = original.SelectedBuild with
+                {
+                    Executable = $"C:\\{new string('x', 64 * 1024)}",
+                },
+            };
+
+            Assert.Throws<InvalidDataException>(() => store.Write(oversized));
+            Assert.Equal(original, store.Load(Now).Handoff);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void MissingAndUnreadableStateHaveDistinctFailClosedResults()
+    {
+        var root = TemporaryDirectory();
+        try
+        {
+            var store = Store(root);
+            Assert.Equal(SupervisorSuccessorHandoffLoadKind.Missing, store.Load(Now).Kind);
+
+            store.Write(Handoff());
+            using var exclusive = new FileStream(
+                ContinuityPaths.SupervisorHandoffFile(root),
+                FileMode.Open,
+                FileAccess.ReadWrite,
+                FileShare.None);
+            Assert.Equal(SupervisorSuccessorHandoffLoadKind.Unreadable, store.Load(Now).Kind);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ANewHandoffAtomicallyReplacesThePreviousManifest()
+    {
+        var root = TemporaryDirectory();
+        try
+        {
+            var store = Store(root);
+            store.Write(Handoff());
+            var replacement = Handoff() with
+            {
+                HandoffId = Guid.Parse("fedcba98-7654-3210-fedc-ba9876543210").ToString("N"),
+            };
+
+            store.Write(replacement);
+
+            Assert.Equal(replacement, store.Load(Now).Handoff);
+            Assert.Empty(Directory.EnumerateFiles(root, "*.tmp-*"));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void MissingNestedIdentitiesFailClosedWithoutEscapingTheLoader()
+    {
+        var root = TemporaryDirectory();
+        try
+        {
+            var path = ContinuityPaths.SupervisorHandoffFile(root);
+            File.WriteAllText(
+                path,
+                """
+                {
+                  "schemaVersion": 1,
+                  "handoffId": "0123456789abcdef0123456789abcdef",
+                  "previousSupervisorProcessId": 42,
+                  "previousSupervisorStartedAtUtc": "2026-08-23T11:00:00Z",
+                  "publicPort": 45123,
+                  "createdAtUtc": "2026-08-23T12:00:00Z",
+                  "expiresAtUtc": "2026-08-23T12:01:00Z"
+                }
+                """);
 
             Assert.Equal(
                 SupervisorSuccessorHandoffLoadKind.Invalid,

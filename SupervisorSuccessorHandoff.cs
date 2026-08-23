@@ -40,6 +40,7 @@ internal sealed record SupervisorSuccessorHandoff(
 {
     internal const int CurrentSchemaVersion = 1;
     internal static readonly TimeSpan MaximumLifetime = TimeSpan.FromMinutes(2);
+    internal static readonly TimeSpan MaximumClockSkew = TimeSpan.FromSeconds(5);
 
     internal void Validate()
     {
@@ -62,6 +63,13 @@ internal sealed record SupervisorSuccessorHandoff(
             throw new InvalidDataException("Supervisor handoff CODEX_HOME must be fully qualified.");
         }
 
+        if (RunningBuild is null ||
+            SelectedBuild is null ||
+            RollbackBuild is null ||
+            Backend is null)
+        {
+            throw new InvalidDataException("Supervisor handoff identities are required.");
+        }
         RunningBuild.Validate();
         SelectedBuild.Validate();
         RollbackBuild.Validate();
@@ -161,6 +169,11 @@ internal sealed class SupervisorSuccessorHandoffStore(string path)
                 SerializerOptions);
             handoff?.Validate();
             if (handoff is null)
+            {
+                return Invalid();
+            }
+            if (handoff.CreatedAtUtc > nowUtc &&
+                handoff.CreatedAtUtc - nowUtc > SupervisorSuccessorHandoff.MaximumClockSkew)
             {
                 return Invalid();
             }
