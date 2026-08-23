@@ -2,6 +2,11 @@ namespace CodexContinuity;
 
 internal sealed class RpcReadBudget
 {
+    internal const int DefaultMaximumItems = 10_000;
+    internal const int DefaultMaximumMessageBytes = 2 * 1024 * 1024;
+    internal const int DefaultMaximumPages = 101;
+    internal static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromSeconds(30);
+
     private readonly int maximumItems;
     private readonly int maximumPages;
     private readonly HashSet<string> seenCursors = new(StringComparer.Ordinal);

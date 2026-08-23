@@ -1124,43 +1124,57 @@ internal static class Program
         {
         }
 
-        public static async Task<RpcClient> ConnectAsync(string url)
+        public static async Task<RpcClient> ConnectAsync(
+            string url,
+            int maximumResponseBytes = RpcReadBudget.DefaultMaximumMessageBytes)
         {
             var client = new RpcClient();
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            await client.socket.ConnectAsync(new Uri(url), timeout.Token);
-            var initialize = await client.RequestAsync("initialize", new JsonObject
+            try
             {
-                ["clientInfo"] = new JsonObject
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await client.socket.ConnectAsync(new Uri(url), timeout.Token);
+                var initialize = await client.RequestAsync(
+                    "initialize",
+                    new JsonObject
+                    {
+                        ["clientInfo"] = new JsonObject
+                        {
+                            ["name"] = "codex_continuity",
+                            ["title"] = "Codex Continuity",
+                            ["version"] = ProductVersion(),
+                        },
+                        ["capabilities"] = new JsonObject(),
+                    },
+                    timeout.Token,
+                    maximumResponseBytes);
+                if (initialize["error"] is not null)
                 {
-                    ["name"] = "codex_continuity",
-                    ["title"] = "Codex Continuity",
-                    ["version"] = ProductVersion(),
-                },
-                ["capabilities"] = new JsonObject(),
-            });
-            if (initialize["error"] is not null)
-            {
-                throw new InvalidOperationException(
-                    $"App-server initialization failed: {initialize["error"]}");
+                    throw new InvalidOperationException(
+                        $"App-server initialization failed: {initialize["error"]}");
+                }
+                await client.SendAsync(new JsonObject
+                {
+                    ["method"] = "initialized",
+                    ["params"] = new JsonObject(),
+                }, timeout.Token);
+                return client;
             }
-            await client.SendAsync(new JsonObject
+            catch
             {
-                ["method"] = "initialized",
-                ["params"] = new JsonObject(),
-            }, timeout.Token);
-            return client;
+                client.socket.Dispose();
+                throw;
+            }
         }
 
         public async Task<List<ThreadSummary>> ListThreadsAsync(
-            int maximumThreads = int.MaxValue,
-            int maximumPages = int.MaxValue,
-            int maximumMessageBytes = int.MaxValue,
+            int maximumThreads = RpcReadBudget.DefaultMaximumItems,
+            int maximumPages = RpcReadBudget.DefaultMaximumPages,
+            int maximumMessageBytes = RpcReadBudget.DefaultMaximumMessageBytes,
             TimeSpan? operationTimeout = null)
         {
             ArgumentOutOfRangeException.ThrowIfLessThan(maximumMessageBytes, 1);
             using var timeout = new CancellationTokenSource(
-                operationTimeout ?? Timeout.InfiniteTimeSpan);
+                operationTimeout ?? RpcReadBudget.DefaultOperationTimeout);
             var budget = new RpcReadBudget(maximumThreads, maximumPages);
             var threads = new List<ThreadSummary>();
             string? cursor = null;
@@ -1222,7 +1236,7 @@ internal static class Program
             string method,
             JsonObject parameters,
             CancellationToken cancellationToken = default,
-            int maximumResponseBytes = int.MaxValue)
+            int maximumResponseBytes = RpcReadBudget.DefaultMaximumMessageBytes)
         {
             var id = Interlocked.Increment(ref nextId);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
