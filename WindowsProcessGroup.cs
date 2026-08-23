@@ -295,27 +295,36 @@ internal sealed class WindowsProcessGroup : IDisposable
         }
     }
 
-    internal void SendCtrlBreak()
+    internal bool SendCtrlBreak()
     {
         ObjectDisposedException.ThrowIf(disposed != 0, this);
         if (HasExited)
         {
-            return;
+            return false;
         }
-        if (!GenerateConsoleCtrlEvent(CtrlBreakEvent, checked((uint)process.Id)))
+        if (GenerateConsoleCtrlEvent(CtrlBreakEvent, checked((uint)process.Id)))
         {
-            var error = Marshal.GetLastWin32Error();
-            if (!HasExited)
-            {
-                throw new Win32Exception(
-                    error,
-                    $"Could not send Ctrl+Break to process group {process.Id}.");
-            }
+            return true;
         }
+
+        var error = Marshal.GetLastWin32Error();
+        if (HasExited)
+        {
+            return false;
+        }
+        throw new Win32Exception(
+            error,
+            $"Could not send Ctrl+Break to process group {process.Id}.");
     }
 
-    internal Task WaitForExitAsync(CancellationToken cancellationToken = default) =>
-        process.WaitForExitAsync(cancellationToken);
+    internal async Task WaitForExitAsync(CancellationToken cancellationToken = default)
+    {
+        await process.WaitForExitAsync(cancellationToken);
+        while (!IsSignaled())
+        {
+            await Task.Delay(1, cancellationToken);
+        }
+    }
 
     internal void Kill() => process.Kill(entireProcessTree: true);
 

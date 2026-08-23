@@ -10,6 +10,7 @@ namespace CodexContinuity;
 internal static class Program
 {
     private const int DefaultPort = LoopbackEndpoint.DefaultPort;
+    private const int StatusControlCExit = unchecked((int)0xC000013A);
     private const string UpdateManifestUrl =
         "https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json";
 
@@ -760,6 +761,17 @@ internal static class Program
     private static async Task<int> SelfTestAsync()
     {
         var codexPath = FindCodexExecutable();
+        var result = await RunSelfTestAsync(
+            startBackend: (port, codexHome) => StartAppServer(codexPath, port, codexHome),
+            gracefulStopTimeout: TimeSpan.FromSeconds(10));
+        Console.WriteLine(result.ToJsonString(JsonOptions));
+        return 0;
+    }
+
+    internal static async Task<JsonObject> RunSelfTestAsync(
+        Func<int, string, WindowsProcessGroup> startBackend,
+        TimeSpan gracefulStopTimeout)
+    {
         var publicPort = FindAvailablePort();
         var backendPort = FindAvailablePort(publicPort);
         var testRoot = Path.Combine(
@@ -778,7 +790,7 @@ internal static class Program
                 publicPort,
                 backendPort,
                 startGated: true);
-            process = StartAppServer(codexPath, backendPort, codexHome);
+            process = startBackend(backendPort, codexHome);
             var stdout = process.StandardOutput.ReadToEndAsync();
             var stderr = process.StandardError.ReadToEndAsync();
             if (!await WaitUntilReadyAsync(
@@ -846,29 +858,20 @@ internal static class Program
                 ["threadPersistedAcrossReconnect"] = true,
             };
             await relay.CloseGateAsync();
-            if (!await StopAppServerGracefullyAsync(process, TimeSpan.FromSeconds(10)))
+            if (!await StopAppServerGracefullyAsync(process, gracefulStopTimeout))
             {
                 throw new InvalidOperationException(
                     "The isolated app-server did not honor bounded graceful shutdown.");
             }
             await Task.WhenAll(stdout, stderr);
             result["gracefulStop"] = true;
-            Console.WriteLine(result.ToJsonString(JsonOptions));
-            return 0;
+            return result;
         }
         finally
         {
             try
             {
-                if (relay is { IsGated: false })
-                {
-                    await relay.CloseGateAsync();
-                }
-                if (process is { HasExited: false })
-                {
-                    process.Kill();
-                    await process.WaitForExitAsync();
-                }
+                await CleanupSelfTestAsync(relay, process, CancellationToken.None);
             }
             finally
             {
@@ -882,21 +885,47 @@ internal static class Program
         }
     }
 
+    internal static async Task CleanupSelfTestAsync(
+        LoopbackRelay? relay,
+        WindowsProcessGroup? process,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (relay is { IsGated: false })
+            {
+                await relay.CloseGateAsync(cancellationToken);
+            }
+        }
+        finally
+        {
+            if (process is { HasExited: false })
+            {
+                process.Kill();
+                await process.WaitForExitAsync();
+            }
+        }
+    }
+
     internal static async Task<bool> StopAppServerGracefullyAsync(
         WindowsProcessGroup process,
         TimeSpan timeout)
     {
         if (process.HasExited)
         {
-            return true;
+            return false;
         }
-        process.SendCtrlBreak();
+        if (!process.SendCtrlBreak())
+        {
+            return false;
+        }
+        using var timeoutCancellation = new CancellationTokenSource(timeout);
         try
         {
-            await process.WaitForExitAsync().WaitAsync(timeout);
-            return true;
+            await process.WaitForExitAsync(timeoutCancellation.Token);
+            return process.ExitCode is 0 or StatusControlCExit;
         }
-        catch (TimeoutException)
+        catch (OperationCanceledException) when (timeoutCancellation.IsCancellationRequested)
         {
             return false;
         }
