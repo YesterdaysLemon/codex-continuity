@@ -38,6 +38,15 @@ public sealed class SupervisorRelayTests : IDisposable
         try
         {
             await WaitForFileAsync(fixtureStartedPath);
+            using (var client = new HttpClient())
+            using (var response = await client.GetAsync(
+                $"http://127.0.0.1:{privatePort}/readyz"))
+            {
+                Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+                Assert.Equal(
+                    $"not-ready:{privatePort}",
+                    await response.Content.ReadAsStringAsync());
+            }
             await AssertEndpointUnavailableAsync(publicPort);
             Assert.False(CanBind(publicPort));
 
@@ -83,6 +92,7 @@ public sealed class SupervisorRelayTests : IDisposable
     public async Task StatusWriteFailureStopsOwnedBackend()
     {
         Directory.CreateDirectory(ContinuityPaths.SupervisorStatusFile(root));
+        var publicPort = FindAvailablePort();
         var backendProcessId = 0;
 
         WindowsProcessGroup StartBackend(int port)
@@ -94,10 +104,11 @@ public sealed class SupervisorRelayTests : IDisposable
 
         await Assert.ThrowsAnyAsync<IOException>(async () =>
             await OwnedSupervisorRuntime.RunAsync(
-                FindAvailablePort(), root, CancellationToken.None, StartBackend)
+                publicPort, root, CancellationToken.None, StartBackend)
                 .WaitAsync(TimeSpan.FromSeconds(10)));
 
         Assert.False(ProcessIsRunning(backendProcessId));
+        Assert.True(CanBind(publicPort));
     }
 
     private async Task<SupervisorStatus> ReadRunningStatusAsync()
@@ -159,7 +170,7 @@ public sealed class SupervisorRelayTests : IDisposable
     {
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
         await Assert.ThrowsAsync<HttpRequestException>(async () =>
-            await client.GetStringAsync($"http://127.0.0.1:{port}/readyz"));
+            await client.GetAsync($"http://127.0.0.1:{port}/readyz"));
     }
 
     private async Task<string> ReadWhenReadyAsync(int port)

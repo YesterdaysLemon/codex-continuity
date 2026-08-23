@@ -145,17 +145,13 @@ internal static class Program
         };
         Console.CancelKeyPress += cancelHandler;
         var listener = new TcpListener(IPAddress.Loopback, port);
+        listener.Start();
         await File.WriteAllTextAsync(
             readyPath,
             Environment.ProcessId.ToString(CultureInfo.InvariantCulture));
         var requestCount = 0;
         try
         {
-            while (startGatePath is not null && !File.Exists(startGatePath))
-            {
-                await Task.Delay(25, shutdown.Token);
-            }
-            listener.Start();
             while (!shutdown.IsCancellationRequested)
             {
                 try
@@ -163,9 +159,9 @@ internal static class Program
                     using var client = await listener.AcceptTcpClientAsync(shutdown.Token);
                     try
                     {
-                        await RespondToReadyRequestAsync(client, port, shutdown.Token);
-                        requestCount++;
-                        if (requestCount == exitAfterRequests)
+                        var ready = startGatePath is null || File.Exists(startGatePath);
+                        await RespondToReadyRequestAsync(client, port, ready, shutdown.Token);
+                        if (ready && ++requestCount == exitAfterRequests)
                         {
                             return 17;
                         }
@@ -192,6 +188,7 @@ internal static class Program
     private static async Task RespondToReadyRequestAsync(
         TcpClient client,
         int port,
+        bool ready,
         CancellationToken cancellationToken)
     {
         await using var stream = client.GetStream();
@@ -208,9 +205,10 @@ internal static class Program
         }
         while (!string.IsNullOrEmpty(line));
 
-        var body = Encoding.UTF8.GetBytes($"backend:{port}");
+        var body = Encoding.UTF8.GetBytes(ready ? $"backend:{port}" : $"not-ready:{port}");
         var header = Encoding.ASCII.GetBytes(
-            $"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n");
+            $"HTTP/1.1 {(ready ? "200 OK" : "503 Service Unavailable")}\r\n" +
+            $"Content-Length: {body.Length}\r\nConnection: close\r\n\r\n");
         await stream.WriteAsync(header, cancellationToken);
         await stream.WriteAsync(body, cancellationToken);
     }
