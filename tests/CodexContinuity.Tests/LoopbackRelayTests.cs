@@ -83,6 +83,8 @@ public sealed class LoopbackRelayTests
         Assert.Equal(
             "replacement:continued",
             await RoundTripAsync(replacementClient, "continued"));
+        Assert.False(result.GateLease.TryOpen());
+        Assert.False(result.GateLease.TryRetargetAndOpen(backend.Port));
     }
 
     [Fact]
@@ -160,6 +162,7 @@ public sealed class LoopbackRelayTests
     public async Task SafeTransitionLeaseCannotReopenAConcurrentSafetyGate()
     {
         await using var backend = new TaggedBackend("backend:");
+        await using var replacement = new TaggedBackend("replacement:");
         var publicPort = AvailablePort();
         await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
         var result = await GatedHandoffTransition.CloseAndRecomputeAsync(
@@ -170,9 +173,13 @@ public sealed class LoopbackRelayTests
         await relay.CloseGateAsync();
 
         Assert.False(result.GateLease.TryOpen());
+        Assert.False(result.GateLease.TryRetargetAndOpen(replacement.Port));
         Assert.True(relay.IsGated);
         using var refused = await ConnectAsync(publicPort);
         await AssertConnectionClosedAsync(refused);
+        relay.OpenGate();
+        using var originalClient = await ConnectAsync(publicPort);
+        Assert.Equal("backend:unchanged", await RoundTripAsync(originalClient, "unchanged"));
     }
 
     [Fact]
