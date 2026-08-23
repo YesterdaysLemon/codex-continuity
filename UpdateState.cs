@@ -180,20 +180,11 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
 
     internal ContinuityUpdateStateLoadResult Load()
     {
-        if (!File.Exists(path))
-        {
-            return new(ContinuityUpdateStateLoadKind.Missing, State: null);
-        }
-
         try
         {
-            if (new FileInfo(path).Length > MaximumStateBytes)
-            {
-                return new(ContinuityUpdateStateLoadKind.Invalid, State: null);
-            }
-
-            var json = File.ReadAllText(path);
-            using var document = JsonDocument.Parse(json);
+            using var stateFile = BoundedStateFile.Open(path, MaximumStateBytes);
+            var bytes = stateFile.Read();
+            using var document = JsonDocument.Parse(bytes);
             if (document.RootElement.ValueKind != JsonValueKind.Object ||
                 !document.RootElement.TryGetProperty("schemaVersion", out var schemaElement) ||
                 !schemaElement.TryGetInt32(out var schemaVersion))
@@ -205,16 +196,23 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
                 return new(ContinuityUpdateStateLoadKind.UnsupportedSchema, State: null);
             }
 
-            var state = JsonSerializer.Deserialize<ContinuityUpdateState>(json, SerializerOptions);
+            var state = JsonSerializer.Deserialize<ContinuityUpdateState>(
+                bytes.Span,
+                SerializerOptions);
             return IsUsable(state)
                 ? new(
                     ContinuityUpdateStateLoadKind.Loaded,
                     NormalizeCounts(state!))
                 : new(ContinuityUpdateStateLoadKind.Invalid, State: null);
         }
-        catch (JsonException)
+        catch (Exception exception) when (exception is JsonException or InvalidDataException)
         {
             return new(ContinuityUpdateStateLoadKind.Invalid, State: null);
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return new(ContinuityUpdateStateLoadKind.Missing, State: null);
         }
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException)
@@ -243,24 +241,12 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
                 .Take(retainedReleases)
                 .ToList(),
         };
-        var directory = Path.GetDirectoryName(path)
-            ?? throw new InvalidOperationException($"Update state path has no directory: {path}");
-        Directory.CreateDirectory(directory);
-        var temporaryPath = $"{path}.tmp-{Guid.NewGuid():N}";
-        try
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(bounded, SerializerOptions);
+        if (bytes.Length > MaximumStateBytes)
         {
-            File.WriteAllText(
-                temporaryPath,
-                JsonSerializer.Serialize(bounded, SerializerOptions));
-            File.Move(temporaryPath, path, overwrite: true);
+            throw new InvalidDataException("Update state exceeds the persisted size limit.");
         }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-        }
+        BoundedStateFile.WriteAtomically(path, bytes);
     }
 
     private static ContinuityUpdateState NormalizeCounts(ContinuityUpdateState state) => state with
