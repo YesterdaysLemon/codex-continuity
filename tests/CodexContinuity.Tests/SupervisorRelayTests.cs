@@ -386,27 +386,34 @@ public sealed class SupervisorRelayTests : IDisposable
         var publicPort = FindAvailablePort();
         var privatePort = 0;
         var trackedProcessId = 0;
+        var startCount = 0;
         WindowsProcessGroup? foreign = null;
+        using var shutdown = new CancellationTokenSource();
+        var supervisor = OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            shutdown.Token,
+            port =>
+            {
+                if (Interlocked.Increment(ref startCount) != 1)
+                {
+                    throw new InvalidOperationException("The backend callback ran more than once.");
+                }
+                privatePort = port;
+                foreign = StartHarnessBackend(
+                    port,
+                    Path.Combine(root, "foreign-started.txt"));
+                var tracked = StartIdleProcess(
+                    Path.Combine(root, "tracked-started.txt"));
+                trackedProcessId = tracked.Id;
+                return tracked;
+            });
         try
         {
-            var exitCode = await OwnedSupervisorRuntime.RunAsync(
-                    publicPort,
-                    root,
-                    CancellationToken.None,
-                    port =>
-                    {
-                        privatePort = port;
-                        foreign = StartHarnessBackend(
-                            port,
-                            Path.Combine(root, "foreign-started.txt"));
-                        var tracked = StartIdleProcess(
-                            Path.Combine(root, "tracked-started.txt"));
-                        trackedProcessId = tracked.Id;
-                        return tracked;
-                    })
-                .WaitAsync(TimeSpan.FromSeconds(10));
+            var exitCode = await supervisor.WaitAsync(TimeSpan.FromSeconds(10));
 
             Assert.Equal(1, exitCode);
+            Assert.Equal(1, Volatile.Read(ref startCount));
             Assert.NotNull(foreign);
             Assert.False(foreign.HasExited);
             Assert.False(ProcessIsRunning(trackedProcessId));
@@ -434,15 +441,233 @@ public sealed class SupervisorRelayTests : IDisposable
         }
         finally
         {
-            if (foreign is { HasExited: false })
+            shutdown.Cancel();
+            try
             {
-                foreign.Kill();
-                await foreign.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                await supervisor.WaitAsync(TimeSpan.FromSeconds(10));
             }
-            foreign?.Dispose();
+            finally
+            {
+                if (foreign is { HasExited: false })
+                {
+                    foreign.Kill();
+                    await foreign.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                }
+                foreign?.Dispose();
+            }
         }
 
         Assert.True(CanBind(privatePort));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RelayAdmissionRejectsMismatchWithoutForwardingBytes(bool afterConnect)
+    {
+        var publicPort = FindAvailablePort();
+        var backendProcessId = 0;
+        var listenerDenied = 0;
+        var connectionDenied = 0;
+        var listenerChecks = 0;
+        var connectionChecks = 0;
+        var requestLogPath = Path.Combine(root, "backend-requests.txt");
+        var ownershipChecks = new BackendOwnershipChecks(
+            (_, processId) =>
+            {
+                Interlocked.Increment(ref listenerChecks);
+                return processId == Volatile.Read(ref backendProcessId) &&
+                    Volatile.Read(ref listenerDenied) == 0;
+            },
+            (_, processId) =>
+            {
+                Interlocked.Increment(ref connectionChecks);
+                return processId == Volatile.Read(ref backendProcessId) &&
+                    Volatile.Read(ref connectionDenied) == 0;
+            });
+        using var shutdown = new CancellationTokenSource();
+
+        WindowsProcessGroup StartBackend(int port)
+        {
+            var process = StartHarnessBackend(
+                port,
+                Path.Combine(root, "fixture-started.txt"),
+                requestLogPath: requestLogPath);
+            Volatile.Write(ref backendProcessId, process.Id);
+            return process;
+        }
+
+        var supervisor = OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            shutdown.Token,
+            StartBackend,
+            ownershipChecks: ownershipChecks);
+        try
+        {
+            await ReadStatusAsync("running");
+            var baselineRequests = File.ReadAllLines(requestLogPath).Length;
+            var baselineListenerChecks = Volatile.Read(ref listenerChecks);
+            var baselineConnectionChecks = Volatile.Read(ref connectionChecks);
+            if (afterConnect)
+            {
+                Volatile.Write(ref connectionDenied, 1);
+            }
+            else
+            {
+                Volatile.Write(ref listenerDenied, 1);
+            }
+
+            await AssertEndpointUnavailableAsync(publicPort);
+            await WaitUntilAsync(
+                () => Volatile.Read(ref listenerChecks) > baselineListenerChecks &&
+                    (!afterConnect ||
+                        Volatile.Read(ref connectionChecks) > baselineConnectionChecks),
+                "Relay did not run the configured ownership admission checks.");
+            await Task.Delay(100);
+
+            Assert.Equal(
+                baselineRequests,
+                File.ReadAllLines(requestLogPath).Length);
+            Assert.Equal(
+                afterConnect ? baselineConnectionChecks + 1 : baselineConnectionChecks,
+                Volatile.Read(ref connectionChecks));
+            Assert.True(ProcessIsRunning(backendProcessId));
+        }
+        finally
+        {
+            shutdown.Cancel();
+            Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+
+        Assert.False(ProcessIsRunning(backendProcessId));
+        Assert.True(CanBind(publicPort));
+        Assert.Equal(
+            BackendLeaseLoadKind.Missing,
+            new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(root)).Load().Kind);
+    }
+
+    [Fact]
+    public async Task UnknownOwnershipKillsNewBackendWithoutWritingLease()
+    {
+        var publicPort = FindAvailablePort();
+        var backendProcessId = 0;
+        var connectionChecks = 0;
+        var ownershipChecks = UnavailableOwnershipChecks(
+            () => Interlocked.Increment(ref connectionChecks));
+        using var shutdown = new CancellationTokenSource();
+        var supervisor = OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            shutdown.Token,
+            port =>
+            {
+                var process = StartHarnessBackend(
+                    port,
+                    Path.Combine(root, "fixture-started.txt"));
+                backendProcessId = process.Id;
+                return process;
+            },
+            ownershipChecks: ownershipChecks);
+        try
+        {
+            Assert.Equal(1, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.False(ProcessIsRunning(backendProcessId));
+            Assert.Equal(0, Volatile.Read(ref connectionChecks));
+            Assert.Equal(
+                BackendLeaseLoadKind.Missing,
+                new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(root)).Load().Kind);
+            var status = await ReadStatusAsync("backendOwnershipUnknown");
+            Assert.Equal(
+                new SupervisorStatus(
+                    State: "backendOwnershipUnknown",
+                    SupervisorProcessId: Environment.ProcessId,
+                    BackendProcessId: backendProcessId,
+                    Port: publicPort,
+                    CodexHome: FutureProcessEnvironment.ResolveCodexHome(),
+                    ConsecutiveFailures: 0,
+                    LastExitCode: null,
+                    UpdatedAtUtc: status.UpdatedAtUtc,
+                    NextRetryAtUtc: null,
+                    Detail: "Private listener ownership could not be inspected; " +
+                        "refusing to publish the new backend.",
+                    SupervisorStartedAtUtc: status.SupervisorStartedAtUtc,
+                    SupervisorExecutable: status.SupervisorExecutable),
+                status);
+            Assert.True(CanBind(publicPort));
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await supervisor.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+    }
+
+    [Fact]
+    public async Task UnknownOwnershipPreservesRecoveredBackendAndLease()
+    {
+        Directory.CreateDirectory(root);
+        var publicPort = FindAvailablePort();
+        var backendPort = FindAvailablePort(publicPort);
+        var original = StartHarnessBackend(
+            backendPort,
+            Path.Combine(root, "recovered-started.txt"));
+        var originalLease = LeaseFor(original, publicPort, backendPort) with
+        {
+            OwnerSupervisorProcessId = int.MaxValue,
+        };
+        await ReadWhenReadyAsync(backendPort);
+        var leaseStore = new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(root));
+        leaseStore.Write(originalLease);
+        original.Dispose();
+        var replacementsStarted = 0;
+        var connectionChecks = 0;
+        var ownershipChecks = UnavailableOwnershipChecks(
+            () => Interlocked.Increment(ref connectionChecks));
+        using var shutdown = new CancellationTokenSource();
+        var supervisor = OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            shutdown.Token,
+            _ =>
+            {
+                Interlocked.Increment(ref replacementsStarted);
+                throw new InvalidOperationException("The replacement callback must not run.");
+            },
+            ownershipChecks: ownershipChecks);
+        try
+        {
+            Assert.Equal(1, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal(0, Volatile.Read(ref replacementsStarted));
+            Assert.Equal(0, Volatile.Read(ref connectionChecks));
+            Assert.True(ProcessIsRunning(originalLease.BackendProcessId));
+            Assert.Equal(
+                new BackendLeaseLoadResult(BackendLeaseLoadKind.Loaded, originalLease),
+                leaseStore.Load());
+            var status = await ReadStatusAsync("backendOwnershipUnknown");
+            Assert.Equal(
+                new SupervisorStatus(
+                    State: "backendOwnershipUnknown",
+                    SupervisorProcessId: Environment.ProcessId,
+                    BackendProcessId: originalLease.BackendProcessId,
+                    Port: publicPort,
+                    CodexHome: FutureProcessEnvironment.ResolveCodexHome(),
+                    ConsecutiveFailures: 0,
+                    LastExitCode: null,
+                    UpdatedAtUtc: status.UpdatedAtUtc,
+                    NextRetryAtUtc: null,
+                    Detail: "Private listener ownership could not be inspected; " +
+                        "preserving the recovered backend lease.",
+                    SupervisorStartedAtUtc: status.SupervisorStartedAtUtc,
+                    SupervisorExecutable: status.SupervisorExecutable),
+                status);
+            Assert.True(CanBind(publicPort));
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await supervisor.WaitAsync(TimeSpan.FromSeconds(10));
+        }
     }
 
     [Fact]
@@ -683,7 +908,8 @@ public sealed class SupervisorRelayTests : IDisposable
         int port,
         string fixtureStartedPath,
         string? startGatePath = null,
-        int exitAfterRequests = 0)
+        int exitAfterRequests = 0,
+        string? requestLogPath = null)
     {
         var executable = HarnessExecutable();
         var startInfo = new ProcessStartInfo(executable)
@@ -695,9 +921,13 @@ public sealed class SupervisorRelayTests : IDisposable
         startInfo.ArgumentList.Add(port.ToString());
         startInfo.ArgumentList.Add(fixtureStartedPath);
         startInfo.ArgumentList.Add(exitAfterRequests.ToString());
-        if (startGatePath is not null)
+        if (startGatePath is not null || requestLogPath is not null)
         {
-            startInfo.ArgumentList.Add(startGatePath);
+            startInfo.ArgumentList.Add(startGatePath ?? string.Empty);
+        }
+        if (requestLogPath is not null)
+        {
+            startInfo.ArgumentList.Add(requestLogPath);
         }
         var process = WindowsProcessGroup.Start(startInfo);
         harnesses.Enqueue(new(process.Id, process.StartedAtUtc, executable));
@@ -718,6 +948,15 @@ public sealed class SupervisorRelayTests : IDisposable
         harnesses.Enqueue(new(process.Id, process.StartedAtUtc, executable));
         return process;
     }
+
+    private static BackendOwnershipChecks UnavailableOwnershipChecks(
+        Action connectionInspected) => new(
+        (_, _) => throw new Win32Exception(5, "ownership inspection unavailable"),
+        (_, _) =>
+        {
+            connectionInspected();
+            return true;
+        });
 
     private static BackendLease LeaseFor(
         WindowsProcessGroup process,

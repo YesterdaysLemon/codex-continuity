@@ -1,4 +1,21 @@
+using System.Net.Sockets;
+
 namespace CodexContinuity;
+
+internal sealed record BackendOwnershipChecks(
+    Func<int, int, bool> IsListenerOwnedBy,
+    Func<TcpClient, int, bool> IsConnectionAcceptedBy)
+{
+    internal static BackendOwnershipChecks Native { get; } = new(
+        WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy,
+        WindowsTcpPortOwnership.IsLoopbackConnectionAcceptedBy);
+
+    internal void Validate()
+    {
+        ArgumentNullException.ThrowIfNull(IsListenerOwnedBy);
+        ArgumentNullException.ThrowIfNull(IsConnectionAcceptedBy);
+    }
+}
 
 internal static class OwnedSupervisorRuntime
 {
@@ -9,7 +26,8 @@ internal static class OwnedSupervisorRuntime
         Func<int, WindowsProcessGroup> startBackend,
         Func<int, TimeSpan>? delayForFailure = null,
         Func<TimeSpan, CancellationToken, Task<bool>>? waitForRestart = null,
-        TimeSpan? readinessTimeout = null)
+        TimeSpan? readinessTimeout = null,
+        BackendOwnershipChecks? ownershipChecks = null)
     {
         Directory.CreateDirectory(stateDirectory);
         var logPath = ContinuityPaths.AppServerLogFile(stateDirectory);
@@ -23,6 +41,8 @@ internal static class OwnedSupervisorRuntime
             failure,
             Random.Shared.NextDouble());
         waitForRestart ??= Program.WaitForRestartAsync;
+        ownershipChecks ??= BackendOwnershipChecks.Native;
+        ownershipChecks.Validate();
         var effectiveReadinessTimeout = readinessTimeout ?? TimeSpan.FromSeconds(20);
         if (effectiveReadinessTimeout <= TimeSpan.Zero ||
             effectiveReadinessTimeout > TimeSpan.FromSeconds(30))
@@ -76,12 +96,8 @@ internal static class OwnedSupervisorRuntime
                 {
                     var processId = Volatile.Read(ref activeBackendProcessId);
                     return processId > 0 && (connectedBackend is null
-                        ? WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy(
-                            candidatePort,
-                            processId)
-                        : WindowsTcpPortOwnership.IsLoopbackConnectionAcceptedBy(
-                            connectedBackend,
-                            processId));
+                        ? ownershipChecks.IsListenerOwnedBy(candidatePort, processId)
+                        : ownershipChecks.IsConnectionAcceptedBy(connectedBackend, processId));
                 });
         }
         catch (System.Net.Sockets.SocketException exception) when (
@@ -148,7 +164,10 @@ internal static class OwnedSupervisorRuntime
                         shutdownToken);
                     if (ready && !process.HasExited)
                     {
-                        var ownership = InspectBackendOwnership(backendPort, process.Id);
+                        var ownership = InspectBackendOwnership(
+                            backendPort,
+                            process.Id,
+                            ownershipChecks.IsListenerOwnedBy);
                         if (ownership == BackendOwnership.Lost && !process.HasExited)
                         {
                             await Task.WhenAny(
@@ -164,8 +183,11 @@ internal static class OwnedSupervisorRuntime
                             var ownershipLost = ownership == BackendOwnership.Lost;
                             var detail = ownershipLost
                                 ? "The private listener is not owned by the supervised backend."
-                                : "Private listener ownership could not be inspected; " +
-                                    "preserving any recovered backend lease.";
+                                : recovered
+                                    ? "Private listener ownership could not be inspected; " +
+                                        "preserving the recovered backend lease."
+                                    : "Private listener ownership could not be inspected; " +
+                                        "refusing to publish the new backend.";
                             statusStore.Write(Program.NewSupervisorStatus(
                                 ownershipLost
                                     ? "backendOwnershipLost"
@@ -369,11 +391,14 @@ internal static class OwnedSupervisorRuntime
         return 0;
     }
 
-    private static BackendOwnership InspectBackendOwnership(int port, int processId)
+    private static BackendOwnership InspectBackendOwnership(
+        int port,
+        int processId,
+        Func<int, int, bool> isListenerOwnedBy)
     {
         try
         {
-            return WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy(port, processId)
+            return isListenerOwnedBy(port, processId)
                 ? BackendOwnership.Owned
                 : BackendOwnership.Lost;
         }
