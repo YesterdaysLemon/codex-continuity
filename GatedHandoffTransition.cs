@@ -8,7 +8,7 @@ internal static class GatedHandoffTransition
 {
     internal static async Task<GatedHandoffDecision> CloseAndRecomputeAsync(
         LoopbackRelay relay,
-        Func<Task<ContinuityHandoffPlan>> recomputePlan,
+        Func<CancellationToken, Task<ContinuityHandoffPlan>> recomputePlan,
         TimeSpan? recomputeTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(relay);
@@ -24,7 +24,18 @@ internal static class GatedHandoffTransition
         try
         {
             gateLease = await relay.CloseGateExclusivelyAsync();
-            var plan = await recomputePlan().WaitAsync(effectiveTimeout);
+            using var timeout = new CancellationTokenSource(effectiveTimeout);
+            ContinuityHandoffPlan plan;
+            try
+            {
+                plan = await recomputePlan(timeout.Token).WaitAsync(timeout.Token);
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                throw new TimeoutException(
+                    $"Handoff-plan recomputation exceeded {effectiveTimeout}.");
+            }
+
             keepGateClosed = plan.TransitionReady;
             return new GatedHandoffDecision(
                 plan,
