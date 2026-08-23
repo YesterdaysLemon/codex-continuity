@@ -226,7 +226,8 @@ public sealed class LoopbackRelayTests
                     throw;
                 }
             },
-            TimeSpan.FromMilliseconds(20));
+            TimeSpan.FromMilliseconds(20),
+            TimeSpan.FromSeconds(5));
 
         await cancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(transition.IsCompleted);
@@ -252,11 +253,13 @@ public sealed class LoopbackRelayTests
         var neverCompletes = new TaskCompletionSource<ContinuityHandoffPlan>(
             TaskCreationOptions.RunContinuationsAsynchronously);
 
+        var transition = GatedHandoffTransition.CloseAndRecomputeAsync(
+            relay,
+            _ => neverCompletes.Task,
+            TimeSpan.FromMilliseconds(20),
+            TimeSpan.FromMilliseconds(20));
         var error = await Assert.ThrowsAsync<TimeoutException>(() =>
-            GatedHandoffTransition.CloseAndRecomputeAsync(
-                relay,
-                _ => neverCompletes.Task,
-                TimeSpan.FromMilliseconds(20)));
+            transition.WaitAsync(TimeSpan.FromSeconds(5)));
 
         Assert.Contains("relay remains gated", error.Message, StringComparison.OrdinalIgnoreCase);
         Assert.True(relay.IsGated);
@@ -278,6 +281,24 @@ public sealed class LoopbackRelayTests
                 relay,
                 _ => Task.FromResult(Plan(transitionReady: true)),
                 TimeSpan.FromSeconds(seconds)));
+
+        Assert.False(relay.IsGated);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(6)]
+    public async Task RejectsUnboundedCancellationDrainTimeoutBeforeGating(int seconds)
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+            GatedHandoffTransition.CloseAndRecomputeAsync(
+                relay,
+                _ => Task.FromResult(Plan(transitionReady: true)),
+                cancellationDrainTimeout: TimeSpan.FromSeconds(seconds)));
 
         Assert.False(relay.IsGated);
     }

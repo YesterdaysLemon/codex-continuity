@@ -6,12 +6,11 @@ internal sealed record GatedHandoffDecision(
 
 internal static class GatedHandoffTransition
 {
-    private static readonly TimeSpan CancellationDrainTimeout = TimeSpan.FromSeconds(1);
-
     internal static async Task<GatedHandoffDecision> CloseAndRecomputeAsync(
         LoopbackRelay relay,
         Func<CancellationToken, Task<ContinuityHandoffPlan>> recomputePlan,
-        TimeSpan? recomputeTimeout = null)
+        TimeSpan? recomputeTimeout = null,
+        TimeSpan? cancellationDrainTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(relay);
         ArgumentNullException.ThrowIfNull(recomputePlan);
@@ -19,6 +18,13 @@ internal static class GatedHandoffTransition
         if (effectiveTimeout <= TimeSpan.Zero || effectiveTimeout > TimeSpan.FromSeconds(30))
         {
             throw new ArgumentOutOfRangeException(nameof(recomputeTimeout));
+        }
+        var effectiveCancellationDrainTimeout =
+            cancellationDrainTimeout ?? TimeSpan.FromSeconds(1);
+        if (effectiveCancellationDrainTimeout <= TimeSpan.Zero ||
+            effectiveCancellationDrainTimeout > TimeSpan.FromSeconds(5))
+        {
+            throw new ArgumentOutOfRangeException(nameof(cancellationDrainTimeout));
         }
 
         var keepGateClosed = false;
@@ -37,13 +43,14 @@ internal static class GatedHandoffTransition
             {
                 await Task.WhenAny(
                     recomputation,
-                    Task.Delay(CancellationDrainTimeout));
+                    Task.Delay(effectiveCancellationDrainTimeout));
                 if (!recomputation.IsCompleted)
                 {
                     keepGateClosed = true;
                     throw new TimeoutException(
                         $"Handoff-plan recomputation did not stop within " +
-                        $"{CancellationDrainTimeout} after cancellation. The relay remains gated.");
+                        $"{effectiveCancellationDrainTimeout} after cancellation. " +
+                        "The relay remains gated.");
                 }
 
                 _ = recomputation.Exception;
