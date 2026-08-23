@@ -288,9 +288,14 @@ internal static class Program
         string stateDirectory,
         Func<string, string, CancellationToken, Task> runUpdates)
     {
+        using var supervisorLock = TryAcquireSupervisorLock(stateDirectory);
+        if (supervisorLock is null)
+        {
+            return Fail($"A Codex Continuity supervisor already owns port {port}.");
+        }
         using var mutex = new Mutex(
             initiallyOwned: true,
-            $"Local\\CodexContinuity-{port}",
+            SupervisorMutexName(port),
             out var ownsMutex);
         if (!ownsMutex)
         {
@@ -515,7 +520,7 @@ internal static class Program
                     ? ExistingEndpointOwnership.Legacy
                     : ExistingEndpointOwnership.Foreign;
         }
-        var outcome = coordinator.Install(
+        InstallOutcome Install() => coordinator.Install(
             executable,
             port,
             trayInstallMode,
@@ -523,6 +528,11 @@ internal static class Program
             intent,
             expectedInstalledSha256,
             LifecycleLockOwnership.AlreadyHeld);
+        var outcome = RunInstallMutation(
+            stateDirectory,
+            existingState?.Port,
+            port,
+            Install);
         var state = outcome.State;
         Console.WriteLine(
             $"Configured future Codex desktop launches to use {state.AppServerUrl.AppliedValue}.");
@@ -630,6 +640,113 @@ internal static class Program
                 ? "Removed future startup configuration. Codex reopenings in this Windows session will keep reconnecting to the running backend; the owned reconnect setting and installed files will be removed at the next sign-in. No running process was stopped."
                 : "Removed owned future-launch configuration. Installed files will be removed at the next sign-in; no running process was stopped.");
         return 0;
+    }
+
+    internal static T RunInstallMutation<T>(
+        string stateDirectory,
+        int? installedPort,
+        int requestedPort,
+        Func<T> mutation) => installedPort is { } port && port != requestedPort
+            ? RunPortChangeMutation(stateDirectory, port, mutation)
+            : mutation();
+
+    internal static T RunPortChangeMutation<T>(
+        string stateDirectory,
+        int port,
+        Func<T> mutation) => RunLifecycleMutationWithInactiveSupervisor(
+            stateDirectory,
+            port,
+            "change the configured port",
+            mutation);
+
+    internal static T RunUninstallMutation<T>(
+        string stateDirectory,
+        int port,
+        Func<T> mutation) => RunLifecycleMutationWithInactiveSupervisor(
+            stateDirectory,
+            port,
+            "uninstall Continuity",
+            mutation);
+
+    private static T RunLifecycleMutationWithInactiveSupervisor<T>(
+        string stateDirectory,
+        int port,
+        string operation,
+        Func<T> mutation)
+    {
+        using var supervisorLock = TryAcquireSupervisorLock(stateDirectory);
+        if (supervisorLock is null)
+        {
+            throw new InvalidOperationException(
+                $"The Continuity supervisor on port {port} is still active. Refusing to {operation}.");
+        }
+        using var mutex = new Mutex(initiallyOwned: false, SupervisorMutexName(port));
+        var ownsMutex = false;
+        try
+        {
+            try
+            {
+                ownsMutex = mutex.WaitOne(0);
+            }
+            catch (AbandonedMutexException)
+            {
+                ownsMutex = true;
+            }
+            if (!ownsMutex)
+            {
+                throw new InvalidOperationException(
+                    $"The Continuity supervisor on port {port} is still active. Refusing to {operation}.");
+            }
+            var store = new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(stateDirectory));
+            var recovery = BackendLeaseRecovery.TryRecover(
+                store,
+                port,
+                FutureProcessEnvironment.ResolveCodexHome());
+            recovery.Backend?.Dispose();
+            EnsureBackendLeaseAllowsLifecycleMutation(recovery.Kind, operation);
+            if (recovery.Kind == BackendRecoveryKind.Stale)
+            {
+                store.Delete();
+            }
+            return mutation();
+        }
+        finally
+        {
+            if (ownsMutex)
+            {
+                mutex.ReleaseMutex();
+            }
+        }
+    }
+
+    private static void EnsureBackendLeaseAllowsLifecycleMutation(
+        BackendRecoveryKind recoveryKind,
+        string operation)
+    {
+        if (recoveryKind is BackendRecoveryKind.Recovered or BackendRecoveryKind.Unsafe)
+        {
+            throw new InvalidOperationException(
+                $"A persisted backend lease may still own active work. Refusing to {operation}.");
+        }
+    }
+
+    internal static string SupervisorMutexName(int port) => $"Local\\CodexContinuity-{port}";
+
+    private static FileStream? TryAcquireSupervisorLock(string stateDirectory)
+    {
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            return new FileStream(
+                ContinuityPaths.SupervisorLockFile(stateDirectory),
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None);
+        }
+        catch (IOException)
+        {
+            return null;
+        }
     }
 
     internal static async Task<UninstallReconnectPolicy> ResolveUninstallReconnectPolicyAsync(

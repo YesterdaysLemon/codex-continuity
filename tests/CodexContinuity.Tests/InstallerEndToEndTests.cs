@@ -218,8 +218,18 @@ public sealed class InstallerEndToEndTests : IDisposable
         await cancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.False(serveTask.IsCompleted);
+        Assert.Throws<InvalidOperationException>(() =>
+            Program.RunPortChangeMutation(root, server.Port, () => "unexpected"));
+        Assert.Throws<InvalidOperationException>(() =>
+            Program.RunUninstallMutation(root, server.Port, () => "unexpected"));
         allowUpdaterExit.SetResult();
         Assert.Equal(1, await serveTask.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(
+            "port changed",
+            Program.RunPortChangeMutation(root, server.Port, () => "port changed"));
+        Assert.Equal(
+            "uninstalled",
+            Program.RunUninstallMutation(root, server.Port, () => "uninstalled"));
     }
 
     public void Dispose()
