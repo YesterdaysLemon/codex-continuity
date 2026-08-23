@@ -47,6 +47,197 @@ public sealed class LoopbackRelayTests
     }
 
     [Fact]
+    public async Task TransitionRecomputesOnlyAfterGateDrainAndKeepsSafePlanGated()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        await using var replacement = new TaggedBackend("replacement:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+        using var activeClient = await ConnectAsync(publicPort);
+        Assert.Equal("backend:before", await RoundTripAsync(activeClient, "before"));
+        var safePlan = Plan(transitionReady: true);
+
+        var result = await GatedHandoffTransition.CloseAndRecomputeAsync(
+            relay,
+            async () =>
+            {
+                Assert.True(relay.IsGated);
+                Assert.Equal(0, relay.ActiveConnectionCount);
+                await AssertConnectionClosedAsync(activeClient);
+                using var refused = await ConnectAsync(publicPort);
+                await AssertConnectionClosedAsync(refused);
+                return safePlan;
+            });
+
+        Assert.Equal(safePlan, result.Plan);
+        Assert.NotNull(result.GateLease);
+        Assert.True(relay.IsGated);
+        Assert.Throws<InvalidOperationException>(relay.OpenGate);
+        Assert.Throws<InvalidOperationException>(() => relay.SetBackendPort(replacement.Port));
+        using var stillRefused = await ConnectAsync(publicPort);
+        await AssertConnectionClosedAsync(stillRefused);
+        using var privateClient = await ConnectAsync(backend.Port);
+        Assert.Equal("backend:private", await RoundTripAsync(privateClient, "private"));
+        Assert.True(result.GateLease.TryRetargetAndOpen(replacement.Port));
+        using var replacementClient = await ConnectAsync(publicPort);
+        Assert.Equal(
+            "replacement:continued",
+            await RoundTripAsync(replacementClient, "continued"));
+        Assert.False(result.GateLease.TryOpen());
+        Assert.False(result.GateLease.TryRetargetAndOpen(backend.Port));
+    }
+
+    [Fact]
+    public async Task BlockedTransitionReopensRelayWithoutStoppingBackend()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+        var blockedPlan = Plan(transitionReady: false);
+
+        var result = await GatedHandoffTransition.CloseAndRecomputeAsync(
+            relay,
+            () =>
+            {
+                Assert.True(relay.IsGated);
+                return Task.FromResult(blockedPlan);
+            });
+
+        Assert.Equal(blockedPlan, result.Plan);
+        Assert.Null(result.GateLease);
+        Assert.False(relay.IsGated);
+        using var client = await ConnectAsync(publicPort);
+        Assert.Equal("backend:resumed", await RoundTripAsync(client, "resumed"));
+    }
+
+    [Fact]
+    public async Task BlockedTransitionCannotReopenAConcurrentSafetyGate()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+        var recomputationStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishRecomputation = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var transition = GatedHandoffTransition.CloseAndRecomputeAsync(
+            relay,
+            async () =>
+            {
+                recomputationStarted.SetResult();
+                await finishRecomputation.Task;
+                return Plan(transitionReady: false);
+            });
+        await recomputationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await relay.CloseGateAsync();
+        finishRecomputation.SetResult();
+
+        var result = await transition.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(result.Plan.TransitionReady);
+        Assert.Null(result.GateLease);
+        Assert.True(relay.IsGated);
+        using var refused = await ConnectAsync(publicPort);
+        await AssertConnectionClosedAsync(refused);
+    }
+
+    [Fact]
+    public async Task TransitionRejectsAGateAlreadyOwnedByAnotherSafetyBoundary()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port, startGated: true);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            GatedHandoffTransition.CloseAndRecomputeAsync(
+                relay,
+                () => Task.FromResult(Plan(transitionReady: false))));
+
+        Assert.True(relay.IsGated);
+        using var refused = await ConnectAsync(publicPort);
+        await AssertConnectionClosedAsync(refused);
+    }
+
+    [Fact]
+    public async Task SafeTransitionLeaseCannotReopenAConcurrentSafetyGate()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        await using var replacement = new TaggedBackend("replacement:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+        var result = await GatedHandoffTransition.CloseAndRecomputeAsync(
+            relay,
+            () => Task.FromResult(Plan(transitionReady: true)));
+        Assert.NotNull(result.GateLease);
+
+        await relay.CloseGateAsync();
+
+        Assert.False(result.GateLease.TryOpen());
+        Assert.False(result.GateLease.TryRetargetAndOpen(replacement.Port));
+        Assert.True(relay.IsGated);
+        using var refused = await ConnectAsync(publicPort);
+        await AssertConnectionClosedAsync(refused);
+        relay.OpenGate();
+        using var originalClient = await ConnectAsync(publicPort);
+        Assert.Equal("backend:unchanged", await RoundTripAsync(originalClient, "unchanged"));
+    }
+
+    [Fact]
+    public async Task FailedRecomputationReopensRelayWithoutStoppingBackend()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            GatedHandoffTransition.CloseAndRecomputeAsync(
+                relay,
+                () => throw new IOException("private observation failed")));
+
+        Assert.False(relay.IsGated);
+        using var client = await ConnectAsync(publicPort);
+        Assert.Equal("backend:resumed", await RoundTripAsync(client, "resumed"));
+    }
+
+    [Fact]
+    public async Task TimedOutRecomputationReopensRelayWithoutStoppingBackend()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+        var neverCompletes = new TaskCompletionSource<ContinuityHandoffPlan>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        await Assert.ThrowsAsync<TimeoutException>(() =>
+            GatedHandoffTransition.CloseAndRecomputeAsync(
+                relay,
+                () => neverCompletes.Task,
+                TimeSpan.FromMilliseconds(20)));
+
+        Assert.False(relay.IsGated);
+        using var client = await ConnectAsync(publicPort);
+        Assert.Equal("backend:resumed", await RoundTripAsync(client, "resumed"));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(31)]
+    public async Task RejectsUnboundedRecomputationTimeoutBeforeGating(int seconds)
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+            GatedHandoffTransition.CloseAndRecomputeAsync(
+                relay,
+                () => Task.FromResult(Plan(transitionReady: true)),
+                TimeSpan.FromSeconds(seconds)));
+
+        Assert.False(relay.IsGated);
+    }
+
+    [Fact]
     public async Task GateRefusesNewConnectionsUntilOpened()
     {
         await using var backend = new TaggedBackend("backend:");
@@ -286,6 +477,16 @@ public sealed class LoopbackRelayTests
         await client.ConnectAsync(IPAddress.Loopback, port).WaitAsync(TimeSpan.FromSeconds(5));
         return client;
     }
+
+    private static ContinuityHandoffPlan Plan(bool transitionReady) => new(
+        transitionReady ? "handoff" : "wait",
+        transitionReady,
+        BackendReady: true,
+        UpdateState: "loaded",
+        PendingUpdate: false,
+        ThreadCount: 0,
+        new HandoffBlockerCounts(0, 0, 0, 0, 0),
+        Reasons: []);
 
     private static async Task<string> RoundTripAsync(TcpClient client, string request)
     {
