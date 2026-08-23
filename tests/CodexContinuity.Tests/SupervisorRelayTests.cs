@@ -38,22 +38,14 @@ public sealed class SupervisorRelayTests : IDisposable
         try
         {
             await WaitForFileAsync(fixtureStartedPath);
-            using (var client = new HttpClient())
-            using (var response = await client.GetAsync(
-                $"http://127.0.0.1:{privatePort}/readyz"))
-            {
-                Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
-                Assert.Equal(
-                    $"not-ready:{privatePort}",
-                    await response.Content.ReadAsStringAsync());
-            }
+            await AssertBackendNotReadyAsync(privatePort);
             await AssertEndpointUnavailableAsync(publicPort);
             Assert.False(CanBind(publicPort));
 
             await File.WriteAllTextAsync(startGatePath, "release");
             var relayedBody = await ReadWhenReadyAsync(publicPort);
             var directBody = await ReadWhenReadyAsync(privatePort);
-            var status = await ReadRunningStatusAsync();
+            var status = await ReadStatusAsync("running");
 
             Assert.NotEqual(publicPort, privatePort);
             Assert.Equal($"backend:{privatePort}", relayedBody);
@@ -112,6 +104,174 @@ public sealed class SupervisorRelayTests : IDisposable
     }
 
     [Fact]
+    public async Task BackendRestartKeepsPublicEndpointGatedUntilReplacementIsReady()
+    {
+        var publicPort = FindAvailablePort();
+        var backendPorts = new ConcurrentQueue<int>();
+        var backendProcessIds = new ConcurrentQueue<int>();
+        var secondStartGatePath = Path.Combine(root, "second-start-gate.txt");
+        var backoffEntered = new TaskCompletionSource<TimeSpan>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseBackoff = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var generation = 0;
+        using var shutdown = new CancellationTokenSource();
+
+        WindowsProcessGroup StartBackend(int port)
+        {
+            var currentGeneration = Interlocked.Increment(ref generation);
+            var process = StartHarnessBackend(
+                port,
+                Path.Combine(root, $"fixture-started-{currentGeneration}.txt"),
+                startGatePath: currentGeneration == 2 ? secondStartGatePath : null,
+                exitAfterRequests: currentGeneration == 1 ? 2 : 0);
+            backendPorts.Enqueue(port);
+            backendProcessIds.Enqueue(process.Id);
+            return process;
+        }
+
+        async Task<bool> WaitForRestart(
+            TimeSpan delay,
+            CancellationToken cancellationToken)
+        {
+            backoffEntered.TrySetResult(delay);
+            try
+            {
+                await releaseBackoff.Task.WaitAsync(cancellationToken);
+                return true;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return false;
+            }
+        }
+
+        var supervisor = OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            shutdown.Token,
+            StartBackend,
+            delayForFailure: _ => TimeSpan.FromSeconds(10),
+            waitForRestart: WaitForRestart);
+        try
+        {
+            var firstBody = await ReadWhenReadyAsync(publicPort);
+            Assert.Equal(
+                TimeSpan.FromSeconds(10),
+                await backoffEntered.Task.WaitAsync(TimeSpan.FromSeconds(10)));
+            var backingOff = await ReadStatusAsync("backingOff");
+            Assert.NotNull(backingOff.NextRetryAtUtc);
+            Assert.StartsWith("App-server exited after ", backingOff.Detail);
+            Assert.Equal(
+                new SupervisorStatus(
+                    State: "backingOff",
+                    SupervisorProcessId: Environment.ProcessId,
+                    BackendProcessId: null,
+                    Port: publicPort,
+                    CodexHome: FutureProcessEnvironment.ResolveCodexHome(),
+                    ConsecutiveFailures: 1,
+                    LastExitCode: 17,
+                    UpdatedAtUtc: backingOff.UpdatedAtUtc,
+                    NextRetryAtUtc: backingOff.NextRetryAtUtc,
+                    Detail: backingOff.Detail,
+                    SupervisorStartedAtUtc: backingOff.SupervisorStartedAtUtc,
+                    SupervisorExecutable: backingOff.SupervisorExecutable),
+                backingOff);
+            Assert.InRange(
+                backingOff.NextRetryAtUtc.Value - backingOff.UpdatedAtUtc,
+                TimeSpan.FromSeconds(9.5),
+                TimeSpan.FromSeconds(10));
+            Assert.Equal(1, Volatile.Read(ref generation));
+            Assert.False(ProcessIsRunning(backendProcessIds.Single()));
+            await AssertEndpointUnavailableAsync(publicPort);
+            Assert.False(CanBind(publicPort));
+
+            releaseBackoff.SetResult(true);
+            await WaitForFileAsync(Path.Combine(root, "fixture-started-2.txt"));
+            var ports = backendPorts.ToArray();
+            Assert.Equal(2, ports.Length);
+            Assert.NotEqual(ports[0], ports[1]);
+            Assert.Equal($"backend:{ports[0]}", firstBody);
+            await AssertBackendNotReadyAsync(ports[1]);
+            await AssertEndpointUnavailableAsync(publicPort);
+
+            await File.WriteAllTextAsync(secondStartGatePath, "release");
+            Assert.Equal($"backend:{ports[1]}", await ReadWhenReadyAsync(publicPort));
+        }
+        finally
+        {
+            shutdown.Cancel();
+            releaseBackoff.TrySetResult(true);
+            Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+
+        Assert.All(backendProcessIds, processId => Assert.False(ProcessIsRunning(processId)));
+        Assert.True(CanBind(publicPort));
+    }
+
+    [Fact]
+    public async Task CancellationDuringBackoffDoesNotStartReplacement()
+    {
+        var publicPort = FindAvailablePort();
+        var backoffEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var startCount = 0;
+        var backendProcessId = 0;
+        using var shutdown = new CancellationTokenSource();
+
+        WindowsProcessGroup StartBackend(int port)
+        {
+            Interlocked.Increment(ref startCount);
+            var process = StartHarnessBackend(
+                port,
+                Path.Combine(root, "fixture-started.txt"),
+                exitAfterRequests: 1);
+            backendProcessId = process.Id;
+            return process;
+        }
+
+        async Task<bool> WaitForRestart(
+            TimeSpan _,
+            CancellationToken cancellationToken)
+        {
+            backoffEntered.TrySetResult(true);
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return true;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return false;
+            }
+        }
+
+        var supervisor = OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            shutdown.Token,
+            StartBackend,
+            delayForFailure: _ => TimeSpan.FromMinutes(1),
+            waitForRestart: WaitForRestart);
+        try
+        {
+            await backoffEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(1, Volatile.Read(ref startCount));
+            Assert.Equal("backingOff", (await ReadStatusAsync("backingOff")).State);
+            await AssertEndpointUnavailableAsync(publicPort);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+
+        Assert.Equal(1, Volatile.Read(ref startCount));
+        Assert.False(ProcessIsRunning(backendProcessId));
+        Assert.True(CanBind(publicPort));
+    }
+
+    [Fact]
     public async Task ForeignPublicEndpointDoesNotStartBackend()
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -163,24 +323,25 @@ public sealed class SupervisorRelayTests : IDisposable
         Assert.True(accepted.Connected);
     }
 
-    private async Task<SupervisorStatus> ReadRunningStatusAsync()
+    private async Task<SupervisorStatus> ReadStatusAsync(string state)
     {
         var store = new SupervisorStatusStore(ContinuityPaths.SupervisorStatusFile(root));
         for (var attempt = 0; attempt < 50; attempt++)
         {
-            if (store.Read() is { State: "running" } status)
+            if (store.Read() is { } status && status.State == state)
             {
                 return status;
             }
             await Task.Delay(100);
         }
-        throw new TimeoutException("Supervisor did not publish running relay status.");
+        throw new TimeoutException($"Supervisor did not publish {state} relay status.");
     }
 
     private WindowsProcessGroup StartHarnessBackend(
         int port,
         string fixtureStartedPath,
-        string? startGatePath = null)
+        string? startGatePath = null,
+        int exitAfterRequests = 0)
     {
         var executable = HarnessExecutable();
         var startInfo = new ProcessStartInfo(executable)
@@ -191,7 +352,7 @@ public sealed class SupervisorRelayTests : IDisposable
         startInfo.ArgumentList.Add("fake-app-server");
         startInfo.ArgumentList.Add(port.ToString());
         startInfo.ArgumentList.Add(fixtureStartedPath);
-        startInfo.ArgumentList.Add("0");
+        startInfo.ArgumentList.Add(exitAfterRequests.ToString());
         if (startGatePath is not null)
         {
             startInfo.ArgumentList.Add(startGatePath);
@@ -223,6 +384,16 @@ public sealed class SupervisorRelayTests : IDisposable
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
         await Assert.ThrowsAsync<HttpRequestException>(async () =>
             await client.GetAsync($"http://127.0.0.1:{port}/readyz"));
+    }
+
+    private static async Task AssertBackendNotReadyAsync(int port)
+    {
+        using var client = new HttpClient();
+        using var response = await client.GetAsync($"http://127.0.0.1:{port}/readyz");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(
+            $"not-ready:{port}",
+            await response.Content.ReadAsStringAsync());
     }
 
     private async Task<string> ReadWhenReadyAsync(int port)
