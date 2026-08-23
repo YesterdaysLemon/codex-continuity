@@ -153,6 +153,21 @@ public sealed class UpdateStateTests : IDisposable
     }
 
     [Fact]
+    public void StoreReportsExclusivelyLockedStateAsUnreadable()
+    {
+        var store = Store();
+        var statePath = Path.Combine(root, "update-status.json");
+        File.WriteAllText(statePath, "{}");
+        using var exclusiveLock = new FileStream(
+            statePath,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None);
+
+        Assert.Equal(ContinuityUpdateStateLoadKind.Unreadable, store.Load().Kind);
+    }
+
+    [Fact]
     public void StorePreservesStateWhenBoundedFieldsExceedThePersistedByteLimit()
     {
         var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
