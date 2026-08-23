@@ -190,6 +190,12 @@ internal static class OwnedSupervisorRuntime
                     }
                     lifecycleCompleted = true;
                 }
+                catch when (recovered && !shutdownToken.IsCancellationRequested)
+                {
+                    preserveBackend = true;
+                    publishStopped = false;
+                    throw;
+                }
                 finally
                 {
                     try
