@@ -1,5 +1,10 @@
 using CodexContinuity;
 using System.Diagnostics;
+using System.Globalization;
+using System.IO.Pipes;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
 
 namespace CodexContinuity.ProcessHarness;
 
@@ -9,6 +14,16 @@ internal static class Program
 {
     private static int Main(string[] args)
     {
+        if (args.FirstOrDefault() == "process-group-parent")
+        {
+            return RunProcessGroupParent(args[1]);
+        }
+
+        if (args.FirstOrDefault() == "process-group-child")
+        {
+            return RunProcessGroupChild(args[1], args[2], args[3]);
+        }
+
         if (args.FirstOrDefault() is "self-test" or "install")
         {
             var recordPath = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "record-path.txt"));
@@ -66,4 +81,163 @@ internal static class Program
         Console.WriteLine(child.Id);
         return 0;
     }
+
+    private static int RunProcessGroupParent(string testDirectory)
+    {
+        using var unlistedHandle = new AnonymousPipeServerStream(
+            PipeDirection.In,
+            HandleInheritability.Inheritable);
+        var unlistedClientHandle = unlistedHandle.GetClientHandleAsString();
+        var primaryDirectory = Path.Combine(testDirectory, "primary");
+        var unrelatedDirectory = Path.Combine(testDirectory, "unrelated");
+        Directory.CreateDirectory(primaryDirectory);
+        Directory.CreateDirectory(unrelatedDirectory);
+        using var primary = StartProcessGroupChild(primaryDirectory, unlistedClientHandle);
+        using var unrelated = StartProcessGroupChild(unrelatedDirectory, unlistedClientHandle);
+        unlistedHandle.DisposeLocalCopyOfClientHandle();
+        try
+        {
+            if (!WaitForMarker(primaryDirectory, "ready.txt") ||
+                !WaitForMarker(unrelatedDirectory, "ready.txt"))
+            {
+                return 3;
+            }
+
+            var unrelatedHeartbeat = new FileInfo(
+                Path.Combine(unrelatedDirectory, "heartbeat.txt")).Length;
+            primary.SendCtrlBreak();
+            if (!WaitForExit(primary))
+            {
+                return 4;
+            }
+            var unrelatedHeartbeatAdvanced = SpinWait.SpinUntil(
+                () => new FileInfo(
+                    Path.Combine(unrelatedDirectory, "heartbeat.txt")).Length >
+                    unrelatedHeartbeat,
+                TimeSpan.FromSeconds(2));
+            var unrelatedProcessStayedRunning =
+                unrelatedHeartbeatAdvanced &&
+                !unrelated.HasExited &&
+                !File.Exists(Path.Combine(unrelatedDirectory, "signal.txt"));
+            unrelated.SendCtrlBreak();
+            if (!WaitForExit(unrelated))
+            {
+                return 5;
+            }
+
+            var output = primary.StandardOutput.ReadToEndAsync().GetAwaiter().GetResult();
+            var error = primary.StandardError.ReadToEndAsync().GetAwaiter().GetResult();
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                primary.ExitCode,
+                ControlEvent = File.ReadAllText(Path.Combine(primaryDirectory, "signal.txt")),
+                ConsoleVisible = bool.Parse(
+                    File.ReadAllText(Path.Combine(primaryDirectory, "visible.txt"))),
+                UnrelatedProcessStayedRunning = unrelatedProcessStayedRunning,
+                UnlistedHandleInherited = bool.Parse(
+                    File.ReadAllText(Path.Combine(primaryDirectory, "inherited.txt"))),
+                Output = output,
+                Error = error,
+            }));
+            return 0;
+        }
+        finally
+        {
+            StopForCleanup(primary);
+            StopForCleanup(unrelated);
+        }
+    }
+    private static WindowsProcessGroup StartProcessGroupChild(
+        string testDirectory,
+        string unlistedClientHandle)
+    {
+        var startInfo = new ProcessStartInfo(
+            Environment.ProcessPath
+                ?? throw new InvalidOperationException("Could not resolve the .NET host path."))
+        {
+            UseShellExecute = false,
+            WorkingDirectory = testDirectory,
+        };
+        startInfo.ArgumentList.Add(typeof(HarnessMarker).Assembly.Location);
+        startInfo.ArgumentList.Add("process-group-child");
+        startInfo.ArgumentList.Add(testDirectory);
+        startInfo.ArgumentList.Add("quoted \"value\" with trailing slash \\");
+        startInfo.ArgumentList.Add(unlistedClientHandle);
+        startInfo.Environment["CONTINUITY_PROCESS_GROUP_SENTINEL"] = "continuity-\u96ea";
+        return WindowsProcessGroup.Start(startInfo);
+    }
+    private static bool WaitForMarker(string directory, string filename) =>
+        SpinWait.SpinUntil(
+            () => File.Exists(Path.Combine(directory, filename)),
+            TimeSpan.FromSeconds(5));
+    private static bool WaitForExit(WindowsProcessGroup process)
+    {
+        try
+        {
+            process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
+    }
+    private static void StopForCleanup(WindowsProcessGroup process)
+    {
+        if (!process.HasExited)
+        {
+            process.Kill();
+            process.WaitForExitAsync().GetAwaiter().GetResult();
+        }
+    }
+    private static int RunProcessGroupChild(
+        string testDirectory,
+        string payload,
+        string unlistedClientHandle)
+    {
+        using var stopped = new ManualResetEventSlim();
+        Console.CancelKeyPress += (_, eventArgs) =>
+        {
+            eventArgs.Cancel = true;
+            File.WriteAllText(Path.Combine(testDirectory, "signal.txt"), eventArgs.SpecialKey.ToString());
+            stopped.Set();
+        };
+        var consoleWindow = GetConsoleWindow();
+        var unlistedHandle = new IntPtr(
+            long.Parse(unlistedClientHandle, CultureInfo.InvariantCulture));
+        File.WriteAllText(
+            Path.Combine(testDirectory, "visible.txt"),
+            (consoleWindow != IntPtr.Zero && IsWindowVisible(consoleWindow)).ToString());
+        File.WriteAllText(
+            Path.Combine(testDirectory, "inherited.txt"),
+            GetHandleInformation(unlistedHandle, out _).ToString());
+        var environmentValue = Environment.GetEnvironmentVariable(
+            "CONTINUITY_PROCESS_GROUP_SENTINEL");
+        Console.OutputEncoding = Encoding.UTF8;
+        Console.Out.Write($"out:{payload}|{environmentValue}");
+        Console.Error.Write($"error:{payload}|{environmentValue}");
+        var heartbeatPath = Path.Combine(testDirectory, "heartbeat.txt");
+        File.WriteAllText(heartbeatPath, ".");
+        File.WriteAllText(Path.Combine(testDirectory, "ready.txt"), "ready");
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (stopped.Wait(TimeSpan.FromMilliseconds(25)))
+            {
+                return 0;
+            }
+            File.AppendAllText(heartbeatPath, ".");
+        }
+        return 5;
+    }
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetConsoleWindow();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetHandleInformation(IntPtr handle, out uint flags);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr window);
 }
