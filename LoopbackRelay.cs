@@ -42,6 +42,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
     private readonly TcpListener listener;
     private readonly LoopbackRelayOptions options;
     private readonly Action<Exception> reportError;
+    private readonly Func<int, TcpClient?, bool> backendAdmission;
     private readonly CancellationTokenSource shutdown = new();
     private readonly HashSet<RelayConnection> connections = [];
     private readonly Task acceptLoop;
@@ -55,7 +56,8 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         int backendPort,
         bool startGated,
         LoopbackRelayOptions options,
-        Action<Exception> reportError)
+        Action<Exception> reportError,
+        Func<int, TcpClient?, bool> backendAdmission)
     {
         LoopbackEndpoint.ValidatePort(publicPort);
         LoopbackEndpoint.ValidatePort(backendPort);
@@ -69,6 +71,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         this.backendPort = backendPort;
         this.options = options;
         this.reportError = reportError;
+        this.backendAdmission = backendAdmission;
         gated = startGated;
         listener = new TcpListener(IPAddress.Loopback, publicPort);
         listener.Server.SetSocketOption(
@@ -84,13 +87,15 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         int backendPort,
         bool startGated = false,
         LoopbackRelayOptions? options = null,
-        Action<Exception>? reportError = null) =>
+        Action<Exception>? reportError = null,
+        Func<int, TcpClient?, bool>? backendAdmission = null) =>
         new(
             publicPort,
             backendPort,
             startGated,
             options ?? new LoopbackRelayOptions(),
-            reportError ?? (_ => { }));
+            reportError ?? (_ => { }),
+            backendAdmission ?? ((_, _) => true));
 
     internal bool IsGated
     {
@@ -229,15 +234,27 @@ internal sealed class LoopbackRelay : IAsyncDisposable
                 break;
             }
 
+            int candidatePort;
+            lock (sync)
+            {
+                candidatePort = backendPort;
+            }
+            var admitted = IsBackendAdmissionAllowed(candidatePort, connectedBackend: null);
+
             RelayConnection? connection = null;
             lock (sync)
             {
-                if (!disposed && !gated && connections.Count < options.MaximumConnections)
+                if (admitted &&
+                    candidatePort == backendPort &&
+                    !disposed &&
+                    !gated &&
+                    connections.Count < options.MaximumConnections)
                 {
                     connection = new RelayConnection(
                         client,
-                        backendPort,
+                        candidatePort,
                         options,
+                        IsBackendAdmissionAllowed,
                         ConnectionCompleted);
                     connections.Add(connection);
                 }
@@ -254,6 +271,30 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         }
     }
 
+    private bool IsBackendAdmissionAllowed(int port, TcpClient? connectedBackend)
+    {
+        try
+        {
+            return backendAdmission(port, connectedBackend);
+        }
+        catch (Exception exception)
+        {
+            ReportError(exception);
+            return false;
+        }
+    }
+
+    private void ReportError(Exception error)
+    {
+        try
+        {
+            reportError(error);
+        }
+        catch
+        {
+        }
+    }
+
     private void ConnectionCompleted(RelayConnection connection, Exception? error)
     {
         lock (sync)
@@ -262,13 +303,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         }
         if (error is not null)
         {
-            try
-            {
-                reportError(error);
-            }
-            catch
-            {
-            }
+            ReportError(error);
         }
     }
 
@@ -281,6 +316,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         TcpClient client,
         int backendPort,
         LoopbackRelayOptions options,
+        Func<int, TcpClient?, bool> backendAdmission,
         Action<RelayConnection, Exception?> completed)
     {
         private readonly CancellationTokenSource lifetime = new();
@@ -324,6 +360,10 @@ internal sealed class LoopbackRelay : IAsyncDisposable
                     IPAddress.Loopback,
                     backendPort,
                     connectTimeout.Token);
+                if (!backendAdmission(backendPort, backend))
+                {
+                    return;
+                }
 
                 using var pumping = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
                 var clientStream = client.GetStream();
