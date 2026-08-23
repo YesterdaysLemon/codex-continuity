@@ -506,17 +506,20 @@ internal static class Program
             ? ContinuityLifecycleLock.Acquire(stateDirectory)
             : null;
         var existingState = LoadInstallState();
-        await EnsurePortChangeIsSafeAsync(
-            existingState?.Port,
+        var coordinator = CreateInstallCoordinator(stateDirectory);
+        var portSelection = await PrepareInstallPortChangeAsync(
+            existingState,
+            coordinator,
             port,
             installedPort => IsReadyAsync(installedPort, TimeSpan.FromSeconds(1)));
-        var coordinator = CreateInstallCoordinator(stateDirectory);
+        var legacyInstalledPort = portSelection.LegacyInstalledPort;
         var endpointOwnership = ExistingEndpointOwnership.NotReady;
         if (startNow && await IsReadyAsync(port, TimeSpan.FromSeconds(1)))
         {
             endpointOwnership = await IsManagedEndpointReadyAsync(port)
                 ? ExistingEndpointOwnership.Managed
-                : coordinator.DetectLegacyInstalledPort() == port
+                : legacyInstalledPort == port ||
+                    coordinator.DetectLegacyInstalledPort() == port
                     ? ExistingEndpointOwnership.Legacy
                     : ExistingEndpointOwnership.Foreign;
         }
@@ -530,7 +533,8 @@ internal static class Program
             LifecycleLockOwnership.AlreadyHeld);
         var outcome = RunInstallMutation(
             stateDirectory,
-            existingState?.Port,
+            LifecycleStateDirectories(),
+            portSelection.InstalledPort,
             port,
             Install);
         var state = outcome.State;
@@ -607,6 +611,21 @@ internal static class Program
         }
     }
 
+    internal static async Task<(int? InstalledPort, int? LegacyInstalledPort)>
+        PrepareInstallPortChangeAsync(
+            InstallState? existingState,
+            InstallCoordinator coordinator,
+            int requestedPort,
+            Func<int, Task<bool>> isReadyAsync)
+    {
+        var legacyInstalledPort = existingState is null
+            ? coordinator.DetectLegacyInstalledPort()
+            : null;
+        var installedPort = existingState?.Port ?? legacyInstalledPort;
+        await EnsurePortChangeIsSafeAsync(installedPort, requestedPort, isReadyAsync);
+        return (installedPort, legacyInstalledPort);
+    }
+
     private static async Task<int> UninstallAsync()
     {
         using var lifecycleLock = ContinuityLifecycleLock.Acquire(
@@ -646,15 +665,38 @@ internal static class Program
         string stateDirectory,
         int? installedPort,
         int requestedPort,
+        Func<T> mutation) => RunInstallMutation(
+            stateDirectory,
+            [stateDirectory],
+            installedPort,
+            requestedPort,
+            mutation);
+
+    internal static T RunInstallMutation<T>(
+        string stateDirectory,
+        IReadOnlyList<string> leaseStateDirectories,
+        int? installedPort,
+        int requestedPort,
         Func<T> mutation) => installedPort is { } port && port != requestedPort
-            ? RunPortChangeMutation(stateDirectory, port, mutation)
+            ? RunPortChangeMutation(stateDirectory, leaseStateDirectories, port, mutation)
             : mutation();
 
     internal static T RunPortChangeMutation<T>(
         string stateDirectory,
         int port,
+        Func<T> mutation) => RunPortChangeMutation(
+            stateDirectory,
+            [stateDirectory],
+            port,
+            mutation);
+
+    private static T RunPortChangeMutation<T>(
+        string stateDirectory,
+        IReadOnlyList<string> leaseStateDirectories,
+        int port,
         Func<T> mutation) => RunLifecycleMutationWithInactiveSupervisor(
             stateDirectory,
+            leaseStateDirectories,
             port,
             "change the configured port",
             mutation);
@@ -664,12 +706,14 @@ internal static class Program
         int port,
         Func<T> mutation) => RunLifecycleMutationWithInactiveSupervisor(
             stateDirectory,
+            [stateDirectory],
             port,
             "uninstall Continuity",
             mutation);
 
     private static T RunLifecycleMutationWithInactiveSupervisor<T>(
         string stateDirectory,
+        IReadOnlyList<string> leaseStateDirectories,
         int port,
         string operation,
         Func<T> mutation)
@@ -697,16 +741,26 @@ internal static class Program
                 throw new InvalidOperationException(
                     $"The Continuity supervisor on port {port} is still active. Refusing to {operation}.");
             }
-            var store = new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(stateDirectory));
-            var recovery = BackendLeaseRecovery.TryRecover(
-                store,
-                port,
-                FutureProcessEnvironment.ResolveCodexHome());
-            recovery.Backend?.Dispose();
-            EnsureBackendLeaseAllowsLifecycleMutation(recovery.Kind, operation);
-            if (recovery.Kind == BackendRecoveryKind.Stale)
+            var staleStores = new List<BackendLeaseStore>();
+            foreach (var leaseStateDirectory in leaseStateDirectories
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                store.Delete();
+                var store = new BackendLeaseStore(
+                    ContinuityPaths.BackendLeaseFile(leaseStateDirectory));
+                var recovery = BackendLeaseRecovery.TryRecover(
+                    store,
+                    port,
+                    FutureProcessEnvironment.ResolveCodexHome());
+                recovery.Backend?.Dispose();
+                EnsureBackendLeaseAllowsLifecycleMutation(recovery.Kind, operation);
+                if (recovery.Kind == BackendRecoveryKind.Stale)
+                {
+                    staleStores.Add(store);
+                }
+            }
+            foreach (var staleStore in staleStores)
+            {
+                staleStore.Delete();
             }
             return mutation();
         }
@@ -748,6 +802,12 @@ internal static class Program
             return null;
         }
     }
+
+    private static IReadOnlyList<string> LifecycleStateDirectories() =>
+    [
+        ContinuityPaths.StateDirectory,
+        ContinuityPaths.LegacyOpenAiStateDirectory,
+    ];
 
     internal static async Task<UninstallReconnectPolicy> ResolveUninstallReconnectPolicyAsync(
         int? managedInstalledPort,

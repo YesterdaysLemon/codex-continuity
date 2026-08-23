@@ -285,6 +285,166 @@ public sealed class InstallPortSafetyTests : IDisposable
             Program.RunInstallMutation(root, port, port, () => "staged"));
     }
 
+    [Fact]
+    public void PortChangeInspectsLeaseInLegacyStateDirectory()
+    {
+        var publicPort = FindAvailablePort();
+        var requestedPort = FindAvailablePort(publicPort);
+        var legacyRoot = Path.Combine(root, "legacy");
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var backendPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var current = Process.GetCurrentProcess();
+        var legacyStore = new BackendLeaseStore(
+            ContinuityPaths.BackendLeaseFile(legacyRoot));
+        legacyStore.Write(Lease(
+            publicPort,
+            backendPort,
+            Environment.ProcessId,
+            current.StartTime.ToUniversalTime()));
+        var mutationRan = false;
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            Program.RunInstallMutation(
+                root,
+                [root, legacyRoot],
+                publicPort,
+                requestedPort,
+                () => mutationRan = true));
+
+        Assert.Contains("persisted backend lease", exception.Message);
+        Assert.False(mutationRan);
+        Assert.Equal(BackendLeaseLoadKind.Loaded, legacyStore.Load().Kind);
+        Assert.True(listener.Server.IsBound);
+    }
+
+    [Fact]
+    public void PortChangeDeletesEveryProvenStaleLeaseBeforeMutation()
+    {
+        var publicPort = FindAvailablePort();
+        var requestedPort = FindAvailablePort(publicPort);
+        var legacyRoot = Path.Combine(root, "legacy");
+        var currentStore = new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(root));
+        var legacyStore = new BackendLeaseStore(
+            ContinuityPaths.BackendLeaseFile(legacyRoot));
+        currentStore.Write(Lease(
+            publicPort,
+            FindAvailablePort(publicPort, requestedPort),
+            int.MaxValue,
+            DateTimeOffset.UtcNow));
+        legacyStore.Write(Lease(
+            publicPort,
+            FindAvailablePort(publicPort, requestedPort),
+            int.MaxValue,
+            DateTimeOffset.UtcNow));
+
+        var result = Program.RunInstallMutation(
+            root,
+            [root, legacyRoot],
+            publicPort,
+            requestedPort,
+            () => "mutated");
+
+        Assert.Equal("mutated", result);
+        Assert.Equal(BackendLeaseLoadKind.Missing, currentStore.Load().Kind);
+        Assert.Equal(BackendLeaseLoadKind.Missing, legacyStore.Load().Kind);
+    }
+
+    [Fact]
+    public async Task StatelessLegacyStartupFeedsThePortChangeGuard()
+    {
+        var legacyRoot = Path.Combine(root, "legacy");
+        var legacyPort = FindAvailablePort();
+        var requestedPort = FindAvailablePort(legacyPort);
+        var platform = new StartupOnlyInstallPlatform
+        {
+            StartupCommand = StartupCommandBuilder.Build(
+                Path.Combine(legacyRoot, "CodexContinuity.exe"),
+                legacyPort),
+        };
+        var coordinator = new InstallCoordinator(
+            root,
+            platform,
+            new InstallStateStore(ContinuityPaths.InstallStateFile(root)),
+            legacyRoot);
+        var selection = await Program.PrepareInstallPortChangeAsync(
+            existingState: null,
+            coordinator,
+            requestedPort,
+            _ => Task.FromResult(false));
+        Directory.CreateDirectory(legacyRoot);
+        File.WriteAllText(ContinuityPaths.BackendLeaseFile(legacyRoot), "{not-json");
+        var mutationRan = false;
+
+        Assert.Throws<InvalidOperationException>(() => Program.RunInstallMutation(
+            root,
+            [root, legacyRoot],
+            selection.InstalledPort,
+            requestedPort,
+            () => mutationRan = true));
+
+        Assert.Equal((legacyPort, legacyPort), selection);
+        Assert.False(mutationRan);
+        var samePortSelection = await Program.PrepareInstallPortChangeAsync(
+            existingState: null,
+            coordinator,
+            legacyPort,
+            _ => throw new InvalidOperationException("Same-port staging must not probe readiness."));
+        Assert.Equal((legacyPort, legacyPort), samePortSelection);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void UnsafeAdditionalLeasePreservesEarlierStaleLease(bool malformed)
+    {
+        var publicPort = FindAvailablePort();
+        var requestedPort = FindAvailablePort(publicPort);
+        var legacyRoot = Path.Combine(root, "legacy");
+        var currentStore = new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(root));
+        var legacyStore = new BackendLeaseStore(
+            ContinuityPaths.BackendLeaseFile(legacyRoot));
+        currentStore.Write(Lease(
+            publicPort,
+            FindAvailablePort(publicPort, requestedPort),
+            int.MaxValue,
+            DateTimeOffset.UtcNow));
+        var currentLeaseBytes = File.ReadAllBytes(ContinuityPaths.BackendLeaseFile(root));
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        if (malformed)
+        {
+            Directory.CreateDirectory(legacyRoot);
+            File.WriteAllText(ContinuityPaths.BackendLeaseFile(legacyRoot), "{not-json");
+        }
+        else
+        {
+            using var current = Process.GetCurrentProcess();
+            legacyStore.Write(Lease(
+                publicPort,
+                ((IPEndPoint)listener.LocalEndpoint).Port,
+                Environment.ProcessId,
+                current.StartTime.ToUniversalTime()));
+        }
+        var legacyLeaseBytes = File.ReadAllBytes(ContinuityPaths.BackendLeaseFile(legacyRoot));
+        var mutationRan = false;
+
+        Assert.Throws<InvalidOperationException>(() => Program.RunInstallMutation(
+            root,
+            [root, legacyRoot],
+            publicPort,
+            requestedPort,
+            () => mutationRan = true));
+
+        Assert.False(mutationRan);
+        Assert.Equal(
+            currentLeaseBytes,
+            File.ReadAllBytes(ContinuityPaths.BackendLeaseFile(root)));
+        Assert.Equal(
+            legacyLeaseBytes,
+            File.ReadAllBytes(ContinuityPaths.BackendLeaseFile(legacyRoot)));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -410,4 +570,23 @@ public sealed class InstallPortSafetyTests : IDisposable
     }
 
     private sealed class InjectedMutationException : Exception;
+
+    private sealed class StartupOnlyInstallPlatform : IInstallPlatform
+    {
+        internal string? StartupCommand { get; init; }
+
+        public string? GetStartupCommand() => StartupCommand;
+        public string? GetUserEnvironmentVariable(string name) => null;
+        public void SetUserEnvironmentVariable(string name, string? value) =>
+            throw new NotSupportedException();
+        public void SetStartupCommand(string? value) => throw new NotSupportedException();
+        public string? GetTrayStartupCommand() => null;
+        public void SetTrayStartupCommand(string? value) => throw new NotSupportedException();
+        public InstalledAppRegistration? GetInstalledAppRegistration() => null;
+        public void SetInstalledAppRegistration(InstalledAppRegistration? registration) =>
+            throw new NotSupportedException();
+        public string? GetCleanupCommand() => null;
+        public void SetCleanupCommand(string? value) => throw new NotSupportedException();
+        public void BroadcastEnvironmentChange() => throw new NotSupportedException();
+    }
 }
