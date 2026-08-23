@@ -359,6 +359,25 @@ internal static class Program
             return reportFailure($"A Codex Continuity supervisor already owns port {port}.");
         }
 
+        await using var updateLifetime = new SupervisorUpdateLifetime(
+            stateDirectory,
+            ProductVersion(),
+            runUpdates);
+        return await RunOwnedSupervisorAsync(
+            port,
+            stateDirectory,
+            updateLifetime.Token,
+            backendPort => StartAppServer(
+                FindCodexExecutable(persistedEnvironmentOnly: true),
+                backendPort));
+    }
+
+    internal static async Task<int> RunOwnedSupervisorAsync(
+        int port,
+        string stateDirectory,
+        CancellationToken shutdownToken,
+        Func<int, WindowsProcessGroup> startBackend)
+    {
         Directory.CreateDirectory(stateDirectory);
         var logPath = ContinuityPaths.AppServerLogFile(stateDirectory);
         var logWriter = new RollingLogWriter(logPath);
@@ -367,38 +386,49 @@ internal static class Program
         var backoff = new RestartBackoffPolicy();
         var codexHome = FutureProcessEnvironment.ResolveCodexHome();
         var consecutiveFailures = 0;
-        await using var updateLifetime = new SupervisorUpdateLifetime(
-            stateDirectory,
-            ProductVersion(),
-            runUpdates);
-        var shutdownToken = updateLifetime.Token;
         Console.WriteLine(
             $"Supervising {LoopbackEndpoint.WebSocketUrl(port)} with logs at {logPath}");
 
+        var backendPort = FindAvailablePort(port);
+        LoopbackRelay relay;
+        try
+        {
+            relay = LoopbackRelay.Start(
+                port,
+                backendPort,
+                startGated: true,
+                reportError: exception => Console.Error.WriteLine(
+                    $"Loopback relay connection failed: {exception.Message}"));
+        }
+        catch (System.Net.Sockets.SocketException)
+        {
+            statusStore.Write(NewSupervisorStatus(
+                "foreignEndpoint",
+                port,
+                codexHome,
+                backendProcessId: null,
+                consecutiveFailures,
+                lastExitCode: null,
+                nextRetryAtUtc: null,
+                "An endpoint not owned by this supervisor already uses the configured port."));
+            return Fail(
+                "The configured loopback port is already owned by another endpoint; refusing to adopt its thread store.");
+        }
+        await using var ownedRelay = relay;
+
         while (!shutdownToken.IsCancellationRequested)
         {
-            if (await IsReadyAsync(port, TimeSpan.FromMilliseconds(500)))
-            {
-                statusStore.Write(NewSupervisorStatus(
-                    "foreignEndpoint",
-                    port,
-                    codexHome,
-                    backendProcessId: null,
-                    consecutiveFailures,
-                    lastExitCode: null,
-                    nextRetryAtUtc: null,
-                    "An endpoint not owned by this supervisor already uses the configured port."));
-                return reportFailure(
-                    "The configured loopback port is already owned by another endpoint; refusing to adopt its thread store.");
-            }
-
-            var codexPath = FindCodexExecutable(persistedEnvironmentOnly: true);
-            using var process = StartAppServer(codexPath, port);
+            relay.SetBackendPort(backendPort);
+            using var process = startBackend(backendPort);
             var startedAt = DateTimeOffset.UtcNow;
             var stdout = PumpLogAsync(process.StandardOutput, logWriter, shutdownToken);
             var stderr = PumpLogAsync(process.StandardError, logWriter, shutdownToken);
 
-            if (!await WaitUntilReadyAsync(port, process, TimeSpan.FromSeconds(20), shutdownToken))
+            if (!await WaitUntilReadyAsync(
+                    backendPort,
+                    process,
+                    TimeSpan.FromSeconds(20),
+                    shutdownToken))
             {
                 if (!process.HasExited)
                 {
@@ -408,6 +438,7 @@ internal static class Program
             }
             else
             {
+                relay.OpenGate();
                 statusStore.Write(NewSupervisorStatus(
                     "running",
                     port,
@@ -416,7 +447,7 @@ internal static class Program
                     consecutiveFailures,
                     lastExitCode: null,
                     nextRetryAtUtc: null,
-                    $"Listening on {LoopbackEndpoint.WebSocketUrl(port)}"));
+                    $"Relaying {LoopbackEndpoint.WebSocketUrl(port)} to an owned private backend."));
                 Console.WriteLine($"Continuity backend ready (PID {process.Id}).");
                 try
                 {
@@ -424,6 +455,7 @@ internal static class Program
                 }
                 catch (OperationCanceledException)
                 {
+                    await relay.CloseGateAsync();
                     if (!process.HasExited)
                     {
                         process.Kill();
@@ -432,6 +464,10 @@ internal static class Program
                 }
             }
 
+            if (!relay.IsGated)
+            {
+                await relay.CloseGateAsync();
+            }
             await AwaitLogPumpsAsync(stdout, stderr);
             if (!shutdownToken.IsCancellationRequested)
             {
@@ -458,6 +494,7 @@ internal static class Program
                 {
                     break;
                 }
+                backendPort = FindAvailablePort(port, backendPort);
             }
         }
 
@@ -1240,7 +1277,7 @@ internal static class Program
         }
         finally
         {
-            if (process is { HasExited: false })
+            try
             {
                 process.Kill();
                 await process.WaitForExitAsync();
