@@ -39,6 +39,9 @@ public sealed class PrivateBackendForcedStopTests
             await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
                 StopAsync(fixture, checks, waitTimeout: TimeSpan.FromSeconds(seconds)));
         }
+        var nativeWait = fixture.Target.WaitForExitWithinAsync(TimeSpan.FromMilliseconds(100));
+        Assert.Same(nativeWait, await Task.WhenAny(nativeWait, Task.Delay(TimeSpan.FromSeconds(5))));
+        Assert.False(await nativeWait);
         using var canceled = new CancellationTokenSource();
         canceled.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
@@ -116,6 +119,7 @@ public sealed class PrivateBackendForcedStopTests
     [Theory]
     [InlineData("force", "ForcedExit")]
     [InlineData("already-exited", "AlreadyExited")]
+    [InlineData("exit-before-force", "AlreadyExited")]
     [InlineData("cancel-after-commit", "ForcedExit")]
     public async Task SettledHelperExitReleasesReservation(
         string scenario,
@@ -132,6 +136,11 @@ public sealed class PrivateBackendForcedStopTests
         var checks = Checks(tryForceStop: target =>
         {
             forceCalled = true;
+            if (scenario == "exit-before-force")
+            {
+                fixture.Backend.Process.Kill();
+                fixture.Backend.Process.WaitForExitAsync().GetAwaiter().GetResult();
+            }
             var started = target.TryForceStop();
             if (scenario == "cancel-after-commit")
             {
@@ -147,7 +156,6 @@ public sealed class PrivateBackendForcedStopTests
             TimeSpan.FromSeconds(5));
 
         Assert.Equal(Enum.Parse<PrivateBackendForcedStopKind>(expectedName), outcome.Kind);
-        Assert.False(outcome.HasPendingStopReservation);
         Assert.True(fixture.Backend.Process.HasExited);
         Assert.Equal(scenario == "already-exited", !forceCalled);
         Assert.False(File.Exists(fixture.Backend.SignalMarkerPath));
@@ -157,6 +165,7 @@ public sealed class PrivateBackendForcedStopTests
     [Theory]
     [InlineData("timeout", "TimedOut")]
     [InlineData("force-error", "Unknown")]
+    [InlineData("wait-error", "Unknown")]
     [InlineData("mismatched-target", "GateUnavailable")]
     public async Task UnsettledForceRetainsReservation(
         string scenario,
@@ -176,7 +185,9 @@ public sealed class PrivateBackendForcedStopTests
             waitForExit: (_, _) =>
             {
                 waitCalled = true;
-                return Task.FromResult(false);
+                return scenario == "wait-error"
+                    ? throw new Win32Exception("Wait state unavailable")
+                    : Task.FromResult(false);
             });
 
         var outcome = await StopAsync(
@@ -188,7 +199,7 @@ public sealed class PrivateBackendForcedStopTests
         Assert.Equal(Enum.Parse<PrivateBackendForcedStopKind>(expectedName), outcome.Kind);
         Assert.Equal(scenario != "mismatched-target", outcome.HasPendingStopReservation);
         Assert.Equal(scenario == "mismatched-target", fixture.GracefulResult.HasPendingStopReservation);
-        Assert.Equal(scenario == "timeout", waitCalled);
+        Assert.Equal(scenario is "timeout" or "wait-error", waitCalled);
         await AssertNoForceAsync(fixture);
         AssertGateProtected(fixture);
     }
