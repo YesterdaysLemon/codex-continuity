@@ -1,6 +1,8 @@
 using CodexContinuity;
 using CodexContinuity.ProcessHarness;
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using Xunit;
 
 namespace CodexContinuity.Tests;
@@ -214,6 +216,225 @@ public sealed class SupervisorCompatibilityGuardTests : IDisposable
         Assert.False(process.HasExited);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("stopped")]
+    [InlineData("foreignEndpoint")]
+    public void ExactExpectedExecutableBlocksWithMissingOrTerminalStatus(string? state)
+    {
+        Directory.CreateDirectory(root);
+        var executable = CopyHarnessAsLegacyExecutable("expected");
+        var process = StartIdleProcess(executable, "expected");
+        if (state is not null)
+        {
+            new SupervisorStatusStore(ContinuityPaths.SupervisorStatusFile(root)).Write(
+                Status(process) with { State = state });
+        }
+        var scope = new SupervisorCompatibilityScope([root])
+        {
+            ExpectedExecutables = [executable],
+        };
+
+        Assert.Throws<InvalidOperationException>(() =>
+            SupervisorCompatibilityGuard.EnsureInactive(
+                scope,
+                "test expected executable"));
+
+        Assert.False(process.HasExited);
+    }
+
+    [Fact]
+    public void SameNamedProcessAtAnotherPathDoesNotBlockExactDiscovery()
+    {
+        Directory.CreateDirectory(root);
+        var runningExecutable = CopyHarnessAsLegacyExecutable("running");
+        var expectedExecutable = CopyHarnessAsLegacyExecutable("expected-other");
+        var process = StartIdleProcess(runningExecutable, "same-name");
+
+        SupervisorCompatibilityGuard.EnsureInactive(
+            new SupervisorCompatibilityScope([root])
+            {
+                ExpectedExecutables = [expectedExecutable],
+            },
+            "test exact path");
+
+        Assert.False(process.HasExited);
+    }
+
+    [Fact]
+    public void InaccessibleSameNameProcessFailsClosedButCurrentProcessIsIgnored()
+    {
+        var executable = Path.Combine(root, "CodexContinuity.exe");
+        var scope = new SupervisorCompatibilityScope([root])
+        {
+            ExpectedExecutables = [executable],
+        };
+
+        Assert.Equal(
+            ExpectedSupervisorProcessState.Unsafe,
+            SupervisorCompatibilityGuard.InspectExpectedExecutables(
+                [executable],
+                processName =>
+                {
+                    Assert.Equal("CodexContinuity", processName);
+                    return [new SupervisorProcessSnapshot(int.MaxValue, ExecutablePath: null)];
+                }));
+        Assert.Throws<InvalidOperationException>(() =>
+            SupervisorCompatibilityGuard.EnsureInactive(
+                scope,
+                "test inaccessible process",
+                _ => ExpectedSupervisorProcessState.Unsafe));
+        Assert.Equal(
+            ExpectedSupervisorProcessState.Missing,
+            SupervisorCompatibilityGuard.InspectExpectedExecutables(
+                [executable],
+                _ => [new SupervisorProcessSnapshot(
+                    Environment.ProcessId,
+                    ExecutablePath: null)]));
+    }
+
+    [Fact]
+    public void ExpectedExecutableInspectionScansEachNameOnceAndChecksEverySnapshot()
+    {
+        var first = Path.Combine(root, "first", "CodexContinuity.exe");
+        var second = Path.Combine(root, "second", "CodexContinuity.exe");
+        var wrong = Path.Combine(root, "other", "CodexContinuity.exe");
+        var snapshotCalls = 0;
+
+        ExpectedSupervisorProcessState Inspect(params SupervisorProcessSnapshot[] snapshots)
+        {
+            snapshotCalls = 0;
+            var state = SupervisorCompatibilityGuard.InspectExpectedExecutables(
+                [first, second],
+                _ =>
+                {
+                    snapshotCalls++;
+                    return snapshots;
+                });
+            Assert.Equal(1, snapshotCalls);
+            return state;
+        }
+
+        Assert.Equal(
+            ExpectedSupervisorProcessState.Active,
+            Inspect(new(int.MaxValue - 1, wrong), new(int.MaxValue, second.ToUpperInvariant())));
+        Assert.Equal(
+            ExpectedSupervisorProcessState.Unsafe,
+            Inspect(new(int.MaxValue - 1, wrong), new(int.MaxValue, ExecutablePath: null)));
+    }
+
+    [Theory]
+    [InlineData("exactProcess")]
+    [InlineData("activeRecord")]
+    [InlineData("unsafeRecord")]
+    public async Task CombinedGuardBlocksServeAndDifferentPortMutation(string evidence)
+    {
+        Directory.CreateDirectory(root);
+        var legacyRoot = Path.Combine(root, "legacy");
+        Process? process = null;
+        if (evidence == "exactProcess")
+        {
+            var executable = CopyHarnessAsLegacyExecutable(
+                Path.Combine("versions", "integration"));
+            process = StartIdleProcess(executable, "integration");
+        }
+        else if (evidence == "activeRecord")
+        {
+            process = StartIdleProcess(HarnessExecutable(), "integration");
+            new SupervisorStatusStore(ContinuityPaths.SupervisorStatusFile(legacyRoot))
+                .Write(Status(process));
+        }
+        else
+        {
+            Directory.CreateDirectory(legacyRoot);
+            File.WriteAllText(
+                ContinuityPaths.SupervisorStatusFile(legacyRoot),
+                "{not-json");
+        }
+        var stateDirectories = new[] { root, legacyRoot };
+        var coordinator = new InstallCoordinator(
+            root,
+            new InstallPortSafetyTests.StartupOnlyInstallPlatform(),
+            new InstallStateStore(ContinuityPaths.InstallStateFile(root)),
+            legacyRoot);
+        var installedPort = FindAvailablePort();
+        var requestedPort = FindAvailablePort(installedPort);
+        var mutationRan = false;
+        var updaterRan = false;
+        string? reportedFailure = null;
+
+        static string ExpectedFailure(string evidence, string operation) => evidence switch
+        {
+            "exactProcess" =>
+                $"A previous Continuity supervisor executable is still active. Refusing to {operation}.",
+            "activeRecord" =>
+                $"A recorded Continuity supervisor is still active. Refusing to {operation}.",
+            "unsafeRecord" =>
+                $"Persisted supervisor identity cannot be trusted. Refusing to {operation}.",
+            _ => throw new ArgumentOutOfRangeException(nameof(evidence)),
+        };
+
+        Assert.Equal(1, await Program.ServeAsync(
+            FindAvailablePort(installedPort, requestedPort),
+            root,
+            stateDirectories,
+            coordinator,
+            (_, _, _) =>
+            {
+                updaterRan = true;
+                return Task.CompletedTask;
+            },
+            failure =>
+            {
+                reportedFailure = failure;
+                return 1;
+            }));
+        Assert.Equal(ExpectedFailure(evidence, "start another supervisor"), reportedFailure);
+        Assert.False(updaterRan);
+        var mutationException = Assert.Throws<InvalidOperationException>(() =>
+            Program.RunInstallMutation(
+            root,
+            stateDirectories,
+            coordinator,
+            installedPort,
+            requestedPort,
+            () => mutationRan = true));
+        Assert.Equal(
+            ExpectedFailure(evidence, "change the configured port"),
+            mutationException.Message);
+
+        Assert.False(mutationRan);
+        Assert.Equal("staged", Program.RunInstallMutation(
+            root,
+            stateDirectories,
+            coordinator,
+            installedPort,
+            installedPort,
+            () => "staged"));
+        Assert.True(process is null || !process.HasExited);
+    }
+
+    [Fact]
+    public void SamePortProductionMutationDoesNotBuildCompatibilityScope()
+    {
+        var legacyRoot = Path.Combine(root, "legacy");
+        Directory.CreateDirectory(legacyRoot);
+        File.WriteAllText(ContinuityPaths.InstallStateFile(legacyRoot), "{not-json");
+        var coordinator = new InstallCoordinator(
+            root,
+            new InstallPortSafetyTests.StartupOnlyInstallPlatform(),
+            new InstallStateStore(ContinuityPaths.InstallStateFile(root)),
+            legacyRoot);
+
+        Assert.Equal("staged", Program.RunInstallMutation(
+            root,
+            [root, legacyRoot],
+            coordinator,
+            installedPort: 45123,
+            requestedPort: 45123,
+            () => "staged"));
+    }
+
     private Process StartIdleProcess(string executable, string name)
     {
         var readyPath = Path.Combine(root, $"{name}-{Guid.NewGuid():N}.ready");
@@ -274,6 +495,20 @@ public sealed class SupervisorCompatibilityGuardTests : IDisposable
         "test",
         process.StartTime.ToUniversalTime(),
         process.MainModule!.FileName);
+
+    private static int FindAvailablePort(params int[] excludedPorts)
+    {
+        while (true)
+        {
+            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            if (!excludedPorts.Contains(port))
+            {
+                return port;
+            }
+        }
+    }
 
     public void Dispose()
     {
