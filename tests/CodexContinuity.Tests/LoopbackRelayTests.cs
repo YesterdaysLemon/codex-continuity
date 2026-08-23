@@ -183,6 +183,64 @@ public sealed class LoopbackRelayTests
     }
 
     [Fact]
+    public async Task BackendStopReservationBlocksLeaseReopenAndRetarget()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        await using var replacement = new TaggedBackend("replacement:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+        var result = await GatedHandoffTransition.CloseAndRecomputeAsync(
+            relay,
+            _ => Task.FromResult(Plan(transitionReady: true)));
+        Assert.NotNull(result.GateLease);
+
+        using var reservation = result.GateLease.TryReserveBackendStop();
+
+        Assert.NotNull(reservation);
+        Assert.Equal(backend.Port, reservation.BackendPort);
+        Assert.True(reservation.IsCurrent);
+        Assert.False(result.GateLease.TryOpen());
+        Assert.False(result.GateLease.TryRetargetAndOpen(replacement.Port));
+        reservation.Dispose();
+        using var nextReservation = result.GateLease.TryReserveBackendStop();
+        Assert.NotNull(nextReservation);
+        Assert.False(reservation.IsCurrent);
+        Assert.True(nextReservation.IsCurrent);
+        nextReservation.Dispose();
+        Assert.True(result.GateLease.TryRetargetAndOpen(replacement.Port));
+    }
+
+    [Fact]
+    public async Task ConcurrentGateCloseCannotReopenUntilStopReservationIsReleased()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        await using var replacement = new TaggedBackend("replacement:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+        var result = await GatedHandoffTransition.CloseAndRecomputeAsync(
+            relay,
+            _ => Task.FromResult(Plan(transitionReady: true)));
+        Assert.NotNull(result.GateLease);
+        using var reservation = result.GateLease.TryReserveBackendStop();
+        Assert.NotNull(reservation);
+
+        await relay.CloseGateAsync();
+
+        Assert.False(reservation.IsCurrent);
+        Assert.False(result.GateLease.TryOpen());
+        Assert.False(result.GateLease.TryRetargetAndOpen(replacement.Port));
+        Assert.Throws<InvalidOperationException>(relay.OpenGate);
+        Assert.Throws<InvalidOperationException>(() => relay.SetBackendPort(replacement.Port));
+        reservation.Dispose();
+        relay.SetBackendPort(replacement.Port);
+        relay.OpenGate();
+        using var replacementClient = await ConnectAsync(publicPort);
+        Assert.Equal(
+            "replacement:continued",
+            await RoundTripAsync(replacementClient, "continued"));
+    }
+
+    [Fact]
     public async Task FailedRecomputationReopensRelayWithoutStoppingBackend()
     {
         await using var backend = new TaggedBackend("backend:");
