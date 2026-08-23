@@ -417,7 +417,9 @@ internal static class Program
         }
 
         var recoveredBackend = recovery.Backend;
-        var backendPort = recovery.Lease?.BackendPort ?? FindAvailablePort(port);
+        var backendPort = recoveredBackend is null
+            ? FindAvailablePort(port)
+            : recovery.Lease!.BackendPort;
         LoopbackRelay relay;
         try
         {
@@ -452,19 +454,26 @@ internal static class Program
             var process = recoveredBackend ?? startBackend(backendPort);
             recoveredBackend = null;
             var leaseActive = recovered;
-            var startedAt = DateTimeOffset.UtcNow;
-            var stdout = PumpLogAsync(process.StandardOutput, logWriter, shutdownToken);
-            var stderr = PumpLogAsync(process.StandardError, logWriter, shutdownToken);
             try
             {
+                leaseStore.Write(new BackendLease(
+                    BackendLease.CurrentSchemaVersion,
+                    OwnerSupervisorProcessId: Environment.ProcessId,
+                    BackendProcessId: process.Id,
+                    PublicPort: port,
+                    BackendPort: backendPort,
+                    BackendExecutable: process.ExecutablePath,
+                    CodexHome: codexHome,
+                    BackendStartedAtUtc: process.StartedAtUtc));
+                leaseActive = true;
+                var startedAt = DateTimeOffset.UtcNow;
+                var stdout = PumpLogAsync(process.StandardOutput, logWriter, shutdownToken);
+                var stderr = PumpLogAsync(process.StandardError, logWriter, shutdownToken);
                 if (!await WaitUntilReadyAsync(
                         backendPort,
                         process,
                         TimeSpan.FromSeconds(20),
-                        shutdownToken,
-                        recovered
-                            ? BackendOwnershipCheck.AlreadyVerified
-                            : BackendOwnershipCheck.Required))
+                        shutdownToken))
                 {
                     if (recovered && !process.HasExited)
                     {
@@ -490,16 +499,6 @@ internal static class Program
                 }
                 else
                 {
-                    leaseStore.Write(new BackendLease(
-                        BackendLease.CurrentSchemaVersion,
-                        OwnerSupervisorProcessId: Environment.ProcessId,
-                        BackendProcessId: process.Id,
-                        PublicPort: port,
-                        BackendPort: backendPort,
-                        BackendExecutable: process.ExecutablePath,
-                        CodexHome: codexHome,
-                        BackendStartedAtUtc: process.StartedAtUtc));
-                    leaseActive = true;
                     relay.OpenGate();
                     statusStore.Write(NewSupervisorStatus(
                         "running",
@@ -1430,16 +1429,14 @@ internal static class Program
         int port,
         WindowsProcessGroup process,
         TimeSpan timeout,
-        CancellationToken cancellationToken,
-        BackendOwnershipCheck ownershipCheck = BackendOwnershipCheck.AlreadyVerified)
+        CancellationToken cancellationToken)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline && !process.HasExited && !cancellationToken.IsCancellationRequested)
         {
             if (await IsReadyAsync(port, TimeSpan.FromMilliseconds(500)) &&
                 !process.HasExited &&
-                (ownershipCheck == BackendOwnershipCheck.AlreadyVerified ||
-                 WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy(port, process.Id)))
+                WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy(port, process.Id))
             {
                 return true;
             }
@@ -1453,12 +1450,6 @@ internal static class Program
             }
         }
         return false;
-    }
-
-    private enum BackendOwnershipCheck
-    {
-        Required,
-        AlreadyVerified,
     }
 
     private static async Task<bool> WaitUntilManagedSupervisorReadyAsync(
