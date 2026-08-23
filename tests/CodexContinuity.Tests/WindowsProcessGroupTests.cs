@@ -318,6 +318,14 @@ public sealed class WindowsProcessGroupTests
             Assert.True(SpinWait.SpinUntil(
                 () => File.Exists(Path.Combine(testDirectory, "ready.txt")),
                 TimeSpan.FromSeconds(5)));
+            using var canceled = new CancellationTokenSource();
+            await canceled.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                Program.StopAppServerWithCtrlBreakAsync(
+                    process,
+                    TimeSpan.FromSeconds(5),
+                    canceled.Token));
+            Assert.False(process.HasExited);
 
             Assert.Equal(
                 Program.AppServerStopDisposition.CleanExit,

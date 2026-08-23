@@ -38,6 +38,8 @@ internal sealed record LoopbackRelayOptions(
 
 internal sealed class RelayGateLease(LoopbackRelay relay, long ownedEpoch)
 {
+    internal bool IsCurrent => relay.IsGateLeaseCurrent(ownedEpoch);
+
     internal bool TryOpen() => relay.TryOpenGate(ownedEpoch);
 
     internal bool TryRetargetAndOpen(int backendPort) =>
@@ -207,6 +209,17 @@ internal sealed class LoopbackRelay : IAsyncDisposable
             exclusiveGateEpoch = null;
             gateEpoch++;
             return true;
+        }
+    }
+
+    internal bool IsGateLeaseCurrent(long ownedEpoch)
+    {
+        lock (sync)
+        {
+            return !disposed &&
+                gated &&
+                gateEpoch == ownedEpoch &&
+                exclusiveGateEpoch == ownedEpoch;
         }
     }
 

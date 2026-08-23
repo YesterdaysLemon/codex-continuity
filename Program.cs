@@ -1169,8 +1169,10 @@ internal static class Program
 
     internal static async Task<AppServerStopDisposition> StopAppServerWithCtrlBreakAsync(
         WindowsProcessGroup process,
-        TimeSpan timeout)
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (process.HasExited)
         {
             return AppServerStopDisposition.AlreadyExited;
@@ -1179,7 +1181,9 @@ internal static class Program
         {
             return AppServerStopDisposition.AlreadyExited;
         }
-        using var timeoutCancellation = new CancellationTokenSource(timeout);
+        using var timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken);
+        timeoutCancellation.CancelAfter(timeout);
         try
         {
             await process.WaitForExitAsync(timeoutCancellation.Token);
@@ -1189,6 +1193,10 @@ internal static class Program
                 StatusControlCExit => AppServerStopDisposition.WindowsControlExit,
                 _ => AppServerStopDisposition.UnexpectedExit,
             };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (OperationCanceledException) when (timeoutCancellation.IsCancellationRequested)
         {
