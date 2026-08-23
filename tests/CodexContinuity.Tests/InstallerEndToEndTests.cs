@@ -241,6 +241,10 @@ public sealed class InstallerEndToEndTests : IDisposable
         var publicPort = Program.FindAvailablePort();
         var updaterCancelled = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
+        var runtimeEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowRuntimeExit = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         var capturedPort = 0;
         string? capturedStateDirectory = null;
         var capturedShutdownToken = default(CancellationToken);
@@ -261,7 +265,7 @@ public sealed class InstallerEndToEndTests : IDisposable
             }
         }
 
-        Task<int> RunOwnedSupervisor(
+        async Task<int> RunOwnedSupervisor(
             int port,
             string stateDirectory,
             CancellationToken shutdownToken,
@@ -271,15 +275,24 @@ public sealed class InstallerEndToEndTests : IDisposable
             capturedStateDirectory = stateDirectory;
             capturedShutdownToken = shutdownToken;
             capturedStartBackend = startBackend;
-            return Task.FromResult(23);
+            runtimeEntered.SetResult();
+            await allowRuntimeExit.Task;
+            return 23;
         }
 
-        var exitCode = await Program.ServeAsync(
+        var serveTask = Program.ServeAsync(
             publicPort,
             root,
             SupervisorCompatibilityScope.ForStateDirectory(root),
             RunUpdater,
             RunOwnedSupervisor);
+        await runtimeEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(serveTask.IsCompleted);
+        Assert.False(capturedShutdownToken.IsCancellationRequested);
+        Assert.False(updaterCancelled.Task.IsCompleted);
+        allowRuntimeExit.SetResult();
+        var exitCode = await serveTask.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal(23, exitCode);
         Assert.Equal(publicPort, capturedPort);
