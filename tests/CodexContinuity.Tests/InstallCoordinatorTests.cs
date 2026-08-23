@@ -2,6 +2,7 @@ using CodexContinuity;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Xunit;
 
 namespace CodexContinuity.Tests;
@@ -11,6 +12,275 @@ public sealed class InstallCoordinatorTests : IDisposable
     private readonly string root = Path.Combine(
         Path.GetTempPath(),
         $"codex-continuity-install-tests-{Guid.NewGuid():N}");
+
+    [Fact]
+    public void EnumeratesCurrentPreviousAndLegacySupervisorExecutables()
+    {
+        var currentRoot = Path.Combine(root, "current");
+        var legacyRoot = Path.Combine(root, "legacy");
+        var currentPlatform = new FakeInstallPlatform();
+        var currentCoordinator = new InstallCoordinator(
+            currentRoot,
+            currentPlatform,
+            new InstallStateStore(ContinuityPaths.InstallStateFile(currentRoot)));
+        var first = currentCoordinator.Install(
+            CreateSource("version-one"),
+            45123,
+            TrayInstallMode.Disabled);
+        var second = currentCoordinator.Install(
+            CreateSource("version-two"),
+            45123,
+            TrayInstallMode.Disabled);
+        var persistedCurrentExecutable = second.State.InstalledExecutable.ToUpperInvariant();
+        new InstallStateStore(ContinuityPaths.InstallStateFile(currentRoot)).Save(
+            second.State with { InstalledExecutable = persistedCurrentExecutable });
+        var currentOlderVersionExecutable = Path.Combine(
+            ContinuityPaths.VersionsDirectory(currentRoot),
+            "older-version",
+            "CodexContinuity.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(currentOlderVersionExecutable)!);
+        File.WriteAllText(currentOlderVersionExecutable, "older");
+
+        var legacyPlatform = new FakeInstallPlatform();
+        var legacyCoordinator = new InstallCoordinator(
+            legacyRoot,
+            legacyPlatform,
+            new InstallStateStore(ContinuityPaths.InstallStateFile(legacyRoot)));
+        var legacyFirst = legacyCoordinator.Install(
+            CreateSource("legacy-version-one"),
+            45123,
+            TrayInstallMode.Disabled);
+        var legacySecond = legacyCoordinator.Install(
+            CreateSource("legacy-version-two"),
+            45123,
+            TrayInstallMode.Disabled);
+        var legacyOlderVersionExecutable = Path.Combine(
+            ContinuityPaths.VersionsDirectory(legacyRoot),
+            "older-version",
+            "CodexContinuity.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(legacyOlderVersionExecutable)!);
+        File.WriteAllText(legacyOlderVersionExecutable, "older");
+        var coordinator = new InstallCoordinator(
+            currentRoot,
+            currentPlatform,
+            new InstallStateStore(ContinuityPaths.InstallStateFile(currentRoot)),
+            legacyRoot);
+
+        var candidates = coordinator.KnownSupervisorExecutables();
+
+        AssertExactCandidates(
+            [
+                persistedCurrentExecutable,
+                first.State.InstalledExecutable,
+                legacySecond.State.InstalledExecutable,
+                legacyFirst.State.InstalledExecutable,
+                Path.Combine(currentRoot, "CodexContinuity.exe"),
+                Path.Combine(legacyRoot, "CodexContinuity.exe"),
+                ContinuityPaths.CommandExecutable(currentRoot),
+                ContinuityPaths.CommandExecutable(legacyRoot),
+                currentOlderVersionExecutable,
+                legacyOlderVersionExecutable,
+            ],
+            candidates);
+
+        var installStatePath = ContinuityPaths.InstallStateFile(currentRoot);
+        new InstallStateStore(installStatePath).Save(
+            second.State with { InstalledExecutable = Path.Combine(currentRoot, "other.exe") });
+        AssertDiscoveryFailure(coordinator, currentRoot);
+
+        File.WriteAllText(installStatePath, JsonSerializer.Serialize(new
+        {
+            installedExecutable = "CodexContinuity.exe",
+        }));
+        AssertDiscoveryFailure(coordinator, currentRoot);
+
+        File.WriteAllText(installStatePath, "{not-json");
+        AssertDiscoveryFailure(coordinator, currentRoot);
+
+        const int maximumStateBytes = 512 * 1024;
+        const string boundaryExecutable = @"C:\continuity-boundary\CodexContinuity.exe";
+        var boundaryState = JsonSerializer.Serialize(new
+        {
+            installedExecutable = boundaryExecutable,
+        });
+        File.WriteAllText(
+            installStatePath,
+            boundaryState.PadRight(maximumStateBytes),
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        Assert.Equal(maximumStateBytes, new FileInfo(installStatePath).Length);
+        Assert.Contains(boundaryExecutable, coordinator.KnownSupervisorExecutables());
+
+        File.WriteAllText(
+            installStatePath,
+            boundaryState.PadRight(maximumStateBytes + 1),
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        Assert.Equal(maximumStateBytes + 1, new FileInfo(installStatePath).Length);
+        AssertDiscoveryFailure(coordinator, currentRoot);
+
+        static string ExecutablePathWithLength(int length)
+        {
+            const string pathPrefix = @"C:\";
+            const string fileName = "CodexContinuity.exe";
+            var directoryCharacters = length - pathPrefix.Length - fileName.Length - 1;
+            var path = new StringBuilder(pathPrefix);
+            while (directoryCharacters > 200)
+            {
+                var segmentLength = Math.Min(200, directoryCharacters - 2);
+                path.Append('p', segmentLength);
+                path.Append('\\');
+                directoryCharacters -= segmentLength + 1;
+            }
+            path.Append('p', directoryCharacters);
+            path.Append('\\');
+            path.Append(fileName);
+            return path.ToString();
+        }
+
+        var maximumPath = ExecutablePathWithLength(32767);
+        var overlongPath = ExecutablePathWithLength(32768);
+        foreach (var fieldName in new[] { "installedExecutable", "previousInstalledExecutable" })
+        {
+            var validFields = new Dictionary<string, string>
+            {
+                ["installedExecutable"] = boundaryExecutable,
+                [fieldName] = maximumPath,
+            };
+            File.WriteAllText(installStatePath, JsonSerializer.Serialize(validFields));
+            Assert.Equal(
+                fieldName == "installedExecutable"
+                    ? [maximumPath]
+                    : [boundaryExecutable, maximumPath],
+                new InstallStateStore(installStatePath).LoadSupervisorExecutablePaths());
+
+            validFields[fieldName] = overlongPath;
+            File.WriteAllText(installStatePath, JsonSerializer.Serialize(validFields));
+            var overlongException = Assert.Throws<InvalidDataException>(() =>
+                new InstallStateStore(installStatePath).LoadSupervisorExecutablePaths());
+            Assert.Equal(
+                InstallCoordinator.SupervisorDiscoveryFailureMessage,
+                overlongException.Message);
+        }
+
+        new InstallStateStore(installStatePath).Save(second.State);
+        var persistedEvidence = File.ReadAllBytes(installStatePath);
+        using (new FileStream(
+                   installStatePath,
+                   FileMode.Open,
+                   FileAccess.ReadWrite,
+                   FileShare.None))
+        {
+            AssertDiscoveryFailure(coordinator, currentRoot);
+        }
+        Assert.Equal(persistedEvidence, File.ReadAllBytes(installStatePath));
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"installedExecutable\":42}")]
+    [InlineData(
+        "{\"installedExecutable\":\"C:\\\\continuity\\\\CodexContinuity.exe\"," +
+        "\"previousInstalledExecutable\":42}")]
+    public void StructurallyInvalidDiscoveryStateFailsWithBoundedDiagnostic(string json)
+    {
+        var currentRoot = Path.Combine(root, "current");
+        var coordinator = new InstallCoordinator(
+            currentRoot,
+            new FakeInstallPlatform(),
+            new InstallStateStore(ContinuityPaths.InstallStateFile(currentRoot)));
+        var statePath = ContinuityPaths.InstallStateFile(currentRoot);
+        Directory.CreateDirectory(Path.GetDirectoryName(statePath)!);
+        File.WriteAllText(statePath, json);
+
+        AssertDiscoveryFailure(coordinator, currentRoot);
+    }
+
+    [Fact]
+    public void MissingCurrentAndLegacyStateReturnsOnlyOwnedStaticCandidates()
+    {
+        var currentRoot = Path.Combine(root, "current");
+        var legacyRoot = Path.Combine(root, "legacy");
+        var coordinator = new InstallCoordinator(
+            currentRoot,
+            new FakeInstallPlatform(),
+            new InstallStateStore(ContinuityPaths.InstallStateFile(currentRoot)),
+            legacyRoot);
+
+        AssertExactCandidates(
+            [
+                Path.Combine(currentRoot, "CodexContinuity.exe"),
+                Path.Combine(legacyRoot, "CodexContinuity.exe"),
+                ContinuityPaths.CommandExecutable(currentRoot),
+                ContinuityPaths.CommandExecutable(legacyRoot),
+            ],
+            coordinator.KnownSupervisorExecutables());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void KnownVersionInventoryAllows128EntriesPerStateRoot(bool useLegacyRoot)
+    {
+        var currentRoot = Path.Combine(root, "current");
+        var legacyRoot = Path.Combine(root, "legacy");
+        var coordinator = new InstallCoordinator(
+            currentRoot,
+            new FakeInstallPlatform(),
+            new InstallStateStore(ContinuityPaths.InstallStateFile(currentRoot)),
+            legacyRoot);
+        var versionRoot = useLegacyRoot ? legacyRoot : currentRoot;
+        var expected = new List<string>
+        {
+            Path.Combine(currentRoot, "CodexContinuity.exe"),
+            Path.Combine(legacyRoot, "CodexContinuity.exe"),
+            ContinuityPaths.CommandExecutable(currentRoot),
+            ContinuityPaths.CommandExecutable(legacyRoot),
+        };
+        for (var index = 0; index < 128; index++)
+        {
+            var versionDirectory = Path.Combine(
+                ContinuityPaths.VersionsDirectory(versionRoot),
+                $"version-{index}");
+            Directory.CreateDirectory(versionDirectory);
+            expected.Add(Path.Combine(versionDirectory, "CodexContinuity.exe"));
+        }
+
+        AssertExactCandidates(expected, coordinator.KnownSupervisorExecutables());
+
+        Directory.CreateDirectory(Path.Combine(
+            ContinuityPaths.VersionsDirectory(versionRoot),
+            "version-128"));
+        AssertDiscoveryFailure(coordinator, versionRoot);
+    }
+
+    [Fact]
+    public void KnownVersionInventoryCountsFilesTowardItsEntryBound()
+    {
+        var currentRoot = Path.Combine(root, "current");
+        var legacyRoot = Path.Combine(root, "legacy");
+        var coordinator = new InstallCoordinator(
+            currentRoot,
+            new FakeInstallPlatform(),
+            new InstallStateStore(ContinuityPaths.InstallStateFile(currentRoot)),
+            legacyRoot);
+        var versionsDirectory = ContinuityPaths.VersionsDirectory(currentRoot);
+        Directory.CreateDirectory(versionsDirectory);
+        for (var index = 0; index < 128; index++)
+        {
+            File.WriteAllText(Path.Combine(versionsDirectory, $"entry-{index}.txt"), "ignored");
+        }
+
+        AssertExactCandidates(
+            [
+                Path.Combine(currentRoot, "CodexContinuity.exe"),
+                Path.Combine(legacyRoot, "CodexContinuity.exe"),
+                ContinuityPaths.CommandExecutable(currentRoot),
+                ContinuityPaths.CommandExecutable(legacyRoot),
+            ],
+            coordinator.KnownSupervisorExecutables());
+
+        File.WriteAllText(Path.Combine(versionsDirectory, "entry-128.txt"), "bounded");
+        AssertDiscoveryFailure(coordinator, currentRoot);
+    }
 
     [Theory]
     [InlineData(45123)]
@@ -985,6 +1255,28 @@ public sealed class InstallCoordinatorTests : IDisposable
         {
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    private static void AssertExactCandidates(
+        IReadOnlyList<string> expected,
+        IReadOnlyList<string> actual)
+    {
+        var comparer = StringComparer.OrdinalIgnoreCase;
+        Assert.Equal(actual.Count, actual.Distinct(comparer).Count());
+        Assert.Equal(
+            expected.OrderBy(path => path, comparer),
+            actual.OrderBy(path => path, comparer),
+            comparer);
+    }
+
+    private static void AssertDiscoveryFailure(
+        InstallCoordinator coordinator,
+        string privatePath)
+    {
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            coordinator.KnownSupervisorExecutables());
+        Assert.Equal(InstallCoordinator.SupervisorDiscoveryFailureMessage, exception.Message);
+        Assert.DoesNotContain(privatePath, exception.Message);
     }
 
     private InstallCoordinator CreateCoordinator(FakeInstallPlatform platform)
