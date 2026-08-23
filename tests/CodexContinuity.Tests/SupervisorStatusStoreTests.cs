@@ -75,9 +75,9 @@ public sealed class SupervisorStatusStoreTests : IDisposable
         var status = Status() with
         {
             State = new string('s', 64),
-            CodexHome = new string('界', 4096),
+            CodexHome = new string('界', 32767),
             Detail = new string('界', 4096),
-            SupervisorExecutable = $"C:\\{new string('界', 4093)}",
+            SupervisorExecutable = $"C:\\{new string('界', 32764)}",
         };
 
         store.Write(status);
@@ -188,6 +188,31 @@ public sealed class SupervisorStatusStoreTests : IDisposable
                 NextRetryAtUtc: null,
                 "Legacy status"),
             result.Status);
+    }
+
+    [Fact]
+    public void LoadsLegacyStatusWithFullWindowsPathDomain()
+    {
+        Directory.CreateDirectory(root);
+        var path = ContinuityPaths.SupervisorStatusFile(root);
+        var codexHome = $"C:\\{new string('界', 19997)}";
+        var status = Status() with
+        {
+            CodexHome = codexHome,
+            SupervisorStartedAtUtc = null,
+            SupervisorExecutable = null,
+        };
+        File.WriteAllText(
+            path,
+            JsonSerializer.Serialize(status, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            }));
+
+        Assert.True(new FileInfo(path).Length > 96 * 1024);
+        Assert.Equal(
+            new SupervisorStatusLoadResult(SupervisorStatusLoadKind.Loaded, status),
+            new SupervisorStatusStore(path).Load());
     }
 
     private static SupervisorStatus Status() => new(

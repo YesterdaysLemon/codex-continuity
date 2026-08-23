@@ -248,9 +248,9 @@ internal sealed record SupervisorStatusLoadResult(
 
 internal sealed class SupervisorStatusStore(string path)
 {
-    internal const int MaximumStatusBytes = 96 * 1024;
+    internal const int MaximumStatusBytes = 512 * 1024;
     private const int MaximumStateCharacters = 64;
-    private const int MaximumPathCharacters = 4096;
+    private const int MaximumPathCharacters = 32767;
     private const int MaximumDetailCharacters = 4096;
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
