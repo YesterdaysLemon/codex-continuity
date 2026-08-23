@@ -30,6 +30,17 @@ internal static class Program
                 args[2]).GetAwaiter().GetResult();
         }
 
+        if (args.FirstOrDefault() == "fake-app-server")
+        {
+            return RunFakeAppServerAsync(
+                int.Parse(args[1], CultureInfo.InvariantCulture),
+                args[2],
+                args.Length > 3
+                    ? int.Parse(args[3], CultureInfo.InvariantCulture)
+                    : 0,
+                args.Length > 4 ? args[4] : null).GetAwaiter().GetResult();
+        }
+
         if (args.FirstOrDefault() == "process-group-parent")
         {
             return RunProcessGroupParent(args[1]);
@@ -118,6 +129,88 @@ internal static class Program
         using var client = await listener.AcceptTcpClientAsync();
         await Task.Delay(Timeout.InfiniteTimeSpan);
         return 0;
+    }
+
+    private static async Task<int> RunFakeAppServerAsync(
+        int port,
+        string readyPath,
+        int exitAfterRequests,
+        string? startGatePath)
+    {
+        using var shutdown = new CancellationTokenSource();
+        ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
+        {
+            eventArgs.Cancel = true;
+            shutdown.Cancel();
+        };
+        Console.CancelKeyPress += cancelHandler;
+        var listener = new TcpListener(IPAddress.Loopback, port);
+        listener.Start();
+        await File.WriteAllTextAsync(
+            readyPath,
+            Environment.ProcessId.ToString(CultureInfo.InvariantCulture));
+        var requestCount = 0;
+        try
+        {
+            while (!shutdown.IsCancellationRequested)
+            {
+                try
+                {
+                    using var client = await listener.AcceptTcpClientAsync(shutdown.Token);
+                    try
+                    {
+                        var ready = startGatePath is null || File.Exists(startGatePath);
+                        await RespondToReadyRequestAsync(client, port, ready, shutdown.Token);
+                        if (ready && ++requestCount == exitAfterRequests)
+                        {
+                            return 17;
+                        }
+                    }
+                    catch (Exception exception) when (
+                        exception is IOException or SocketException)
+                    {
+                    }
+                }
+                catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+                {
+                    break;
+                }
+            }
+            return 0;
+        }
+        finally
+        {
+            listener.Stop();
+            Console.CancelKeyPress -= cancelHandler;
+        }
+    }
+
+    private static async Task RespondToReadyRequestAsync(
+        TcpClient client,
+        int port,
+        bool ready,
+        CancellationToken cancellationToken)
+    {
+        await using var stream = client.GetStream();
+        using var reader = new StreamReader(
+            stream,
+            Encoding.ASCII,
+            detectEncodingFromByteOrderMarks: false,
+            bufferSize: 1024,
+            leaveOpen: true);
+        string? line;
+        do
+        {
+            line = await reader.ReadLineAsync(cancellationToken);
+        }
+        while (!string.IsNullOrEmpty(line));
+
+        var body = Encoding.UTF8.GetBytes(ready ? $"backend:{port}" : $"not-ready:{port}");
+        var header = Encoding.ASCII.GetBytes(
+            $"HTTP/1.1 {(ready ? "200 OK" : "503 Service Unavailable")}\r\n" +
+            $"Content-Length: {body.Length}\r\nConnection: close\r\n\r\n");
+        await stream.WriteAsync(header, cancellationToken);
+        await stream.WriteAsync(body, cancellationToken);
     }
 
     private static int RunProcessGroupParent(string testDirectory)
