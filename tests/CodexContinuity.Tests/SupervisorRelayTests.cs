@@ -111,6 +111,36 @@ public sealed class SupervisorRelayTests : IDisposable
         Assert.True(CanBind(publicPort));
     }
 
+    [Fact]
+    public async Task ForeignPublicEndpointDoesNotStartBackend()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Server.SetSocketOption(
+            SocketOptionLevel.Socket,
+            SocketOptionName.ExclusiveAddressUse,
+            true);
+        listener.Start();
+        var publicPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var startCount = 0;
+
+        var exitCode = await OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            CancellationToken.None,
+            _ =>
+            {
+                startCount++;
+                throw new InvalidOperationException("The backend callback must not run.");
+            });
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(0, startCount);
+        Assert.Equal(
+            "foreignEndpoint",
+            new SupervisorStatusStore(ContinuityPaths.SupervisorStatusFile(root)).Read()?.State);
+        Assert.False(CanBind(publicPort));
+    }
+
     private async Task<SupervisorStatus> ReadRunningStatusAsync()
     {
         var store = new SupervisorStatusStore(ContinuityPaths.SupervisorStatusFile(root));

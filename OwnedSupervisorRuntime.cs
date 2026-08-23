@@ -18,12 +18,32 @@ internal static class OwnedSupervisorRuntime
             $"Supervising {LoopbackEndpoint.WebSocketUrl(publicPort)} with logs at {logPath}");
 
         var backendPort = Program.FindAvailablePort(publicPort);
-        var relay = LoopbackRelay.Start(
-            publicPort,
-            backendPort,
-            startGated: true,
-            reportError: exception => Console.Error.WriteLine(
-                $"Loopback relay connection failed: {exception.Message}"));
+        LoopbackRelay relay;
+        try
+        {
+            relay = LoopbackRelay.Start(
+                publicPort,
+                backendPort,
+                startGated: true,
+                reportError: exception => Console.Error.WriteLine(
+                    $"Loopback relay connection failed: {exception.Message}"));
+        }
+        catch (System.Net.Sockets.SocketException)
+        {
+            statusStore.Write(Program.NewSupervisorStatus(
+                "foreignEndpoint",
+                publicPort,
+                codexHome,
+                backendProcessId: null,
+                consecutiveFailures: 0,
+                lastExitCode: null,
+                nextRetryAtUtc: null,
+                "An endpoint not owned by this supervisor already uses the configured port."));
+            Console.Error.WriteLine(
+                "The configured loopback port is already owned by another endpoint; " +
+                "refusing to adopt its thread store.");
+            return 1;
+        }
         await using var ownedRelay = relay;
 
         using var process = startBackend(backendPort);
