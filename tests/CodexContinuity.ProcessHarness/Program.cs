@@ -38,7 +38,8 @@ internal static class Program
                 args.Length > 3
                     ? int.Parse(args[3], CultureInfo.InvariantCulture)
                     : 0,
-                args.Length > 4 ? args[4] : null).GetAwaiter().GetResult();
+                args.Length > 4 && !string.IsNullOrEmpty(args[4]) ? args[4] : null,
+                args.Length > 5 ? args[5] : null).GetAwaiter().GetResult();
         }
 
         if (args.FirstOrDefault() == "process-group-parent")
@@ -135,7 +136,8 @@ internal static class Program
         int port,
         string readyPath,
         int exitAfterRequests,
-        string? startGatePath)
+        string? startGatePath,
+        string? requestLogPath)
     {
         using var shutdown = new CancellationTokenSource();
         ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
@@ -160,8 +162,13 @@ internal static class Program
                     try
                     {
                         var ready = startGatePath is null || File.Exists(startGatePath);
-                        await RespondToReadyRequestAsync(client, port, ready, shutdown.Token);
-                        if (ready && ++requestCount == exitAfterRequests)
+                        var receivedRequest = await RespondToReadyRequestAsync(
+                            client,
+                            port,
+                            ready,
+                            requestLogPath,
+                            shutdown.Token);
+                        if (ready && receivedRequest && ++requestCount == exitAfterRequests)
                         {
                             return 17;
                         }
@@ -185,10 +192,11 @@ internal static class Program
         }
     }
 
-    private static async Task RespondToReadyRequestAsync(
+    private static async Task<bool> RespondToReadyRequestAsync(
         TcpClient client,
         int port,
         bool ready,
+        string? requestLogPath,
         CancellationToken cancellationToken)
     {
         await using var stream = client.GetStream();
@@ -198,6 +206,11 @@ internal static class Program
             detectEncodingFromByteOrderMarks: false,
             bufferSize: 1024,
             leaveOpen: true);
+        var requestLine = await reader.ReadLineAsync(cancellationToken);
+        if (string.IsNullOrEmpty(requestLine))
+        {
+            return false;
+        }
         string? line;
         do
         {
@@ -205,12 +218,18 @@ internal static class Program
         }
         while (!string.IsNullOrEmpty(line));
 
+        if (requestLogPath is not null)
+        {
+            await File.AppendAllLinesAsync(requestLogPath, [requestLine], cancellationToken);
+        }
+
         var body = Encoding.UTF8.GetBytes(ready ? $"backend:{port}" : $"not-ready:{port}");
         var header = Encoding.ASCII.GetBytes(
             $"HTTP/1.1 {(ready ? "200 OK" : "503 Service Unavailable")}\r\n" +
             $"Content-Length: {body.Length}\r\nConnection: close\r\n\r\n");
         await stream.WriteAsync(header, cancellationToken);
         await stream.WriteAsync(body, cancellationToken);
+        return true;
     }
 
     private static int RunProcessGroupParent(string testDirectory)

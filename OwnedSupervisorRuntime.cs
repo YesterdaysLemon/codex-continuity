@@ -1,4 +1,21 @@
+using System.Net.Sockets;
+
 namespace CodexContinuity;
+
+internal sealed record BackendOwnershipChecks(
+    Func<int, int, bool> IsListenerOwnedBy,
+    Func<TcpClient, int, bool> IsConnectionAcceptedBy)
+{
+    internal static BackendOwnershipChecks Native { get; } = new(
+        WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy,
+        WindowsTcpPortOwnership.IsLoopbackConnectionAcceptedBy);
+
+    internal void Validate()
+    {
+        ArgumentNullException.ThrowIfNull(IsListenerOwnedBy);
+        ArgumentNullException.ThrowIfNull(IsConnectionAcceptedBy);
+    }
+}
 
 internal static class OwnedSupervisorRuntime
 {
@@ -9,7 +26,8 @@ internal static class OwnedSupervisorRuntime
         Func<int, WindowsProcessGroup> startBackend,
         Func<int, TimeSpan>? delayForFailure = null,
         Func<TimeSpan, CancellationToken, Task<bool>>? waitForRestart = null,
-        TimeSpan? readinessTimeout = null)
+        TimeSpan? readinessTimeout = null,
+        BackendOwnershipChecks? ownershipChecks = null)
     {
         Directory.CreateDirectory(stateDirectory);
         var logPath = ContinuityPaths.AppServerLogFile(stateDirectory);
@@ -23,6 +41,8 @@ internal static class OwnedSupervisorRuntime
             failure,
             Random.Shared.NextDouble());
         waitForRestart ??= Program.WaitForRestartAsync;
+        ownershipChecks ??= BackendOwnershipChecks.Native;
+        ownershipChecks.Validate();
         var effectiveReadinessTimeout = readinessTimeout ?? TimeSpan.FromSeconds(20);
         if (effectiveReadinessTimeout <= TimeSpan.Zero ||
             effectiveReadinessTimeout > TimeSpan.FromSeconds(30))
@@ -62,6 +82,7 @@ internal static class OwnedSupervisorRuntime
         var backendPort = recovery.Kind == BackendRecoveryKind.Recovered
             ? recovery.Lease!.BackendPort
             : Program.FindAvailablePort(publicPort);
+        var activeBackendProcessId = 0;
         LoopbackRelay relay;
         try
         {
@@ -70,7 +91,14 @@ internal static class OwnedSupervisorRuntime
                 backendPort,
                 startGated: true,
                 reportError: exception => Console.Error.WriteLine(
-                    $"Loopback relay connection failed: {exception.Message}"));
+                    $"Loopback relay connection failed: {exception.Message}"),
+                backendAdmission: (candidatePort, connectedBackend) =>
+                {
+                    var processId = Volatile.Read(ref activeBackendProcessId);
+                    return processId > 0 && (connectedBackend is null
+                        ? ownershipChecks.IsListenerOwnedBy(candidatePort, processId)
+                        : ownershipChecks.IsConnectionAcceptedBy(connectedBackend, processId));
+                });
         }
         catch (System.Net.Sockets.SocketException exception) when (
             exception.SocketErrorCode == System.Net.Sockets.SocketError.AddressAlreadyInUse)
@@ -112,6 +140,7 @@ internal static class OwnedSupervisorRuntime
                 var leaseActive = recovered;
                 var preserveBackend = false;
                 var lifecycleCompleted = false;
+                Volatile.Write(ref activeBackendProcessId, process.Id);
                 try
                 {
                     var backendExecutable = recovered
@@ -135,37 +164,78 @@ internal static class OwnedSupervisorRuntime
                         shutdownToken);
                     if (ready && !process.HasExited)
                     {
-                        leaseStore.Write(new BackendLease(
-                            BackendLease.CurrentSchemaVersion,
-                            OwnerSupervisorProcessId: Environment.ProcessId,
-                            BackendProcessId: process.Id,
-                            PublicPort: publicPort,
-                            BackendPort: backendPort,
-                            BackendExecutable: backendExecutable,
-                            CodexHome: codexHome,
-                            BackendStartedAtUtc: backendStartedAtUtc));
-                        leaseActive = true;
-                        relay.OpenGate();
-                        statusStore.Write(Program.NewSupervisorStatus(
-                            "running",
-                            publicPort,
-                            codexHome,
+                        var ownership = InspectBackendOwnership(
+                            backendPort,
                             process.Id,
-                            consecutiveFailures,
-                            lastExitCode: null,
-                            nextRetryAtUtc: null,
-                            recovered
-                                ? "Recovered the verified private backend behind the stable endpoint."
-                                : $"Relaying {LoopbackEndpoint.WebSocketUrl(publicPort)} " +
-                                    "to an owned private backend."));
-                        Console.WriteLine($"Continuity backend ready (PID {process.Id}).");
-                        try
+                            ownershipChecks.IsListenerOwnedBy);
+                        if (ownership == BackendOwnership.Lost && !process.HasExited)
                         {
-                            await process.WaitForExitAsync(shutdownToken);
+                            await Task.WhenAny(
+                                process.WaitForExitAsync(),
+                                Task.Delay(TimeSpan.FromMilliseconds(100), shutdownToken));
                         }
-                        catch (OperationCanceledException) when (
-                            shutdownToken.IsCancellationRequested)
+                        if (ownership != BackendOwnership.Owned &&
+                            !process.HasExited &&
+                            !shutdownToken.IsCancellationRequested)
                         {
+                            preserveBackend = recovered && ownership == BackendOwnership.Unknown;
+                            publishStopped = false;
+                            var ownershipLost = ownership == BackendOwnership.Lost;
+                            var detail = ownershipLost
+                                ? "The private listener is not owned by the supervised backend."
+                                : recovered
+                                    ? "Private listener ownership could not be inspected; " +
+                                        "preserving the recovered backend lease."
+                                    : "Private listener ownership could not be inspected; " +
+                                        "refusing to publish the new backend.";
+                            statusStore.Write(Program.NewSupervisorStatus(
+                                ownershipLost
+                                    ? "backendOwnershipLost"
+                                    : "backendOwnershipUnknown",
+                                publicPort,
+                                codexHome,
+                                process.Id,
+                                consecutiveFailures,
+                                lastExitCode: null,
+                                nextRetryAtUtc: null,
+                                detail));
+                            Console.Error.WriteLine(detail);
+                            return 1;
+                        }
+                        if (!process.HasExited && !shutdownToken.IsCancellationRequested)
+                        {
+                            leaseStore.Write(new BackendLease(
+                                BackendLease.CurrentSchemaVersion,
+                                OwnerSupervisorProcessId: Environment.ProcessId,
+                                BackendProcessId: process.Id,
+                                PublicPort: publicPort,
+                                BackendPort: backendPort,
+                                BackendExecutable: backendExecutable,
+                                CodexHome: codexHome,
+                                BackendStartedAtUtc: backendStartedAtUtc));
+                            leaseActive = true;
+                            relay.OpenGate();
+                            statusStore.Write(Program.NewSupervisorStatus(
+                                "running",
+                                publicPort,
+                                codexHome,
+                                process.Id,
+                                consecutiveFailures,
+                                lastExitCode: null,
+                                nextRetryAtUtc: null,
+                                recovered
+                                    ? "Recovered the verified private backend behind the stable endpoint."
+                                    : $"Relaying {LoopbackEndpoint.WebSocketUrl(publicPort)} " +
+                                        "to an owned private backend."));
+                            Console.WriteLine($"Continuity backend ready (PID {process.Id}).");
+                            try
+                            {
+                                await process.WaitForExitAsync(shutdownToken);
+                            }
+                            catch (OperationCanceledException) when (
+                                shutdownToken.IsCancellationRequested)
+                            {
+                            }
                         }
                     }
                     else if (recovered &&
@@ -207,6 +277,7 @@ internal static class OwnedSupervisorRuntime
                     }
                     finally
                     {
+                        Volatile.Write(ref activeBackendProcessId, 0);
                         if (process.HasExited)
                         {
                             leaseStore.Delete();
@@ -318,5 +389,33 @@ internal static class OwnedSupervisorRuntime
             }
         }
         return 0;
+    }
+
+    private static BackendOwnership InspectBackendOwnership(
+        int port,
+        int processId,
+        Func<int, int, bool> isListenerOwnedBy)
+    {
+        try
+        {
+            return isListenerOwnedBy(port, processId)
+                ? BackendOwnership.Owned
+                : BackendOwnership.Lost;
+        }
+        catch (Exception exception) when (
+            exception is IOException or InvalidDataException or
+                System.ComponentModel.Win32Exception)
+        {
+            Console.Error.WriteLine(
+                $"Backend ownership inspection failed: {exception.Message}");
+            return BackendOwnership.Unknown;
+        }
+    }
+
+    private enum BackendOwnership
+    {
+        Owned,
+        Lost,
+        Unknown,
     }
 }
