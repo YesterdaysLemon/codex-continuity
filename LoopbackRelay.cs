@@ -36,6 +36,14 @@ internal sealed record LoopbackRelayOptions(
     }
 }
 
+internal sealed class RelayGateLease(LoopbackRelay relay, long ownedEpoch)
+{
+    internal bool TryOpen() => relay.TryOpenGate(ownedEpoch);
+
+    internal bool TryRetargetAndOpen(int backendPort) =>
+        relay.TryRetargetAndOpenGate(ownedEpoch, backendPort);
+}
+
 internal sealed class LoopbackRelay : IAsyncDisposable
 {
     private readonly object sync = new();
@@ -49,6 +57,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
     private readonly int publicPort;
     private int backendPort;
     private long gateEpoch;
+    private long? exclusiveGateEpoch;
     private bool gated;
     private bool disposed;
 
@@ -128,6 +137,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
             ThrowIfDisposed();
             gated = true;
             gateEpoch++;
+            exclusiveGateEpoch = null;
             snapshot = [.. connections];
         }
 
@@ -147,7 +157,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
             cancellationToken);
     }
 
-    internal async Task<long> CloseGateExclusivelyAsync()
+    internal async Task<RelayGateLease> CloseGateExclusivelyAsync()
     {
         RelayConnection[] snapshot;
         long ownedEpoch;
@@ -161,6 +171,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
             }
             gated = true;
             ownedEpoch = ++gateEpoch;
+            exclusiveGateEpoch = ownedEpoch;
             snapshot = [.. connections];
         }
 
@@ -173,14 +184,17 @@ internal sealed class LoopbackRelay : IAsyncDisposable
             await Task.WhenAll(snapshot.Select(connection => connection.Completion)).WaitAsync(
                 options.EffectiveGateDrainTimeout);
         }
-        return ownedEpoch;
+        return new RelayGateLease(this, ownedEpoch);
     }
 
     internal bool TryOpenGate(long ownedEpoch)
     {
         lock (sync)
         {
-            if (disposed || !gated || gateEpoch != ownedEpoch)
+            if (disposed ||
+                !gated ||
+                gateEpoch != ownedEpoch ||
+                exclusiveGateEpoch != ownedEpoch)
             {
                 return false;
             }
@@ -190,6 +204,38 @@ internal sealed class LoopbackRelay : IAsyncDisposable
                     "The relay gate cannot open until old connections have drained.");
             }
             gated = false;
+            exclusiveGateEpoch = null;
+            gateEpoch++;
+            return true;
+        }
+    }
+
+    internal bool TryRetargetAndOpenGate(long ownedEpoch, int port)
+    {
+        LoopbackEndpoint.ValidatePort(port);
+        lock (sync)
+        {
+            if (disposed ||
+                !gated ||
+                gateEpoch != ownedEpoch ||
+                exclusiveGateEpoch != ownedEpoch)
+            {
+                return false;
+            }
+            if (port == publicPort)
+            {
+                throw new ArgumentException(
+                    "Relay and backend ports must be different.",
+                    nameof(port));
+            }
+            if (connections.Count != 0)
+            {
+                throw new InvalidOperationException(
+                    "The relay gate cannot retarget until old connections have drained.");
+            }
+            backendPort = port;
+            gated = false;
+            exclusiveGateEpoch = null;
             gateEpoch++;
             return true;
         }
@@ -212,6 +258,11 @@ internal sealed class LoopbackRelay : IAsyncDisposable
                 throw new InvalidOperationException(
                     "The relay backend can only change behind a closed, drained gate.");
             }
+            if (exclusiveGateEpoch is not null)
+            {
+                throw new InvalidOperationException(
+                    "The relay backend is owned by an exclusive gate transition.");
+            }
             backendPort = port;
         }
     }
@@ -225,6 +276,11 @@ internal sealed class LoopbackRelay : IAsyncDisposable
             {
                 throw new InvalidOperationException(
                     "The relay gate cannot open until old connections have drained.");
+            }
+            if (exclusiveGateEpoch is not null)
+            {
+                throw new InvalidOperationException(
+                    "The relay gate is owned by an exclusive gate transition.");
             }
             gated = false;
             gateEpoch++;

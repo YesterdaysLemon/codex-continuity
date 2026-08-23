@@ -1,8 +1,12 @@
 namespace CodexContinuity;
 
+internal sealed record GatedHandoffDecision(
+    ContinuityHandoffPlan Plan,
+    RelayGateLease? GateLease);
+
 internal static class GatedHandoffTransition
 {
-    internal static async Task<ContinuityHandoffPlan> CloseAndRecomputeAsync(
+    internal static async Task<GatedHandoffDecision> CloseAndRecomputeAsync(
         LoopbackRelay relay,
         Func<Task<ContinuityHandoffPlan>> recomputePlan,
         TimeSpan? recomputeTimeout = null)
@@ -16,19 +20,21 @@ internal static class GatedHandoffTransition
         }
 
         var keepGateClosed = false;
-        long? ownedGateEpoch = null;
+        RelayGateLease? gateLease = null;
         try
         {
-            ownedGateEpoch = await relay.CloseGateExclusivelyAsync();
+            gateLease = await relay.CloseGateExclusivelyAsync();
             var plan = await recomputePlan().WaitAsync(effectiveTimeout);
             keepGateClosed = plan.TransitionReady;
-            return plan;
+            return new GatedHandoffDecision(
+                plan,
+                keepGateClosed ? gateLease : null);
         }
         finally
         {
-            if (!keepGateClosed && ownedGateEpoch is { } epoch)
+            if (!keepGateClosed)
             {
-                relay.TryOpenGate(epoch);
+                gateLease?.TryOpen();
             }
         }
     }
