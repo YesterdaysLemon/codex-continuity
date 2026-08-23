@@ -13,6 +13,7 @@ internal static class Program
     private const int StatusControlCExit = unchecked((int)0xC000013A);
     private const string UpdateManifestUrl =
         "https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json";
+    private static readonly DateTimeOffset ProcessStartedAtUtc = GetProcessStartedAtUtc();
 
     public static async Task<int> Main(string[] args)
     {
@@ -219,7 +220,7 @@ internal static class Program
                 ["status"] = thread.Status,
             }).ToArray()),
             ["supervisor"] = JsonSerializer.SerializeToNode(
-                LoadSupervisorStatus(),
+                SupervisorStatusForDiagnostics(LoadSupervisorStatus()),
                 JsonOptions),
         };
         Console.WriteLine(result.ToJsonString(JsonOptions));
@@ -471,7 +472,9 @@ internal static class Program
             lastExitCode,
             DateTimeOffset.UtcNow,
             nextRetryAtUtc,
-            detail);
+            detail,
+            ProcessStartedAtUtc,
+            Environment.ProcessPath);
 
     private static async Task AwaitLogPumpsAsync(params Task[] pumps)
     {
@@ -809,6 +812,12 @@ internal static class Program
         ContinuityPaths.LegacyOpenAiStateDirectory,
     ];
 
+    private static DateTimeOffset GetProcessStartedAtUtc()
+    {
+        using var process = Process.GetCurrentProcess();
+        return process.StartTime.ToUniversalTime();
+    }
+
     internal static async Task<UninstallReconnectPolicy> ResolveUninstallReconnectPolicyAsync(
         int? managedInstalledPort,
         int? legacyInstalledPort,
@@ -922,6 +931,23 @@ internal static class Program
         new SupervisorStatusStore(
             ContinuityPaths.SupervisorStatusFile(
                 ContinuityPaths.LegacyOpenAiStateDirectory)).Read();
+
+    internal static SupervisorStatus? SupervisorStatusForDiagnostics(SupervisorStatus? status) =>
+        status is null
+            ? null
+            : status with
+            {
+                CodexHome = BoundedDiagnosticText(status.CodexHome, 512),
+                Detail = BoundedDiagnosticText(status.Detail, 1024),
+                SupervisorExecutable = status.SupervisorExecutable is null
+                    ? null
+                    : BoundedDiagnosticText(Path.GetFileName(status.SupervisorExecutable), 260),
+            };
+
+    private static string? BoundedDiagnosticText(string? value, int maximumCharacters) =>
+        value is null || value.Length <= maximumCharacters
+            ? value
+            : $"{value[..(maximumCharacters - 1)]}…";
 
     private static Process StartSupervisor(string executable, int port)
         => DetachedProcessLauncher.Start(

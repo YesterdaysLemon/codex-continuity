@@ -231,52 +231,168 @@ internal sealed record SupervisorStatus(
     int? LastExitCode,
     DateTimeOffset UpdatedAtUtc,
     DateTimeOffset? NextRetryAtUtc,
-    string? Detail);
+    string? Detail,
+    DateTimeOffset? SupervisorStartedAtUtc = null,
+    string? SupervisorExecutable = null);
+
+internal enum SupervisorStatusLoadKind
+{
+    Missing,
+    Loaded,
+    Unsafe,
+}
+
+internal sealed record SupervisorStatusLoadResult(
+    SupervisorStatusLoadKind Kind,
+    SupervisorStatus? Status);
 
 internal sealed class SupervisorStatusStore(string path)
 {
+    internal const int MaximumStatusBytes = 512 * 1024;
+    private const int MaximumStateCharacters = 64;
+    private const int MaximumPathCharacters = 32767;
+    private const int MaximumDetailCharacters = 4096;
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = true,
     };
 
-    internal SupervisorStatus? Read()
+    internal SupervisorStatusLoadResult Load()
     {
         try
         {
-            return File.Exists(path)
-                ? JsonSerializer.Deserialize<SupervisorStatus>(
-                    File.ReadAllText(path),
-                    SerializerOptions)
-                : null;
+            var status = JsonSerializer.Deserialize<SupervisorStatus>(
+                ReadStatusText(),
+                SerializerOptions);
+            return status is null || !IsStructurallyValid(status)
+                ? new(SupervisorStatusLoadKind.Unsafe, Status: null)
+                : new(SupervisorStatusLoadKind.Loaded, status);
         }
-        catch (JsonException)
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
         {
-            return null;
+            return new(SupervisorStatusLoadKind.Missing, Status: null);
         }
-        catch (IOException)
+        catch (Exception exception) when (
+            exception is JsonException or IOException or UnauthorizedAccessException or
+                DecoderFallbackException or InvalidDataException)
         {
-            return null;
+            return new(SupervisorStatusLoadKind.Unsafe, Status: null);
         }
     }
 
+    internal SupervisorStatus? Read() => Load().Status;
+
+    private string ReadStatusText()
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        if (stream.Length > MaximumStatusBytes)
+        {
+            throw new InvalidDataException(
+                $"Supervisor status exceeds the {MaximumStatusBytes}-byte safety limit.");
+        }
+        var bytes = new byte[MaximumStatusBytes + 1];
+        var total = 0;
+        while (total < bytes.Length)
+        {
+            var read = stream.Read(bytes, total, bytes.Length - total);
+            if (read == 0)
+            {
+                break;
+            }
+            total += read;
+        }
+        if (total > MaximumStatusBytes)
+        {
+            throw new InvalidDataException(
+                $"Supervisor status exceeds the {MaximumStatusBytes}-byte safety limit.");
+        }
+        return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true)
+            .GetString(bytes, 0, total);
+    }
+
+    private static bool IsStructurallyValid(SupervisorStatus status) =>
+        !string.IsNullOrWhiteSpace(status.State) &&
+        status.State.Length <= MaximumStateCharacters &&
+        status.SupervisorProcessId > 0 &&
+        (status.BackendProcessId is null or > 0) &&
+        status.Port is >= 1 and <= 65535 &&
+        status.ConsecutiveFailures >= 0 &&
+        status.UpdatedAtUtc != default &&
+        IsBounded(status.CodexHome, MaximumPathCharacters) &&
+        IsBounded(status.Detail, MaximumDetailCharacters) &&
+        (status.SupervisorStartedAtUtc is null && status.SupervisorExecutable is null ||
+            status.SupervisorStartedAtUtc is { } supervisorStartedAtUtc &&
+            supervisorStartedAtUtc != default &&
+            status.SupervisorExecutable is { } supervisorExecutable &&
+            !string.IsNullOrWhiteSpace(supervisorExecutable) &&
+            IsBounded(supervisorExecutable, MaximumPathCharacters) &&
+            Path.IsPathFullyQualified(supervisorExecutable));
+
+    private static bool IsBounded(string? value, int maximumCharacters) =>
+        value is null || value.Length <= maximumCharacters;
+
     internal void Write(SupervisorStatus status)
     {
+        if (!IsStructurallyValid(status))
+        {
+            throw new InvalidDataException("Supervisor status is structurally invalid.");
+        }
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(status, SerializerOptions);
+        if (bytes.Length > MaximumStatusBytes)
+        {
+            throw new InvalidDataException(
+                $"Supervisor status exceeds the {MaximumStatusBytes}-byte safety limit.");
+        }
         var directory = Path.GetDirectoryName(path)
             ?? throw new InvalidOperationException($"Status path has no directory: {path}");
         Directory.CreateDirectory(directory);
         var temporaryPath = $"{path}.tmp-{Guid.NewGuid():N}";
         try
         {
-            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(status, SerializerOptions));
-            File.Move(temporaryPath, path, overwrite: true);
+            File.WriteAllBytes(temporaryPath, bytes);
+            ReplaceStatusFile(temporaryPath);
         }
         finally
         {
             if (File.Exists(temporaryPath))
             {
                 File.Delete(temporaryPath);
+            }
+        }
+    }
+
+    private void ReplaceStatusFile(string temporaryPath)
+    {
+        const int maximumAttempts = 20;
+        for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    File.Replace(
+                        temporaryPath,
+                        path,
+                        destinationBackupFileName: null,
+                        ignoreMetadataErrors: true);
+                }
+                else
+                {
+                    File.Move(temporaryPath, path);
+                }
+                return;
+            }
+            catch (Exception exception) when (
+                attempt < maximumAttempts &&
+                exception is IOException or UnauthorizedAccessException)
+            {
+                Thread.Sleep(TimeSpan.FromMilliseconds(5));
             }
         }
     }
