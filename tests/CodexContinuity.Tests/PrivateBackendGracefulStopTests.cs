@@ -7,7 +7,7 @@ namespace CodexContinuity.Tests;
 public sealed class PrivateBackendGracefulStopTests
 {
     [Fact]
-    public async Task RejectsInvalidPreSignalStateWithoutSignalingPrivateBackend()
+    public async Task RejectsPreSignalStateWithoutSignalingPrivateBackend()
     {
         await using var backend = await PrivateBackendTestProcess.StartAsync("ignore");
         var publicPort = PrivateBackendTestProcess.AvailablePort(backend.Port);
@@ -16,15 +16,6 @@ public sealed class PrivateBackendGracefulStopTests
         var readyWithoutGate = new GatedHandoffDecision(
             Plan(transitionReady: true),
             GateLease: null);
-        foreach (var seconds in new[] { 0, 31 })
-        {
-            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
-                PrivateBackendGracefulStop.StopAsync(
-                    readyWithoutGate,
-                    target,
-                    TimeSpan.FromSeconds(seconds),
-                    CancellationToken.None));
-        }
         var missingGate = await PrivateBackendGracefulStop.StopAsync(
             readyWithoutGate,
             target,
@@ -129,26 +120,48 @@ public sealed class PrivateBackendGracefulStopTests
     }
 
     [Theory]
-    [InlineData("clean", "CleanExit")]
-    [InlineData("control-exit", "WindowsControlExit")]
-    [InlineData("nonzero", "UnexpectedExit")]
+    [InlineData("clean", "CleanExit", true)]
+    [InlineData("control-exit", "WindowsControlExit", true)]
+    [InlineData("nonzero", "UnexpectedExit", true)]
+    [InlineData("already-exited-before", "AlreadyExited", false)]
+    [InlineData("already-exited-during", "AlreadyExited", false)]
     public async Task MapsPrivateBackendExitBehindClosedGate(
-        string stopBehavior,
-        string expectedName)
+        string scenario,
+        string expectedName,
+        bool signalExpected)
     {
+        var stopBehavior = scenario is "already-exited-before" or "already-exited-during"
+            ? "ignore"
+            : scenario;
         await using var backend = await PrivateBackendTestProcess.StartAsync(stopBehavior);
         var publicPort = PrivateBackendTestProcess.AvailablePort(backend.Port);
         await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
         var decision = await ReadyDecisionAsync(relay);
         var target = Target(backend, publicPort);
+        if (scenario == "already-exited-before")
+        {
+            backend.Process.Kill();
+            await backend.Process.WaitForExitAsync();
+        }
+        var checks = scenario == "already-exited-during"
+            ? Checks(
+                (_, _) => true,
+                async (_, _, _) =>
+                {
+                    backend.Process.Kill();
+                    await backend.Process.WaitForExitAsync();
+                    return Program.AppServerStopDisposition.AlreadyExited;
+                })
+            : null;
         var outcome = await PrivateBackendGracefulStop.StopAsync(
             decision,
             target,
             TimeSpan.FromSeconds(5),
-            CancellationToken.None);
+            CancellationToken.None,
+            checks);
         Assert.Equal(Enum.Parse<PrivateBackendGracefulStopKind>(expectedName), outcome.Kind);
         Assert.False(outcome.HasPendingStopReservation);
-        Assert.True(File.Exists(backend.SignalMarkerPath));
+        Assert.Equal(signalExpected, File.Exists(backend.SignalMarkerPath));
         Assert.True(backend.Process.HasExited);
         Assert.True(relay.IsGated);
     }

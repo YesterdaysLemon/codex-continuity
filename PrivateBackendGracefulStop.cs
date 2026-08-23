@@ -37,7 +37,6 @@ internal sealed record PrivateBackendGracefulStopChecks(
 internal sealed class PrivateBackendGracefulStopResult
 {
     private readonly RelayBackendStopReservation? pendingStopReservation;
-
     private PrivateBackendGracefulStopResult(
         PrivateBackendGracefulStopKind kind,
         RelayBackendStopReservation? pendingStopReservation)
@@ -45,14 +44,10 @@ internal sealed class PrivateBackendGracefulStopResult
         Kind = kind;
         this.pendingStopReservation = pendingStopReservation;
     }
-
     internal PrivateBackendGracefulStopKind Kind { get; }
-
     internal bool HasPendingStopReservation => pendingStopReservation?.IsCurrent == true;
-
     internal static PrivateBackendGracefulStopResult Settled(
         PrivateBackendGracefulStopKind kind) => new(kind, pendingStopReservation: null);
-
     internal static PrivateBackendGracefulStopResult Pending(
         PrivateBackendGracefulStopKind kind,
         RelayBackendStopReservation pendingStopReservation) => new(
@@ -83,55 +78,47 @@ internal static class PrivateBackendGracefulStop
 
         if (!decision.Plan.TransitionReady || !decision.Plan.BackendReady)
         {
-            return PrivateBackendGracefulStopResult.Settled(
-                PrivateBackendGracefulStopKind.BlockedByPlan);
+            return Settled(PrivateBackendGracefulStopKind.BlockedByPlan);
         }
         if (decision.GateLease is null)
         {
-            return PrivateBackendGracefulStopResult.Settled(
-                PrivateBackendGracefulStopKind.GateUnavailable);
+            return Settled(PrivateBackendGracefulStopKind.GateUnavailable);
         }
 
         var reservation = decision.GateLease.TryReserveBackendStop();
         if (reservation is null)
         {
-            return PrivateBackendGracefulStopResult.Settled(
-                PrivateBackendGracefulStopKind.GateUnavailable);
+            return Settled(PrivateBackendGracefulStopKind.GateUnavailable);
         }
         var keepReservation = false;
         try
         {
             if (reservation.BackendPort != target.BackendPort)
             {
-                return PrivateBackendGracefulStopResult.Settled(
-                    PrivateBackendGracefulStopKind.BackendIdentityMismatch);
+                return Settled(PrivateBackendGracefulStopKind.BackendIdentityMismatch);
             }
 
             try
             {
                 if (target.HasExited)
                 {
-                    return PrivateBackendGracefulStopResult.Settled(
-                        PrivateBackendGracefulStopKind.AlreadyExited);
+                    return Settled(PrivateBackendGracefulStopKind.AlreadyExited);
                 }
                 if (!checks.IsListenerOwnedBy(target.BackendPort, target.ProcessId))
                 {
-                    return PrivateBackendGracefulStopResult.Settled(
-                        PrivateBackendGracefulStopKind.BackendOwnershipLost);
+                    return Settled(PrivateBackendGracefulStopKind.BackendOwnershipLost);
                 }
             }
             catch (Exception exception) when (
                 exception is Win32Exception or IOException or InvalidDataException)
             {
-                return PrivateBackendGracefulStopResult.Settled(
-                    PrivateBackendGracefulStopKind.Unknown);
+                return Settled(PrivateBackendGracefulStopKind.Unknown);
             }
 
             cancellationToken.ThrowIfCancellationRequested();
             if (!reservation.IsCurrent)
             {
-                return PrivateBackendGracefulStopResult.Settled(
-                    PrivateBackendGracefulStopKind.GateUnavailable);
+                return Settled(PrivateBackendGracefulStopKind.GateUnavailable);
             }
 
             try
@@ -143,11 +130,9 @@ internal static class PrivateBackendGracefulStop
                 if (disposition == Program.AppServerStopDisposition.TimedOut)
                 {
                     keepReservation = true;
-                    return PrivateBackendGracefulStopResult.Pending(
-                        PrivateBackendGracefulStopKind.TimedOut,
-                        reservation);
+                    return Pending(PrivateBackendGracefulStopKind.TimedOut, reservation);
                 }
-                return PrivateBackendGracefulStopResult.Settled(disposition switch
+                return Settled(disposition switch
                 {
                     Program.AppServerStopDisposition.AlreadyExited =>
                         PrivateBackendGracefulStopKind.AlreadyExited,
@@ -164,16 +149,12 @@ internal static class PrivateBackendGracefulStop
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 keepReservation = true;
-                return PrivateBackendGracefulStopResult.Pending(
-                    PrivateBackendGracefulStopKind.CallerCanceled,
-                    reservation);
+                return Pending(PrivateBackendGracefulStopKind.CallerCanceled, reservation);
             }
             catch (Win32Exception)
             {
                 keepReservation = true;
-                return PrivateBackendGracefulStopResult.Pending(
-                    PrivateBackendGracefulStopKind.Unknown,
-                    reservation);
+                return Pending(PrivateBackendGracefulStopKind.Unknown, reservation);
             }
         }
         finally
@@ -184,4 +165,12 @@ internal static class PrivateBackendGracefulStop
             }
         }
     }
+
+    private static PrivateBackendGracefulStopResult Settled(
+        PrivateBackendGracefulStopKind kind) => PrivateBackendGracefulStopResult.Settled(kind);
+
+    private static PrivateBackendGracefulStopResult Pending(
+        PrivateBackendGracefulStopKind kind,
+        RelayBackendStopReservation reservation) =>
+        PrivateBackendGracefulStopResult.Pending(kind, reservation);
 }
