@@ -37,27 +37,37 @@ internal sealed record PrivateBackendGracefulStopChecks(
 internal sealed class PrivateBackendGracefulStopResult
 {
     private RelayBackendStopReservation? pendingStopReservation;
+    private readonly PrivateBackendStopTarget? pendingStopTarget;
     private PrivateBackendGracefulStopResult(
         PrivateBackendGracefulStopKind kind,
-        RelayBackendStopReservation? pendingStopReservation)
+        RelayBackendStopReservation? pendingStopReservation,
+        PrivateBackendStopTarget? pendingStopTarget)
     {
         Kind = kind;
         this.pendingStopReservation = pendingStopReservation;
+        this.pendingStopTarget = pendingStopTarget;
     }
     internal PrivateBackendGracefulStopKind Kind { get; }
     internal bool HasPendingStopReservation =>
         Volatile.Read(ref pendingStopReservation)?.IsCurrent == true;
-    internal RelayBackendStopReservation? TryTakeTimedOutReservation() =>
-        Kind == PrivateBackendGracefulStopKind.TimedOut
+    internal RelayBackendStopReservation? TryTakeTimedOutReservation(
+        PrivateBackendStopTarget target) =>
+        Kind == PrivateBackendGracefulStopKind.TimedOut &&
+        ReferenceEquals(pendingStopTarget, target)
             ? Interlocked.Exchange(ref pendingStopReservation, null)
             : null;
     internal static PrivateBackendGracefulStopResult Settled(
-        PrivateBackendGracefulStopKind kind) => new(kind, pendingStopReservation: null);
+        PrivateBackendGracefulStopKind kind) => new(
+            kind,
+            pendingStopReservation: null,
+            pendingStopTarget: null);
     internal static PrivateBackendGracefulStopResult Pending(
         PrivateBackendGracefulStopKind kind,
-        RelayBackendStopReservation pendingStopReservation) => new(
+        RelayBackendStopReservation pendingStopReservation,
+        PrivateBackendStopTarget pendingStopTarget) => new(
             kind,
-            pendingStopReservation);
+            pendingStopReservation,
+            pendingStopTarget);
 }
 
 internal static class PrivateBackendGracefulStop
@@ -135,7 +145,10 @@ internal static class PrivateBackendGracefulStop
                 if (disposition == Program.AppServerStopDisposition.TimedOut)
                 {
                     keepReservation = true;
-                    return Pending(PrivateBackendGracefulStopKind.TimedOut, reservation);
+                    return Pending(
+                        PrivateBackendGracefulStopKind.TimedOut,
+                        reservation,
+                        target);
                 }
                 return Settled(disposition switch
                 {
@@ -154,12 +167,15 @@ internal static class PrivateBackendGracefulStop
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 keepReservation = true;
-                return Pending(PrivateBackendGracefulStopKind.CallerCanceled, reservation);
+                return Pending(
+                    PrivateBackendGracefulStopKind.CallerCanceled,
+                    reservation,
+                    target);
             }
             catch (Win32Exception)
             {
                 keepReservation = true;
-                return Pending(PrivateBackendGracefulStopKind.Unknown, reservation);
+                return Pending(PrivateBackendGracefulStopKind.Unknown, reservation, target);
             }
         }
         finally
@@ -176,6 +192,7 @@ internal static class PrivateBackendGracefulStop
 
     private static PrivateBackendGracefulStopResult Pending(
         PrivateBackendGracefulStopKind kind,
-        RelayBackendStopReservation reservation) =>
-        PrivateBackendGracefulStopResult.Pending(kind, reservation);
+        RelayBackendStopReservation reservation,
+        PrivateBackendStopTarget target) =>
+        PrivateBackendGracefulStopResult.Pending(kind, reservation, target);
 }

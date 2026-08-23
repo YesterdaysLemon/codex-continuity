@@ -103,7 +103,7 @@ internal static class PrivateBackendForcedStop
         {
             return Settled(PrivateBackendForcedStopKind.GateUnavailable);
         }
-        var reservation = gracefulResult.TryTakeTimedOutReservation();
+        var reservation = gracefulResult.TryTakeTimedOutReservation(target);
         if (reservation is null)
         {
             return Settled(PrivateBackendForcedStopKind.GateUnavailable);

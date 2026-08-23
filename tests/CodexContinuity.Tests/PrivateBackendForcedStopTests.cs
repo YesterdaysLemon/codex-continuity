@@ -157,21 +157,17 @@ public sealed class PrivateBackendForcedStopTests
     [Theory]
     [InlineData("timeout", "TimedOut")]
     [InlineData("force-error", "Unknown")]
-    [InlineData("mismatched-exited", "GateUnavailable")]
+    [InlineData("mismatched-target", "GateUnavailable")]
     public async Task UnsettledForceRetainsReservation(
         string scenario,
         string expectedName)
     {
         await using var fixture = await StopFixture.CreateAsync();
-        await using var mismatchedFixture = scenario == "mismatched-exited"
-            ? await StopFixture.CreateAsync()
-            : null;
-        var target = mismatchedFixture?.Target ?? fixture.Target;
-        if (mismatchedFixture is not null)
-        {
-            mismatchedFixture.Backend.Process.Kill();
-            await mismatchedFixture.Backend.Process.WaitForExitAsync();
-        }
+        var target = scenario == "mismatched-target"
+            ? PrivateBackendStopTarget.FromOwnedLease(
+                fixture.Backend.CreateLease(fixture.PublicPort),
+                fixture.Backend.Process)
+            : fixture.Target;
         var waitCalled = false;
         var checks = Checks(
             tryForceStop: _ => scenario == "force-error"
@@ -190,7 +186,8 @@ public sealed class PrivateBackendForcedStopTests
             target: target);
 
         Assert.Equal(Enum.Parse<PrivateBackendForcedStopKind>(expectedName), outcome.Kind);
-        Assert.True(outcome.HasPendingStopReservation);
+        Assert.Equal(scenario != "mismatched-target", outcome.HasPendingStopReservation);
+        Assert.Equal(scenario == "mismatched-target", fixture.GracefulResult.HasPendingStopReservation);
         Assert.Equal(scenario == "timeout", waitCalled);
         await AssertNoForceAsync(fixture);
         AssertGateProtected(fixture);
@@ -257,7 +254,8 @@ public sealed class PrivateBackendForcedStopTests
                     ?? throw new InvalidOperationException("Could not reserve test backend stop.");
                 var gracefulResult = PrivateBackendGracefulStopResult.Pending(
                     PrivateBackendGracefulStopKind.TimedOut,
-                    reservation);
+                    reservation,
+                    target);
                 return new StopFixture(
                     backend,
                     publicPort,
