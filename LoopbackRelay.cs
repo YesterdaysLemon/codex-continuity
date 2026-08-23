@@ -48,6 +48,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
     private readonly Task acceptLoop;
     private readonly int publicPort;
     private int backendPort;
+    private long gateEpoch;
     private bool gated;
     private bool disposed;
 
@@ -126,6 +127,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         {
             ThrowIfDisposed();
             gated = true;
+            gateEpoch++;
             snapshot = [.. connections];
         }
 
@@ -143,6 +145,54 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         await Task.WhenAll(snapshot.Select(connection => connection.Completion)).WaitAsync(
             options.EffectiveGateDrainTimeout,
             cancellationToken);
+    }
+
+    internal async Task<long> CloseGateExclusivelyAsync()
+    {
+        RelayConnection[] snapshot;
+        long ownedEpoch;
+        lock (sync)
+        {
+            ThrowIfDisposed();
+            if (gated)
+            {
+                throw new InvalidOperationException(
+                    "The relay gate is already owned by another safety boundary.");
+            }
+            gated = true;
+            ownedEpoch = ++gateEpoch;
+            snapshot = [.. connections];
+        }
+
+        foreach (var connection in snapshot)
+        {
+            connection.Abort();
+        }
+        if (snapshot.Length != 0)
+        {
+            await Task.WhenAll(snapshot.Select(connection => connection.Completion)).WaitAsync(
+                options.EffectiveGateDrainTimeout);
+        }
+        return ownedEpoch;
+    }
+
+    internal bool TryOpenGate(long ownedEpoch)
+    {
+        lock (sync)
+        {
+            if (disposed || !gated || gateEpoch != ownedEpoch)
+            {
+                return false;
+            }
+            if (connections.Count != 0)
+            {
+                throw new InvalidOperationException(
+                    "The relay gate cannot open until old connections have drained.");
+            }
+            gated = false;
+            gateEpoch++;
+            return true;
+        }
     }
 
     internal void SetBackendPort(int port)
@@ -177,6 +227,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
                     "The relay gate cannot open until old connections have drained.");
             }
             gated = false;
+            gateEpoch++;
         }
     }
 

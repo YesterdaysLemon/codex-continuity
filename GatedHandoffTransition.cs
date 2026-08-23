@@ -16,19 +16,19 @@ internal static class GatedHandoffTransition
         }
 
         var keepGateClosed = false;
+        long? ownedGateEpoch = null;
         try
         {
-            await relay.CloseGateAsync();
+            ownedGateEpoch = await relay.CloseGateExclusivelyAsync();
             var plan = await recomputePlan().WaitAsync(effectiveTimeout);
             keepGateClosed = plan.TransitionReady;
             return plan;
         }
         finally
         {
-            if (!keepGateClosed && relay.IsGated)
+            if (!keepGateClosed && ownedGateEpoch is { } epoch)
             {
-                await relay.CloseGateAsync();
-                relay.OpenGate();
+                relay.TryOpenGate(epoch);
             }
         }
     }

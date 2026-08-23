@@ -99,6 +99,52 @@ public sealed class LoopbackRelayTests
     }
 
     [Fact]
+    public async Task BlockedTransitionCannotReopenAConcurrentSafetyGate()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+        var recomputationStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishRecomputation = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var transition = GatedHandoffTransition.CloseAndRecomputeAsync(
+            relay,
+            async () =>
+            {
+                recomputationStarted.SetResult();
+                await finishRecomputation.Task;
+                return Plan(transitionReady: false);
+            });
+        await recomputationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await relay.CloseGateAsync();
+        finishRecomputation.SetResult();
+
+        Assert.False((await transition.WaitAsync(TimeSpan.FromSeconds(5))).TransitionReady);
+        Assert.True(relay.IsGated);
+        using var refused = await ConnectAsync(publicPort);
+        await AssertConnectionClosedAsync(refused);
+    }
+
+    [Fact]
+    public async Task TransitionRejectsAGateAlreadyOwnedByAnotherSafetyBoundary()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port, startGated: true);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            GatedHandoffTransition.CloseAndRecomputeAsync(
+                relay,
+                () => Task.FromResult(Plan(transitionReady: false))));
+
+        Assert.True(relay.IsGated);
+        using var refused = await ConnectAsync(publicPort);
+        await AssertConnectionClosedAsync(refused);
+    }
+
+    [Fact]
     public async Task FailedRecomputationReopensRelayWithoutStoppingBackend()
     {
         await using var backend = new TaggedBackend("backend:");
