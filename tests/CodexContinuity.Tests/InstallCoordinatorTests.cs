@@ -14,6 +14,90 @@ public sealed class InstallCoordinatorTests : IDisposable
         $"codex-continuity-install-tests-{Guid.NewGuid():N}");
 
     [Fact]
+    public void InstallStateStoreBoundsValidLoadsAndPreservesStateOnOversizedSave()
+    {
+        const int maximumStateBytes = 512 * 1024;
+        var state = CreateCoordinator(new FakeInstallPlatform()).Install(
+            CreateSource("version-one"),
+            45123,
+            TrayInstallMode.Disabled).State;
+        var path = ContinuityPaths.InstallStateFile(root);
+        var store = new InstallStateStore(path);
+        var validJson = File.ReadAllText(path);
+        File.WriteAllText(
+            path,
+            validJson.PadRight(maximumStateBytes + 1),
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+        Assert.Throws<InvalidDataException>(store.Load);
+
+        store.Save(state);
+        var persisted = File.ReadAllBytes(path);
+        var oversized = state with
+        {
+            StartupCommand = state.StartupCommand with
+            {
+                AppliedValue = new string('\u754c', maximumStateBytes),
+            },
+        };
+        Assert.Throws<InvalidDataException>(() => store.Save(oversized));
+        Assert.Equal(persisted, File.ReadAllBytes(path));
+    }
+
+    [Fact]
+    public void InstallStateStoreAtomicallyPublishesACompleteReplacement()
+    {
+        var state = CreateCoordinator(new FakeInstallPlatform()).Install(
+            CreateSource("version-one"),
+            45123,
+            TrayInstallMode.Disabled).State;
+        var path = ContinuityPaths.InstallStateFile(root);
+        var store = new InstallStateStore(path);
+        var previousBytes = File.ReadAllBytes(path);
+        using var previousSnapshot = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        var replacement = state with { InstalledAtUtc = state.InstalledAtUtc.AddMinutes(1) };
+
+        store.Save(replacement);
+
+        var observedPrevious = new byte[previousBytes.Length];
+        previousSnapshot.ReadExactly(observedPrevious);
+        Assert.Equal(previousBytes, observedPrevious);
+        Assert.Equal(replacement, store.Load());
+        Assert.False(File.Exists(BoundedStateFile.TemporaryPath(path)));
+        Assert.False(File.Exists(BoundedStateFile.BackupPath(path)));
+        Assert.False(File.Exists(BoundedStateFile.WritingPath(path)));
+
+        File.Move(path, BoundedStateFile.BackupPath(path));
+        Assert.Equal(replacement, store.Load());
+    }
+
+    [Fact]
+    public void InstallStateDeleteCannotBeUndoneByRecoveryArtifacts()
+    {
+        CreateCoordinator(new FakeInstallPlatform()).Install(
+            CreateSource("version-one"),
+            45123,
+            TrayInstallMode.Disabled);
+        var path = ContinuityPaths.InstallStateFile(root);
+        var store = new InstallStateStore(path);
+        File.WriteAllText(BoundedStateFile.WritingPath(path), "partial");
+        File.WriteAllText(BoundedStateFile.TemporaryPath(path), "replacement");
+        File.WriteAllText(BoundedStateFile.BackupPath(path), "backup");
+
+        store.Delete();
+
+        Assert.Null(store.Load());
+        Assert.False(File.Exists(path));
+        Assert.False(File.Exists(BoundedStateFile.WritingPath(path)));
+        Assert.False(File.Exists(BoundedStateFile.TemporaryPath(path)));
+        Assert.False(File.Exists(BoundedStateFile.BackupPath(path)));
+    }
+
+    [Fact]
     public void EnumeratesCurrentPreviousAndLegacySupervisorExecutables()
     {
         var currentRoot = Path.Combine(root, "current");

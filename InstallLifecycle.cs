@@ -150,7 +150,7 @@ internal interface IInstallPlatform
 
 internal sealed class InstallStateStore(string path)
 {
-    private const int MaximumDiscoveryStateBytes = 512 * 1024;
+    private const int MaximumStateBytes = 512 * 1024;
     private const int MaximumPathCharacters = 32767;
     internal const int CurrentSchemaVersion = 4;
 
@@ -162,45 +162,26 @@ internal sealed class InstallStateStore(string path)
 
     internal InstallState? Load()
     {
-        if (!File.Exists(path))
+        try
+        {
+            using var stateFile = BoundedStateFile.Open(path, MaximumStateBytes);
+            var bytes = stateFile.Read();
+            return JsonSerializer.Deserialize<InstallState>(bytes.Span, SerializerOptions)
+                ?? throw new InvalidDataException($"Install state at {path} is empty or invalid.");
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
         {
             return null;
         }
-
-        return JsonSerializer.Deserialize<InstallState>(File.ReadAllText(path), SerializerOptions)
-            ?? throw new InvalidDataException($"Install state at {path} is empty or invalid.");
     }
 
     internal IReadOnlyList<string> LoadSupervisorExecutablePaths()
     {
         try
         {
-            using var stream = new FileStream(
-                path,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete);
-            if (stream.Length > MaximumDiscoveryStateBytes)
-            {
-                throw new InvalidDataException();
-            }
-            var bytes = new byte[MaximumDiscoveryStateBytes + 1];
-            var total = 0;
-            while (total < bytes.Length)
-            {
-                var read = stream.Read(bytes, total, bytes.Length - total);
-                if (read == 0)
-                {
-                    break;
-                }
-                total += read;
-            }
-            if (total > MaximumDiscoveryStateBytes)
-            {
-                throw new InvalidDataException();
-            }
-
-            using var document = JsonDocument.Parse(bytes.AsMemory(0, total));
+            using var stateFile = BoundedStateFile.Open(path, MaximumStateBytes);
+            using var document = JsonDocument.Parse(stateFile.Read());
             if (document.RootElement.ValueKind != JsonValueKind.Object ||
                 !document.RootElement.TryGetProperty(
                     "installedExecutable",
@@ -248,31 +229,15 @@ internal sealed class InstallStateStore(string path)
 
     internal void Save(InstallState state)
     {
-        var directory = Path.GetDirectoryName(path)
-            ?? throw new InvalidOperationException($"Install state path has no directory: {path}");
-        Directory.CreateDirectory(directory);
-        var temporaryPath = $"{path}.tmp-{Guid.NewGuid():N}";
-        try
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(state, SerializerOptions);
+        if (bytes.Length > MaximumStateBytes)
         {
-            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(state, SerializerOptions));
-            File.Move(temporaryPath, path, overwrite: true);
+            throw new InvalidDataException("Install state exceeds the persisted size limit.");
         }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-        }
+        BoundedStateFile.WriteAtomically(path, bytes);
     }
 
-    internal void Delete()
-    {
-        if (File.Exists(path))
-        {
-            File.Delete(path);
-        }
-    }
+    internal void Delete() => BoundedStateFile.DeleteAtomically(path);
 }
 
 internal sealed class InstallCoordinator(
