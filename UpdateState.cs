@@ -241,34 +241,12 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
                 .Take(retainedReleases)
                 .ToList(),
         };
-        var directory = Path.GetDirectoryName(path)
-            ?? throw new InvalidOperationException($"Update state path has no directory: {path}");
         var bytes = JsonSerializer.SerializeToUtf8Bytes(bounded, SerializerOptions);
         if (bytes.Length > MaximumStateBytes)
         {
             throw new InvalidDataException("Update state exceeds the persisted size limit.");
         }
-        Directory.CreateDirectory(directory);
-        var temporaryPath = $"{path}.tmp-{Guid.NewGuid():N}";
-        try
-        {
-            File.WriteAllBytes(temporaryPath, bytes);
-            if (File.Exists(path))
-            {
-                File.Replace(temporaryPath, path, destinationBackupFileName: null);
-            }
-            else
-            {
-                File.Move(temporaryPath, path);
-            }
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-        }
+        BoundedStateFile.WriteAtomically(path, bytes);
     }
 
     private static ContinuityUpdateState NormalizeCounts(ContinuityUpdateState state) => state with

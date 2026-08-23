@@ -35,6 +35,28 @@ public sealed class BoundedStateFileTests : IDisposable
         Assert.Equal(updated, File.ReadAllBytes(path));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void FailedReplaceRecoveryPublishesACompleteSurvivingFile(bool backupSurvived)
+    {
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "state.json");
+        var temporaryPath = Path.Combine(root, "state.json.tmp");
+        var backupPath = Path.Combine(root, "state.json.bak");
+        var oldBytes = "{\"value\":\"old\"}"u8.ToArray();
+        var newBytes = "{\"value\":\"new\"}"u8.ToArray();
+        File.WriteAllBytes(temporaryPath, newBytes);
+        if (backupSurvived)
+        {
+            File.WriteAllBytes(backupPath, oldBytes);
+        }
+
+        BoundedStateFile.RecoverFailedReplace(path, temporaryPath, backupPath);
+
+        Assert.Equal(backupSurvived ? oldBytes : newBytes, File.ReadAllBytes(path));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(root))

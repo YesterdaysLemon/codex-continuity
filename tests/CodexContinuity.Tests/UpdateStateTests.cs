@@ -242,6 +242,7 @@ public sealed class UpdateStateTests : IDisposable
         Assert.Equal(previousBytes, observedPrevious);
         Assert.Equivalent(replacement, store.Load().State, strict: true);
         Assert.Empty(Directory.EnumerateFiles(root, "update-status.json.tmp-*"));
+        Assert.Empty(Directory.EnumerateFiles(root, "update-status.json.bak-*"));
     }
 
     [Fact]

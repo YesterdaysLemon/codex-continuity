@@ -226,34 +226,12 @@ internal sealed class InstallStateStore(string path)
 
     internal void Save(InstallState state)
     {
-        var directory = Path.GetDirectoryName(path)
-            ?? throw new InvalidOperationException($"Install state path has no directory: {path}");
         var bytes = JsonSerializer.SerializeToUtf8Bytes(state, SerializerOptions);
         if (bytes.Length > MaximumStateBytes)
         {
             throw new InvalidDataException("Install state exceeds the persisted size limit.");
         }
-        Directory.CreateDirectory(directory);
-        var temporaryPath = $"{path}.tmp-{Guid.NewGuid():N}";
-        try
-        {
-            File.WriteAllBytes(temporaryPath, bytes);
-            if (File.Exists(path))
-            {
-                File.Replace(temporaryPath, path, destinationBackupFileName: null);
-            }
-            else
-            {
-                File.Move(temporaryPath, path);
-            }
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-        }
+        BoundedStateFile.WriteAtomically(path, bytes);
     }
 
     internal void Delete()

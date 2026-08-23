@@ -68,6 +68,7 @@ public sealed class InstallCoordinatorTests : IDisposable
         Assert.Equal(previousBytes, observedPrevious);
         Assert.Equal(replacement, store.Load());
         Assert.Empty(Directory.EnumerateFiles(root, "install-state.json.tmp-*"));
+        Assert.Empty(Directory.EnumerateFiles(root, "install-state.json.bak-*"));
     }
 
     [Fact]
