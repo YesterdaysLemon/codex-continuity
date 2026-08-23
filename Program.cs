@@ -363,33 +363,61 @@ internal static class Program
             stateDirectory,
             ProductVersion(),
             runUpdates);
+        var codexPath = FindCodexExecutable(persistedEnvironmentOnly: true);
         return await RunOwnedSupervisorAsync(
             port,
             stateDirectory,
             updateLifetime.Token,
-            backendPort => StartAppServer(
-                FindCodexExecutable(persistedEnvironmentOnly: true),
-                backendPort));
+            backendPort => StartAppServer(codexPath, backendPort),
+            codexPath);
     }
 
     internal static async Task<int> RunOwnedSupervisorAsync(
         int port,
         string stateDirectory,
         CancellationToken shutdownToken,
-        Func<int, WindowsProcessGroup> startBackend)
+        Func<int, WindowsProcessGroup> startBackend,
+        string backendExecutable)
     {
         Directory.CreateDirectory(stateDirectory);
         var logPath = ContinuityPaths.AppServerLogFile(stateDirectory);
         var logWriter = new RollingLogWriter(logPath);
         var statusStore = new SupervisorStatusStore(
             ContinuityPaths.SupervisorStatusFile(stateDirectory));
+        var leaseStore = new BackendLeaseStore(
+            ContinuityPaths.BackendLeaseFile(stateDirectory));
         var backoff = new RestartBackoffPolicy();
         var codexHome = FutureProcessEnvironment.ResolveCodexHome();
         var consecutiveFailures = 0;
         Console.WriteLine(
             $"Supervising {LoopbackEndpoint.WebSocketUrl(port)} with logs at {logPath}");
 
-        var backendPort = FindAvailablePort(port);
+        var recovery = BackendLeaseRecovery.TryRecover(
+            leaseStore,
+            port,
+            backendExecutable,
+            codexHome);
+        if (recovery.Kind == BackendRecoveryKind.Unsafe)
+        {
+            statusStore.Write(NewSupervisorStatus(
+                "unsafeBackendLease",
+                port,
+                codexHome,
+                recovery.Lease?.BackendProcessId,
+                consecutiveFailures,
+                lastExitCode: null,
+                nextRetryAtUtc: null,
+                recovery.Detail));
+            return Fail(
+                $"Backend ownership could not be recovered safely: {recovery.Detail}");
+        }
+        if (recovery.Kind == BackendRecoveryKind.Stale)
+        {
+            leaseStore.Delete();
+        }
+
+        var recoveredBackend = recovery.Backend;
+        var backendPort = recovery.Lease?.BackendPort ?? FindAvailablePort(port);
         LoopbackRelay relay;
         try
         {
@@ -402,6 +430,7 @@ internal static class Program
         }
         catch (System.Net.Sockets.SocketException)
         {
+            recoveredBackend?.Dispose();
             statusStore.Write(NewSupervisorStatus(
                 "foreignEndpoint",
                 port,
@@ -419,84 +448,143 @@ internal static class Program
         while (!shutdownToken.IsCancellationRequested)
         {
             relay.SetBackendPort(backendPort);
-            using var process = startBackend(backendPort);
+            var recovered = recoveredBackend is not null;
+            var process = recoveredBackend ?? startBackend(backendPort);
+            recoveredBackend = null;
+            var leaseActive = recovered;
             var startedAt = DateTimeOffset.UtcNow;
             var stdout = PumpLogAsync(process.StandardOutput, logWriter, shutdownToken);
             var stderr = PumpLogAsync(process.StandardError, logWriter, shutdownToken);
-
-            if (!await WaitUntilReadyAsync(
-                    backendPort,
-                    process,
-                    TimeSpan.FromSeconds(20),
-                    shutdownToken))
+            try
             {
-                if (!process.HasExited)
+                if (!await WaitUntilReadyAsync(
+                        backendPort,
+                        process,
+                        TimeSpan.FromSeconds(20),
+                        shutdownToken,
+                        recovered
+                            ? BackendOwnershipCheck.AlreadyVerified
+                            : BackendOwnershipCheck.Required))
                 {
-                    process.Kill();
-                }
-                await process.WaitForExitAsync();
-            }
-            else
-            {
-                relay.OpenGate();
-                statusStore.Write(NewSupervisorStatus(
-                    "running",
-                    port,
-                    codexHome,
-                    process.Id,
-                    consecutiveFailures,
-                    lastExitCode: null,
-                    nextRetryAtUtc: null,
-                    $"Relaying {LoopbackEndpoint.WebSocketUrl(port)} to an owned private backend."));
-                Console.WriteLine($"Continuity backend ready (PID {process.Id}).");
-                try
-                {
-                    await process.WaitForExitAsync(shutdownToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    await relay.CloseGateAsync();
+                    if (recovered && !process.HasExited)
+                    {
+                        statusStore.Write(NewSupervisorStatus(
+                            "recoveredBackendUnavailable",
+                            port,
+                            codexHome,
+                            process.Id,
+                            consecutiveFailures,
+                            lastExitCode: null,
+                            nextRetryAtUtc: null,
+                            "The verified recovered backend is not ready; refusing to replace it."));
+                        return Fail(
+                            "The verified recovered backend is not ready; refusing to replace it.");
+                    }
                     if (!process.HasExited)
                     {
                         process.Kill();
-                        await process.WaitForExitAsync();
+                    }
+                    await process.WaitForExitAsync();
+                    leaseStore.Delete();
+                    leaseActive = false;
+                }
+                else
+                {
+                    leaseStore.Write(new BackendLease(
+                        BackendLease.CurrentSchemaVersion,
+                        OwnerSupervisorProcessId: Environment.ProcessId,
+                        BackendProcessId: process.Id,
+                        PublicPort: port,
+                        BackendPort: backendPort,
+                        BackendExecutable: process.ExecutablePath,
+                        CodexHome: codexHome,
+                        BackendStartedAtUtc: process.StartedAtUtc));
+                    leaseActive = true;
+                    relay.OpenGate();
+                    statusStore.Write(NewSupervisorStatus(
+                        "running",
+                        port,
+                        codexHome,
+                        process.Id,
+                        consecutiveFailures,
+                        lastExitCode: null,
+                        nextRetryAtUtc: null,
+                        recovered
+                            ? "Recovered the verified private backend behind the stable endpoint."
+                            : $"Relaying {LoopbackEndpoint.WebSocketUrl(port)} to an owned private backend."));
+                    Console.WriteLine($"Continuity backend ready (PID {process.Id}).");
+                    try
+                    {
+                        await process.WaitForExitAsync(shutdownToken);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        try
+                        {
+                            await relay.CloseGateAsync();
+                        }
+                        finally
+                        {
+                            if (!process.HasExited)
+                            {
+                                process.Kill();
+                                await process.WaitForExitAsync();
+                            }
+                            leaseStore.Delete();
+                            leaseActive = false;
+                        }
                     }
                 }
-            }
 
-            if (!relay.IsGated)
-            {
-                await relay.CloseGateAsync();
-            }
-            await AwaitLogPumpsAsync(stdout, stderr);
-            if (!shutdownToken.IsCancellationRequested)
-            {
-                var uptime = DateTimeOffset.UtcNow - startedAt;
-                consecutiveFailures = uptime >= TimeSpan.FromMinutes(2)
-                    ? 1
-                    : consecutiveFailures + 1;
-                var delay = backoff.DelayForFailure(
-                    consecutiveFailures,
-                    Random.Shared.NextDouble());
-                var nextRetryAt = DateTimeOffset.UtcNow + delay;
-                statusStore.Write(NewSupervisorStatus(
-                    "backingOff",
-                    port,
-                    codexHome,
-                    backendProcessId: null,
-                    consecutiveFailures,
-                    process.ExitCode,
-                    nextRetryAt,
-                    $"App-server exited after {uptime}."));
-                Console.Error.WriteLine(
-                    $"App-server exited with code {process.ExitCode}; restarting in {delay.TotalSeconds:F1} seconds.");
-                if (!await WaitForRestartAsync(delay, shutdownToken))
+                if (!relay.IsGated)
                 {
-                    break;
+                    await relay.CloseGateAsync();
                 }
-                backendPort = FindAvailablePort(port, backendPort);
+                if (process.HasExited)
+                {
+                    leaseStore.Delete();
+                    leaseActive = false;
+                }
+                await AwaitLogPumpsAsync(stdout, stderr);
+                if (!shutdownToken.IsCancellationRequested)
+                {
+                    var uptime = DateTimeOffset.UtcNow - startedAt;
+                    consecutiveFailures = uptime >= TimeSpan.FromMinutes(2)
+                        ? 1
+                        : consecutiveFailures + 1;
+                    var delay = backoff.DelayForFailure(
+                        consecutiveFailures,
+                        Random.Shared.NextDouble());
+                    var nextRetryAt = DateTimeOffset.UtcNow + delay;
+                    statusStore.Write(NewSupervisorStatus(
+                        "backingOff",
+                        port,
+                        codexHome,
+                        backendProcessId: null,
+                        consecutiveFailures,
+                        process.ExitCode,
+                        nextRetryAt,
+                        $"App-server exited after {uptime}."));
+                    Console.Error.WriteLine(
+                        $"App-server exited with code {process.ExitCode}; restarting in {delay.TotalSeconds:F1} seconds.");
+                    if (!await WaitForRestartAsync(delay, shutdownToken))
+                    {
+                        break;
+                    }
+                    backendPort = FindAvailablePort(port, backendPort);
+                }
+            }
+            finally
+            {
+                if (!leaseActive && !process.HasExited)
+                {
+                    process.Kill();
+                    await process.WaitForExitAsync();
+                }
+                process.Dispose();
             }
         }
+        recoveredBackend?.Dispose();
 
         statusStore.Write(NewSupervisorStatus(
             "stopped",
@@ -1342,12 +1430,16 @@ internal static class Program
         int port,
         WindowsProcessGroup process,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        BackendOwnershipCheck ownershipCheck = BackendOwnershipCheck.AlreadyVerified)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline && !process.HasExited && !cancellationToken.IsCancellationRequested)
         {
-            if (await IsReadyAsync(port, TimeSpan.FromMilliseconds(500)))
+            if (await IsReadyAsync(port, TimeSpan.FromMilliseconds(500)) &&
+                !process.HasExited &&
+                (ownershipCheck == BackendOwnershipCheck.AlreadyVerified ||
+                 WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy(port, process.Id)))
             {
                 return true;
             }
@@ -1361,6 +1453,12 @@ internal static class Program
             }
         }
         return false;
+    }
+
+    private enum BackendOwnershipCheck
+    {
+        Required,
+        AlreadyVerified,
     }
 
     private static async Task<bool> WaitUntilManagedSupervisorReadyAsync(

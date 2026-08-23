@@ -35,7 +35,8 @@ public sealed class SupervisorRelayTests : IDisposable
             publicPort,
             root,
             shutdown.Token,
-            StartBackend);
+            StartBackend,
+            HarnessExecutable());
         try
         {
             var relayedBody = await ReadWhenReadyAsync(publicPort);
@@ -76,6 +77,9 @@ public sealed class SupervisorRelayTests : IDisposable
             "stopped",
             new SupervisorStatusStore(
                 ContinuityPaths.SupervisorStatusFile(root)).Read()?.State);
+        Assert.Equal(
+            BackendLeaseLoadKind.Missing,
+            new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(root)).Load().Kind);
     }
 
     [Fact]
@@ -104,7 +108,8 @@ public sealed class SupervisorRelayTests : IDisposable
             publicPort,
             root,
             shutdown.Token,
-            StartBackend);
+            StartBackend,
+            HarnessExecutable());
         try
         {
             var firstBody = await ReadWhenReadyAsync(publicPort);
@@ -127,6 +132,70 @@ public sealed class SupervisorRelayTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task RecoversVerifiedBackendWithoutStartingReplacement()
+    {
+        Directory.CreateDirectory(root);
+        var publicPort = FindAvailablePort();
+        var backendPort = FindAvailablePort(publicPort);
+        var readyPath = Path.Combine(root, "recovered-ready.txt");
+        var original = StartHarnessBackend(backendPort, readyPath);
+        var backendProcessId = original.Id;
+        await ReadWhenReadyAsync(backendPort);
+        new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(root)).Write(
+            new BackendLease(
+                BackendLease.CurrentSchemaVersion,
+                OwnerSupervisorProcessId: int.MaxValue,
+                BackendProcessId: backendProcessId,
+                PublicPort: publicPort,
+                BackendPort: backendPort,
+                BackendExecutable: original.ExecutablePath,
+                CodexHome: FutureProcessEnvironment.ResolveCodexHome(),
+                BackendStartedAtUtc: original.StartedAtUtc));
+        original.Dispose();
+        var replacementsStarted = 0;
+        using var shutdown = new CancellationTokenSource();
+
+        var supervisor = Program.RunOwnedSupervisorAsync(
+            publicPort,
+            root,
+            shutdown.Token,
+            port =>
+            {
+                replacementsStarted++;
+                return StartHarnessBackend(
+                    port,
+                    Path.Combine(root, "unexpected-replacement.txt"));
+            },
+            HarnessExecutable());
+        try
+        {
+            Assert.Equal($"backend:{backendPort}", await ReadWhenReadyAsync(publicPort));
+            var status = await ReadRunningStatusAsync();
+            Assert.Equal(backendProcessId, status.BackendProcessId);
+            Assert.Equal(
+                "Recovered the verified private backend behind the stable endpoint.",
+                status.Detail);
+            Assert.Equal(0, replacementsStarted);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+            if (ProcessIsRunning(backendProcessId))
+            {
+                using var cleanup = Process.GetProcessById(backendProcessId);
+                cleanup.Kill(entireProcessTree: true);
+                await cleanup.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            }
+        }
+
+        Assert.False(ProcessIsRunning(backendProcessId));
+        Assert.Equal(
+            BackendLeaseLoadKind.Missing,
+            new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(root)).Load().Kind);
+    }
+
     private async Task<SupervisorStatus> ReadRunningStatusAsync()
     {
         var store = new SupervisorStatusStore(ContinuityPaths.SupervisorStatusFile(root));
@@ -146,10 +215,7 @@ public sealed class SupervisorRelayTests : IDisposable
         string fixtureReadyPath,
         int exitAfterRequests = 0)
     {
-        var harnessExecutable = Path.ChangeExtension(
-            typeof(HarnessMarker).Assembly.Location,
-            ".exe");
-        var startInfo = new ProcessStartInfo(harnessExecutable)
+        var startInfo = new ProcessStartInfo(HarnessExecutable())
         {
             UseShellExecute = false,
             WorkingDirectory = root,
@@ -160,6 +226,10 @@ public sealed class SupervisorRelayTests : IDisposable
         startInfo.ArgumentList.Add(exitAfterRequests.ToString());
         return WindowsProcessGroup.Start(startInfo);
     }
+
+    private static string HarnessExecutable() => Path.ChangeExtension(
+        typeof(HarnessMarker).Assembly.Location,
+        ".exe");
 
     private async Task<string> ReadWhenReadyAsync(int port)
     {
@@ -206,11 +276,18 @@ public sealed class SupervisorRelayTests : IDisposable
         throw new TimeoutException("Public relay did not expose the restarted backend.");
     }
 
-    private static int FindAvailablePort()
+    private static int FindAvailablePort(params int[] excludedPorts)
     {
-        using var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        return ((IPEndPoint)listener.LocalEndpoint).Port;
+        while (true)
+        {
+            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            if (!excludedPorts.Contains(port))
+            {
+                return port;
+            }
+        }
     }
 
     private static bool CanBind(int port)
