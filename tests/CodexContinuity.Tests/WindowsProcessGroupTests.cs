@@ -1,5 +1,7 @@
 using CodexContinuity.ProcessHarness;
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using System.Text.Json;
 using Xunit;
 
@@ -101,6 +103,77 @@ public sealed class WindowsProcessGroupTests
         Assert.NotEqual(0, childProcessId);
         Assert.False(ProcessIsRunning(childProcessId));
     }
+
+    [Theory]
+    [InlineData(23)]
+    [InlineData(259)]
+    public async Task RetainsExitCodeWhenChildExitsImmediately(int exitCode)
+    {
+        var commandPrompt = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "System32",
+            "cmd.exe");
+        var startInfo = new ProcessStartInfo(commandPrompt)
+        {
+            UseShellExecute = false,
+        };
+        startInfo.ArgumentList.Add("/c");
+        startInfo.ArgumentList.Add($"exit {exitCode}");
+
+        using var process = WindowsProcessGroup.Start(startInfo);
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(process.HasExited);
+        Assert.Equal(exitCode, process.ExitCode);
+        process.SendCtrlBreak();
+    }
+
+    [Fact]
+    public async Task AttachesToExistingProcessWithoutOwningItsLifetime()
+    {
+        var powershell = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "System32",
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
+        var startInfo = new ProcessStartInfo(powershell)
+        {
+            UseShellExecute = false,
+        };
+        startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-Command");
+        startInfo.ArgumentList.Add("Start-Sleep -Seconds 30");
+        using var owner = WindowsProcessGroup.Start(startInfo);
+
+        using (var attachment = WindowsProcessGroup.Attach(owner.Id))
+        {
+            Assert.Equal(owner.Id, attachment.Id);
+            Assert.Equal(owner.StartedAtUtc, attachment.StartedAtUtc);
+            Assert.Equal(owner.ExecutablePath, attachment.ExecutablePath);
+            Assert.False(attachment.HasExited);
+        }
+
+        Assert.False(owner.HasExited);
+        owner.Kill();
+        await owner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public void ProvesLoopbackListenerProcessOwnership()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+
+        Assert.True(WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy(
+            port,
+            Environment.ProcessId));
+        Assert.False(WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy(
+            port,
+            int.MaxValue));
+    }
+
     private static bool ProcessIsRunning(int processId)
     {
         try
