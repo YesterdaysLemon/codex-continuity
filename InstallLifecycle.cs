@@ -99,22 +99,6 @@ internal static class ContinuityPaths
     internal static string VersionsDirectory(string stateDirectory) =>
         Path.Combine(stateDirectory, "versions");
 
-    internal static string VersionDirectory(
-        string stateDirectory,
-        string version,
-        string executableSha256) =>
-        Path.Combine(
-            VersionsDirectory(stateDirectory),
-            $"{version}-{executableSha256[..12].ToLowerInvariant()}");
-
-    internal static string VersionedSupervisorExecutable(
-        string stateDirectory,
-        string version,
-        string executableSha256) =>
-        Path.Combine(
-            VersionDirectory(stateDirectory, version, executableSha256),
-            "CodexContinuity.exe");
-
     internal static string CommandDirectory(string stateDirectory) =>
         Path.Combine(stateDirectory, "bin");
 
@@ -183,7 +167,7 @@ internal sealed class InstallStateStore(string path)
             return null;
         }
 
-        var bytes = ReadBoundedState();
+        var bytes = BoundedStateFile.Read(path, MaximumStateBytes);
         return JsonSerializer.Deserialize<InstallState>(bytes.Span, SerializerOptions)
             ?? throw new InvalidDataException($"Install state at {path} is empty or invalid.");
     }
@@ -192,7 +176,8 @@ internal sealed class InstallStateStore(string path)
     {
         try
         {
-            using var document = JsonDocument.Parse(ReadBoundedState());
+            using var document = JsonDocument.Parse(
+                BoundedStateFile.Read(path, MaximumStateBytes));
             if (document.RootElement.ValueKind != JsonValueKind.Object ||
                 !document.RootElement.TryGetProperty(
                     "installedExecutable",
@@ -242,11 +227,16 @@ internal sealed class InstallStateStore(string path)
     {
         var directory = Path.GetDirectoryName(path)
             ?? throw new InvalidOperationException($"Install state path has no directory: {path}");
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(state, SerializerOptions);
+        if (bytes.Length > MaximumStateBytes)
+        {
+            throw new InvalidDataException("Install state exceeds the persisted size limit.");
+        }
         Directory.CreateDirectory(directory);
         var temporaryPath = $"{path}.tmp-{Guid.NewGuid():N}";
         try
         {
-            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(state, SerializerOptions));
+            File.WriteAllBytes(temporaryPath, bytes);
             File.Move(temporaryPath, path, overwrite: true);
         }
         finally
@@ -264,35 +254,6 @@ internal sealed class InstallStateStore(string path)
         {
             File.Delete(path);
         }
-    }
-
-    private ReadOnlyMemory<byte> ReadBoundedState()
-    {
-        using var stream = new FileStream(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete);
-        if (stream.Length > MaximumStateBytes)
-        {
-            throw new InvalidDataException();
-        }
-        var bytes = new byte[MaximumStateBytes + 1];
-        var total = 0;
-        while (total < bytes.Length)
-        {
-            var read = stream.Read(bytes, total, bytes.Length - total);
-            if (read == 0)
-            {
-                break;
-            }
-            total += read;
-        }
-        if (total > MaximumStateBytes)
-        {
-            throw new InvalidDataException();
-        }
-        return bytes.AsMemory(0, total);
     }
 }
 
@@ -798,12 +759,11 @@ internal sealed class InstallCoordinator(
         var version = assemblyVersion is null
             ? "dev"
             : $"{assemblyVersion.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}";
-        var versionDirectory = ContinuityPaths.VersionDirectory(stateDirectory, version, hash);
+        var versionDirectory = Path.Combine(
+            ContinuityPaths.VersionsDirectory(stateDirectory),
+            $"{version}-{hash[..12].ToLowerInvariant()}");
         Directory.CreateDirectory(versionDirectory);
-        var destination = ContinuityPaths.VersionedSupervisorExecutable(
-            stateDirectory,
-            version,
-            hash);
+        var destination = Path.Combine(versionDirectory, "CodexContinuity.exe");
         var supervisor = StageExecutable(sourceExecutable, destination);
         var tray = sourceTrayExecutable is null
             ? null

@@ -187,13 +187,8 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
 
         try
         {
-            if (new FileInfo(path).Length > MaximumStateBytes)
-            {
-                return new(ContinuityUpdateStateLoadKind.Invalid, State: null);
-            }
-
-            var json = File.ReadAllText(path);
-            using var document = JsonDocument.Parse(json);
+            var bytes = BoundedStateFile.Read(path, MaximumStateBytes);
+            using var document = JsonDocument.Parse(bytes);
             if (document.RootElement.ValueKind != JsonValueKind.Object ||
                 !document.RootElement.TryGetProperty("schemaVersion", out var schemaElement) ||
                 !schemaElement.TryGetInt32(out var schemaVersion))
@@ -205,14 +200,16 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
                 return new(ContinuityUpdateStateLoadKind.UnsupportedSchema, State: null);
             }
 
-            var state = JsonSerializer.Deserialize<ContinuityUpdateState>(json, SerializerOptions);
+            var state = JsonSerializer.Deserialize<ContinuityUpdateState>(
+                bytes.Span,
+                SerializerOptions);
             return IsUsable(state)
                 ? new(
                     ContinuityUpdateStateLoadKind.Loaded,
                     NormalizeCounts(state!))
                 : new(ContinuityUpdateStateLoadKind.Invalid, State: null);
         }
-        catch (JsonException)
+        catch (Exception exception) when (exception is JsonException or InvalidDataException)
         {
             return new(ContinuityUpdateStateLoadKind.Invalid, State: null);
         }
@@ -245,13 +242,16 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
         };
         var directory = Path.GetDirectoryName(path)
             ?? throw new InvalidOperationException($"Update state path has no directory: {path}");
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(bounded, SerializerOptions);
+        if (bytes.Length > MaximumStateBytes)
+        {
+            throw new InvalidDataException("Update state exceeds the persisted size limit.");
+        }
         Directory.CreateDirectory(directory);
         var temporaryPath = $"{path}.tmp-{Guid.NewGuid():N}";
         try
         {
-            File.WriteAllText(
-                temporaryPath,
-                JsonSerializer.Serialize(bounded, SerializerOptions));
+            File.WriteAllBytes(temporaryPath, bytes);
             File.Move(temporaryPath, path, overwrite: true);
         }
         finally

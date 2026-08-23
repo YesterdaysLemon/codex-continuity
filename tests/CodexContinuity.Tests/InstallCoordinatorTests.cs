@@ -14,6 +14,37 @@ public sealed class InstallCoordinatorTests : IDisposable
         $"codex-continuity-install-tests-{Guid.NewGuid():N}");
 
     [Fact]
+    public void InstallStateStoreBoundsValidLoadsAndPreservesStateOnOversizedSave()
+    {
+        const int maximumStateBytes = 512 * 1024;
+        var state = CreateCoordinator(new FakeInstallPlatform()).Install(
+            CreateSource("version-one"),
+            45123,
+            TrayInstallMode.Disabled).State;
+        var path = ContinuityPaths.InstallStateFile(root);
+        var store = new InstallStateStore(path);
+        var validJson = File.ReadAllText(path);
+        File.WriteAllText(
+            path,
+            validJson.PadRight(maximumStateBytes + 1),
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+        Assert.Throws<InvalidDataException>(store.Load);
+
+        store.Save(state);
+        var persisted = File.ReadAllBytes(path);
+        var oversized = state with
+        {
+            StartupCommand = state.StartupCommand with
+            {
+                AppliedValue = new string('\u754c', maximumStateBytes),
+            },
+        };
+        Assert.Throws<InvalidDataException>(() => store.Save(oversized));
+        Assert.Equal(persisted, File.ReadAllBytes(path));
+    }
+
+    [Fact]
     public void EnumeratesCurrentPreviousAndLegacySupervisorExecutables()
     {
         var currentRoot = Path.Combine(root, "current");

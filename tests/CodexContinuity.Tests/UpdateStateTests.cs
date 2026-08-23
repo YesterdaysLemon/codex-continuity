@@ -144,8 +144,66 @@ public sealed class UpdateStateTests : IDisposable
         File.WriteAllText(statePath, "{\"schemaVersion\":2}");
         Assert.Equal(ContinuityUpdateStateLoadKind.UnsupportedSchema, store.Load().Kind);
 
-        File.WriteAllText(statePath, new string('x', 1024 * 1024 + 1));
+        var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
+        store.Save(new ContinuityUpdateState(
+            1,
+            now,
+            now,
+            "1.0.0",
+            "1.0.0",
+            "1.0.0",
+            true,
+            null,
+            null,
+            0,
+            0,
+            0,
+            Releases: []));
+        File.WriteAllText(
+            statePath,
+            File.ReadAllText(statePath).PadRight((1024 * 1024) + 1));
         Assert.Equal(ContinuityUpdateStateLoadKind.Invalid, store.Load().Kind);
+    }
+
+    [Fact]
+    public void StorePreservesStateWhenBoundedFieldsExceedThePersistedByteLimit()
+    {
+        var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
+        var store = new ContinuityUpdateStateStore(
+            Path.Combine(root, "update-status.json"),
+            retainedReleases: 256);
+        var baseline = new ContinuityUpdateState(
+            1,
+            now,
+            now,
+            "1.0.0",
+            "1.0.0",
+            "1.0.0",
+            true,
+            null,
+            null,
+            0,
+            0,
+            0,
+            Releases: []);
+        store.Save(baseline);
+        var path = Path.Combine(root, "update-status.json");
+        var persisted = File.ReadAllBytes(path);
+        var largeError = new string('\u754c', 2048);
+        var releases = Enumerable.Range(1, 256).Select(index =>
+            new TrackedContinuityRelease(
+                $"1.0.{index}",
+                now,
+                now,
+                StagedAtUtc: null,
+                AppliedAtUtc: null,
+                LastError: largeError)).ToList();
+
+        Assert.Throws<InvalidDataException>(() => store.Save(baseline with
+        {
+            Releases = releases,
+        }));
+        Assert.Equal(persisted, File.ReadAllBytes(path));
     }
 
     [Fact]
