@@ -111,6 +111,58 @@ public sealed class SupervisorRelayTests : IDisposable
         Assert.True(CanBind(publicPort));
     }
 
+    [Fact]
+    public async Task ForeignPublicEndpointDoesNotStartBackend()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Server.SetSocketOption(
+            SocketOptionLevel.Socket,
+            SocketOptionName.ExclusiveAddressUse,
+            true);
+        listener.Start();
+        var publicPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var startCount = 0;
+
+        var exitCode = await OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            CancellationToken.None,
+            _ =>
+            {
+                startCount++;
+                throw new InvalidOperationException("The backend callback must not run.");
+            });
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(0, startCount);
+        var status = new SupervisorStatusStore(
+            ContinuityPaths.SupervisorStatusFile(root)).Read();
+        Assert.NotNull(status);
+        Assert.Equal(
+            new SupervisorStatus(
+                State: "foreignEndpoint",
+                SupervisorProcessId: Environment.ProcessId,
+                BackendProcessId: null,
+                Port: publicPort,
+                CodexHome: FutureProcessEnvironment.ResolveCodexHome(),
+                ConsecutiveFailures: 0,
+                LastExitCode: null,
+                UpdatedAtUtc: status.UpdatedAtUtc,
+                NextRetryAtUtc: null,
+                Detail:
+                    "An endpoint not owned by this supervisor already uses the configured port.",
+                SupervisorStartedAtUtc: status.SupervisorStartedAtUtc,
+                SupervisorExecutable: status.SupervisorExecutable),
+            status);
+        Assert.True(listener.Server.IsBound);
+        Assert.False(CanBind(publicPort));
+        var accept = listener.AcceptTcpClientAsync();
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, publicPort);
+        using var accepted = await accept.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(accepted.Connected);
+    }
+
     private async Task<SupervisorStatus> ReadRunningStatusAsync()
     {
         var store = new SupervisorStatusStore(ContinuityPaths.SupervisorStatusFile(root));
