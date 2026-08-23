@@ -198,6 +198,64 @@ public sealed class WindowsProcessGroupTests
             int.MaxValue));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProvesWhichProcessAcceptedLoopbackConnection(bool ipv4Mapped)
+    {
+        var testDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"codex-continuity-socket-owner-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(testDirectory);
+        var readyPath = Path.Combine(testDirectory, "ready.txt");
+        var startInfo = new ProcessStartInfo(Path.ChangeExtension(
+            typeof(HarnessMarker).Assembly.Location,
+            ".exe"))
+        {
+            UseShellExecute = false,
+            WorkingDirectory = testDirectory,
+        };
+        startInfo.ArgumentList.Add("socket-owner-server");
+        startInfo.ArgumentList.Add("0");
+        startInfo.ArgumentList.Add(readyPath);
+        using var server = WindowsProcessGroup.Start(startInfo);
+        try
+        {
+            Assert.True(SpinWait.SpinUntil(
+                () => File.Exists(readyPath),
+                TimeSpan.FromSeconds(5)));
+            var port = int.Parse(await File.ReadAllTextAsync(readyPath));
+            Assert.True(WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy(port, server.Id));
+            using var relayBackend = new TcpClient(
+                ipv4Mapped ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork);
+            if (ipv4Mapped)
+            {
+                relayBackend.Client.DualMode = true;
+            }
+            await relayBackend.ConnectAsync(
+                ipv4Mapped ? IPAddress.Loopback.MapToIPv6() : IPAddress.Loopback,
+                port);
+
+            Assert.True(SpinWait.SpinUntil(
+                () => WindowsTcpPortOwnership.IsLoopbackConnectionAcceptedBy(
+                    relayBackend,
+                    server.Id),
+                TimeSpan.FromSeconds(1)));
+            Assert.False(WindowsTcpPortOwnership.IsLoopbackConnectionAcceptedBy(
+                relayBackend,
+                Environment.ProcessId));
+        }
+        finally
+        {
+            if (!server.HasExited)
+            {
+                server.Kill();
+                await server.WaitForExitAsync();
+            }
+            DeleteTestDirectory(testDirectory);
+        }
+    }
+
     [Fact]
     public void RetriesBoundedTcpTableGrowth()
     {

@@ -2,6 +2,8 @@ using CodexContinuity;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO.Pipes;
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -17,6 +19,13 @@ internal static class Program
         if (args.FirstOrDefault() == "fake-self-test-app-server")
         {
             return FakeSelfTestAppServer.RunAsync(
+                int.Parse(args[1], CultureInfo.InvariantCulture),
+                args[2]).GetAwaiter().GetResult();
+        }
+
+        if (args.FirstOrDefault() == "socket-owner-server")
+        {
+            return RunSocketOwnerServerAsync(
                 int.Parse(args[1], CultureInfo.InvariantCulture),
                 args[2]).GetAwaiter().GetResult();
         }
@@ -86,6 +95,21 @@ internal static class Program
             args.Skip(2),
             Environment.CurrentDirectory);
         Console.WriteLine(child.Id);
+        return 0;
+    }
+
+    private static async Task<int> RunSocketOwnerServerAsync(int port, string readyPath)
+    {
+        var listener = new TcpListener(IPAddress.Loopback, port);
+        listener.Start();
+        var boundPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var stagingPath = $"{readyPath}.tmp";
+        await File.WriteAllTextAsync(
+            stagingPath,
+            boundPort.ToString(CultureInfo.InvariantCulture));
+        File.Move(stagingPath, readyPath);
+        using var client = await listener.AcceptTcpClientAsync();
+        await Task.Delay(Timeout.InfiniteTimeSpan);
         return 0;
     }
 
