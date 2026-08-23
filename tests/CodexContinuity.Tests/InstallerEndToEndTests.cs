@@ -177,7 +177,9 @@ public sealed class InstallerEndToEndTests : IDisposable
                 LastExitCode: null,
                 UpdatedAtUtc: status.UpdatedAtUtc,
                 NextRetryAtUtc: null,
-                Detail: "An endpoint not owned by this supervisor already uses the configured port."),
+                Detail: "An endpoint not owned by this supervisor already uses the configured port.",
+                SupervisorStartedAtUtc: Process.GetCurrentProcess().StartTime.ToUniversalTime(),
+                SupervisorExecutable: Environment.ProcessPath),
             status);
     }
 
