@@ -1113,9 +1113,9 @@ internal static class Program
     };
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
-    private sealed record ThreadSummary(string Id, string? Name, string Status);
+    internal sealed record ThreadSummary(string Id, string? Name, string Status);
 
-    private sealed class RpcClient : IAsyncDisposable
+    internal sealed class RpcClient : IAsyncDisposable
     {
         private readonly ClientWebSocket socket = new();
         private long nextId;
@@ -1124,70 +1124,123 @@ internal static class Program
         {
         }
 
-        public static async Task<RpcClient> ConnectAsync(string url)
+        public static async Task<RpcClient> ConnectAsync(
+            string url,
+            int maximumResponseBytes = RpcReadBudget.DefaultMaximumMessageBytes)
         {
             var client = new RpcClient();
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            await client.socket.ConnectAsync(new Uri(url), timeout.Token);
-            var initialize = await client.RequestAsync("initialize", new JsonObject
+            try
             {
-                ["clientInfo"] = new JsonObject
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await client.socket.ConnectAsync(new Uri(url), timeout.Token);
+                var initialize = await client.RequestAsync(
+                    "initialize",
+                    new JsonObject
+                    {
+                        ["clientInfo"] = new JsonObject
+                        {
+                            ["name"] = "codex_continuity",
+                            ["title"] = "Codex Continuity",
+                            ["version"] = ProductVersion(),
+                        },
+                        ["capabilities"] = new JsonObject(),
+                    },
+                    timeout.Token,
+                    maximumResponseBytes);
+                if (initialize["error"] is not null)
                 {
-                    ["name"] = "codex_continuity",
-                    ["title"] = "Codex Continuity",
-                    ["version"] = ProductVersion(),
-                },
-                ["capabilities"] = new JsonObject(),
-            });
-            if (initialize["error"] is not null)
-            {
-                throw new InvalidOperationException(
-                    $"App-server initialization failed: {initialize["error"]}");
+                    throw new InvalidOperationException(
+                        $"App-server initialization failed: {initialize["error"]}");
+                }
+                await client.SendAsync(new JsonObject
+                {
+                    ["method"] = "initialized",
+                    ["params"] = new JsonObject(),
+                }, timeout.Token);
+                return client;
             }
-            await client.SendAsync(new JsonObject
+            catch
             {
-                ["method"] = "initialized",
-                ["params"] = new JsonObject(),
-            }, timeout.Token);
-            return client;
+                client.socket.Dispose();
+                throw;
+            }
         }
 
-        public async Task<List<ThreadSummary>> ListThreadsAsync()
+        public async Task<List<ThreadSummary>> ListThreadsAsync(
+            int maximumThreads = RpcReadBudget.DefaultMaximumItems,
+            int maximumPages = RpcReadBudget.DefaultMaximumPages,
+            int maximumMessageBytes = RpcReadBudget.DefaultMaximumMessageBytes,
+            TimeSpan? operationTimeout = null)
         {
+            ArgumentOutOfRangeException.ThrowIfLessThan(maximumMessageBytes, 1);
+            using var timeout = new CancellationTokenSource(
+                operationTimeout ?? RpcReadBudget.DefaultOperationTimeout);
+            var budget = new RpcReadBudget(maximumThreads, maximumPages);
             var threads = new List<ThreadSummary>();
             string? cursor = null;
             do
             {
+                budget.BeginPage();
                 var parameters = new JsonObject { ["limit"] = 100 };
                 if (cursor is not null)
                 {
                     parameters["cursor"] = cursor;
                 }
-                var response = await RequestAsync("thread/list", parameters);
+                var response = await RequestAsync(
+                    "thread/list",
+                    parameters,
+                    timeout.Token,
+                    maximumMessageBytes);
                 ThrowIfRpcError(response, "thread/list");
                 var result = response["result"]?.AsObject()
                     ?? throw new InvalidOperationException("thread/list returned no result.");
-                foreach (var node in result["data"]?.AsArray() ?? [])
-                {
-                    if (node is null)
-                    {
-                        continue;
-                    }
-                    threads.Add(new ThreadSummary(
-                        node["id"]?.GetValue<string>() ?? string.Empty,
-                        node["name"]?.GetValue<string>(),
-                        node["status"]?["type"]?.GetValue<string>() ?? "unknown"));
-                }
+                var page = ParseThreadData(result["data"]);
+                budget.AddItems(page.Count);
+                threads.AddRange(page);
                 cursor = result["nextCursor"]?.GetValue<string>();
+                budget.ObserveCursor(cursor);
             }
             while (cursor is not null);
             return threads;
         }
 
-        public async Task<JsonObject> RequestAsync(string method, JsonObject parameters)
+        internal static IReadOnlyList<ThreadSummary> ParseThreadData(JsonNode? dataNode)
+        {
+            if (dataNode is not JsonArray data)
+            {
+                throw new InvalidOperationException("thread/list returned no data array.");
+            }
+
+            var threads = new List<ThreadSummary>(data.Count);
+            foreach (var node in data)
+            {
+                if (node is not JsonObject thread)
+                {
+                    throw new InvalidOperationException(
+                        "thread/list returned a malformed thread entry.");
+                }
+                var status = thread["status"]?["type"] is JsonValue statusValue &&
+                    statusValue.TryGetValue<string>(out var parsedStatus) &&
+                    !string.IsNullOrWhiteSpace(parsedStatus)
+                        ? parsedStatus
+                        : "unknown";
+                threads.Add(new ThreadSummary(
+                    thread["id"]?.GetValue<string>() ?? string.Empty,
+                    thread["name"]?.GetValue<string>(),
+                    status));
+            }
+            return threads;
+        }
+
+        public async Task<JsonObject> RequestAsync(
+            string method,
+            JsonObject parameters,
+            CancellationToken cancellationToken = default,
+            int maximumResponseBytes = RpcReadBudget.DefaultMaximumMessageBytes)
         {
             var id = Interlocked.Increment(ref nextId);
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(15));
             await SendAsync(new JsonObject
             {
                 ["method"] = method,
@@ -1197,7 +1250,7 @@ internal static class Program
 
             while (true)
             {
-                var message = await ReceiveAsync(timeout.Token);
+                var message = await ReceiveAsync(timeout.Token, maximumResponseBytes);
                 if (message["id"]?.GetValue<long>() == id)
                 {
                     return message;
@@ -1215,7 +1268,9 @@ internal static class Program
                 cancellationToken);
         }
 
-        private async Task<JsonObject> ReceiveAsync(CancellationToken cancellationToken)
+        private async Task<JsonObject> ReceiveAsync(
+            CancellationToken cancellationToken,
+            int maximumResponseBytes)
         {
             using var stream = new MemoryStream();
             var buffer = new byte[16 * 1024];
@@ -1227,6 +1282,10 @@ internal static class Program
                 {
                     throw new InvalidOperationException("App-server closed the WebSocket connection.");
                 }
+                RpcReadBudget.EnsureMessageFits(
+                    stream.Length,
+                    result.Count,
+                    maximumResponseBytes);
                 stream.Write(buffer, 0, result.Count);
             }
             while (!result.EndOfMessage);
