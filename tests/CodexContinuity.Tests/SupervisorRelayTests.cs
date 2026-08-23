@@ -133,6 +133,68 @@ public sealed class SupervisorRelayTests : IDisposable
     }
 
     [Fact]
+    public async Task ForeignPrivateListenerNeverOpensPublicGate()
+    {
+        Directory.CreateDirectory(root);
+        var publicPort = FindAvailablePort();
+        var privatePort = 0;
+        var trackedProcessId = 0;
+        WindowsProcessGroup? foreign = null;
+        using var shutdown = new CancellationTokenSource();
+
+        WindowsProcessGroup StartBackend(int port)
+        {
+            privatePort = port;
+            foreign = StartHarnessBackend(port, Path.Combine(root, "foreign-ready.txt"));
+            var startInfo = new ProcessStartInfo(HarnessExecutable())
+            {
+                UseShellExecute = false,
+                WorkingDirectory = root,
+            };
+            startInfo.ArgumentList.Add("process-group-child");
+            startInfo.ArgumentList.Add(root);
+            startInfo.ArgumentList.Add("tracked-non-listener");
+            startInfo.ArgumentList.Add("-1");
+            var tracked = WindowsProcessGroup.Start(startInfo);
+            trackedProcessId = tracked.Id;
+            return tracked;
+        }
+
+        var supervisor = Program.RunOwnedSupervisorAsync(
+            publicPort,
+            root,
+            shutdown.Token,
+            StartBackend,
+            HarnessExecutable());
+        try
+        {
+            Assert.Equal($"backend:{privatePort}", await ReadWhenReadyAsync(privatePort));
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
+            await Assert.ThrowsAsync<HttpRequestException>(() =>
+                client.GetAsync(LoopbackEndpoint.ReadyUrl(publicPort)));
+            Assert.Equal(
+                BackendLeaseLoadKind.Missing,
+                new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(root)).Load().Kind);
+            Assert.NotNull(foreign);
+            Assert.False(foreign.HasExited);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+            if (foreign is { HasExited: false })
+            {
+                foreign.Kill();
+                await foreign.WaitForExitAsync();
+            }
+            foreign?.Dispose();
+        }
+
+        Assert.False(ProcessIsRunning(trackedProcessId));
+        Assert.True(CanBind(publicPort));
+    }
+
+    [Fact]
     public async Task RecoversVerifiedBackendWithoutStartingReplacement()
     {
         Directory.CreateDirectory(root);

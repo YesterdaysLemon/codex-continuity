@@ -1364,7 +1364,7 @@ internal static class Program
         }
         finally
         {
-            try
+            if (process is { HasExited: false })
             {
                 process.Kill();
                 await process.WaitForExitAsync();

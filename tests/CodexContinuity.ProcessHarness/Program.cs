@@ -30,6 +30,16 @@ internal static class Program
                 args[2]).GetAwaiter().GetResult();
         }
 
+        if (args.FirstOrDefault() == "fake-app-server")
+        {
+            return RunFakeAppServerAsync(
+                int.Parse(args[1], CultureInfo.InvariantCulture),
+                args[2],
+                args.Length > 3
+                    ? int.Parse(args[3], CultureInfo.InvariantCulture)
+                    : 0).GetAwaiter().GetResult();
+        }
+
         if (args.FirstOrDefault() == "process-group-parent")
         {
             return RunProcessGroupParent(args[1]);
