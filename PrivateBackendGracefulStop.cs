@@ -36,7 +36,7 @@ internal sealed record PrivateBackendGracefulStopChecks(
 
 internal sealed class PrivateBackendGracefulStopResult
 {
-    private readonly RelayBackendStopReservation? pendingStopReservation;
+    private RelayBackendStopReservation? pendingStopReservation;
     private PrivateBackendGracefulStopResult(
         PrivateBackendGracefulStopKind kind,
         RelayBackendStopReservation? pendingStopReservation)
@@ -45,7 +45,12 @@ internal sealed class PrivateBackendGracefulStopResult
         this.pendingStopReservation = pendingStopReservation;
     }
     internal PrivateBackendGracefulStopKind Kind { get; }
-    internal bool HasPendingStopReservation => pendingStopReservation?.IsCurrent == true;
+    internal bool HasPendingStopReservation =>
+        Volatile.Read(ref pendingStopReservation)?.IsCurrent == true;
+    internal RelayBackendStopReservation? TryTakeTimedOutReservation() =>
+        Kind == PrivateBackendGracefulStopKind.TimedOut
+            ? Interlocked.Exchange(ref pendingStopReservation, null)
+            : null;
     internal static PrivateBackendGracefulStopResult Settled(
         PrivateBackendGracefulStopKind kind) => new(kind, pendingStopReservation: null);
     internal static PrivateBackendGracefulStopResult Pending(
