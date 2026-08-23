@@ -45,6 +45,32 @@ public sealed class InstallCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public void InstallStateStoreAtomicallyPublishesACompleteReplacement()
+    {
+        var state = CreateCoordinator(new FakeInstallPlatform()).Install(
+            CreateSource("version-one"),
+            45123,
+            TrayInstallMode.Disabled).State;
+        var path = ContinuityPaths.InstallStateFile(root);
+        var store = new InstallStateStore(path);
+        var previousBytes = File.ReadAllBytes(path);
+        using var previousSnapshot = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        var replacement = state with { InstalledAtUtc = state.InstalledAtUtc.AddMinutes(1) };
+
+        store.Save(replacement);
+
+        var observedPrevious = new byte[previousBytes.Length];
+        previousSnapshot.ReadExactly(observedPrevious);
+        Assert.Equal(previousBytes, observedPrevious);
+        Assert.Equal(replacement, store.Load());
+        Assert.Empty(Directory.EnumerateFiles(root, "install-state.json.tmp-*"));
+    }
+
+    [Fact]
     public void EnumeratesCurrentPreviousAndLegacySupervisorExecutables()
     {
         var currentRoot = Path.Combine(root, "current");

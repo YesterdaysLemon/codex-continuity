@@ -187,7 +187,8 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
 
         try
         {
-            var bytes = BoundedStateFile.Read(path, MaximumStateBytes);
+            using var stateFile = BoundedStateFile.Open(path, MaximumStateBytes);
+            var bytes = stateFile.Read();
             using var document = JsonDocument.Parse(bytes);
             if (document.RootElement.ValueKind != JsonValueKind.Object ||
                 !document.RootElement.TryGetProperty("schemaVersion", out var schemaElement) ||
@@ -252,7 +253,14 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
         try
         {
             File.WriteAllBytes(temporaryPath, bytes);
-            File.Move(temporaryPath, path, overwrite: true);
+            if (File.Exists(path))
+            {
+                File.Replace(temporaryPath, path, destinationBackupFileName: null);
+            }
+            else
+            {
+                File.Move(temporaryPath, path);
+            }
         }
         finally
         {

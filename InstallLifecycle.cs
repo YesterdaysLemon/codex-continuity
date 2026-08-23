@@ -167,7 +167,8 @@ internal sealed class InstallStateStore(string path)
             return null;
         }
 
-        var bytes = BoundedStateFile.Read(path, MaximumStateBytes);
+        using var stateFile = BoundedStateFile.Open(path, MaximumStateBytes);
+        var bytes = stateFile.Read();
         return JsonSerializer.Deserialize<InstallState>(bytes.Span, SerializerOptions)
             ?? throw new InvalidDataException($"Install state at {path} is empty or invalid.");
     }
@@ -176,8 +177,8 @@ internal sealed class InstallStateStore(string path)
     {
         try
         {
-            using var document = JsonDocument.Parse(
-                BoundedStateFile.Read(path, MaximumStateBytes));
+            using var stateFile = BoundedStateFile.Open(path, MaximumStateBytes);
+            using var document = JsonDocument.Parse(stateFile.Read());
             if (document.RootElement.ValueKind != JsonValueKind.Object ||
                 !document.RootElement.TryGetProperty(
                     "installedExecutable",
@@ -237,7 +238,14 @@ internal sealed class InstallStateStore(string path)
         try
         {
             File.WriteAllBytes(temporaryPath, bytes);
-            File.Move(temporaryPath, path, overwrite: true);
+            if (File.Exists(path))
+            {
+                File.Replace(temporaryPath, path, destinationBackupFileName: null);
+            }
+            else
+            {
+                File.Move(temporaryPath, path);
+            }
         }
         finally
         {

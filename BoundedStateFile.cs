@@ -1,17 +1,31 @@
 namespace CodexContinuity;
 
-internal static class BoundedStateFile
+internal sealed class BoundedStateFile : IDisposable
 {
-    internal static ReadOnlyMemory<byte> Read(string path, int maximumBytes)
+    private readonly FileStream stream;
+    private readonly int maximumBytes;
+
+    private BoundedStateFile(FileStream stream, int maximumBytes)
+    {
+        this.stream = stream;
+        this.maximumBytes = maximumBytes;
+    }
+
+    internal static BoundedStateFile Open(string path, int maximumBytes)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumBytes);
+        return new(
+            new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read | FileShare.Delete),
+            maximumBytes);
+    }
 
-        using var stream = new FileStream(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read | FileShare.Delete);
+    internal ReadOnlyMemory<byte> Read()
+    {
         if (stream.Length > maximumBytes)
         {
             throw new InvalidDataException();
@@ -25,4 +39,6 @@ internal static class BoundedStateFile
         }
         return bytes;
     }
+
+    public void Dispose() => stream.Dispose();
 }

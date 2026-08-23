@@ -207,6 +207,44 @@ public sealed class UpdateStateTests : IDisposable
     }
 
     [Fact]
+    public void StoreAtomicallyPublishesACompleteReplacement()
+    {
+        var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
+        var state = new ContinuityUpdateState(
+            1,
+            now,
+            now,
+            "1.0.0",
+            "1.0.0",
+            "1.0.0",
+            true,
+            null,
+            null,
+            0,
+            0,
+            0,
+            Releases: []);
+        var store = Store();
+        store.Save(state);
+        var path = Path.Combine(root, "update-status.json");
+        var previousBytes = File.ReadAllBytes(path);
+        using var previousSnapshot = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        var replacement = state with { LastCheckedAtUtc = now.AddMinutes(1) };
+
+        store.Save(replacement);
+
+        var observedPrevious = new byte[previousBytes.Length];
+        previousSnapshot.ReadExactly(observedPrevious);
+        Assert.Equal(previousBytes, observedPrevious);
+        Assert.Equivalent(replacement, store.Load().State, strict: true);
+        Assert.Empty(Directory.EnumerateFiles(root, "update-status.json.tmp-*"));
+    }
+
+    [Fact]
     public void StoreRoundTripsValidSemanticVersionsAndHistoricalDefaults()
     {
         var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
