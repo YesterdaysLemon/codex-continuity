@@ -85,7 +85,7 @@ public sealed class BackendLeaseTests : IDisposable
     }
 
     [Fact]
-    public void RecoversOnlyTheExactProcessThatOwnsTheLeasedPort()
+    public void RecoversExactBackendDespiteRecordedLiveSupervisorPid()
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -95,7 +95,7 @@ public sealed class BackendLeaseTests : IDisposable
             ?? throw new InvalidOperationException("Could not locate the test process.");
         var lease = ValidLease() with
         {
-            OwnerSupervisorProcessId = int.MaxValue,
+            OwnerSupervisorProcessId = Environment.ProcessId,
             BackendProcessId = Environment.ProcessId,
             BackendPort = port,
             BackendExecutable = executable,
@@ -108,7 +108,6 @@ public sealed class BackendLeaseTests : IDisposable
         var result = BackendLeaseRecovery.TryRecover(
             store,
             lease.PublicPort,
-            executable,
             root);
 
         Assert.Equal(BackendRecoveryKind.Recovered, result.Kind);
@@ -137,7 +136,6 @@ public sealed class BackendLeaseTests : IDisposable
         var result = BackendLeaseRecovery.TryRecover(
             store,
             lease.PublicPort,
-            executable,
             root);
 
         Assert.Equal(
@@ -162,7 +160,6 @@ public sealed class BackendLeaseTests : IDisposable
             BackendLeaseRecovery.TryRecover(
                 store,
                 45123,
-                ValidLease().BackendExecutable,
                 ValidLease().CodexHome));
 
         var staleLease = ValidLease() with
@@ -180,13 +177,11 @@ public sealed class BackendLeaseTests : IDisposable
             BackendLeaseRecovery.TryRecover(
                 store,
                 staleLease.PublicPort,
-                staleLease.BackendExecutable,
                 staleLease.CodexHome));
 
         var mismatch = BackendLeaseRecovery.TryRecover(
             store,
             45125,
-            staleLease.BackendExecutable,
             staleLease.CodexHome);
         Assert.Equal(
             new BackendRecoveryResult(
@@ -212,7 +207,6 @@ public sealed class BackendLeaseTests : IDisposable
             BackendLeaseRecovery.TryRecover(
                 store,
                 45123,
-                ValidLease().BackendExecutable,
                 ValidLease().CodexHome));
     }
 
@@ -237,30 +231,6 @@ public sealed class BackendLeaseTests : IDisposable
             BackendLeaseRecovery.TryRecover(
                 store,
                 lease.PublicPort,
-                lease.BackendExecutable,
-                lease.CodexHome));
-    }
-
-    [Fact]
-    public void RejectsRecoveryWhileRecordedSupervisorIsAlive()
-    {
-        var lease = CurrentProcessLease(backendPort: 45124) with
-        {
-            OwnerSupervisorProcessId = Environment.ProcessId,
-        };
-        var store = Store();
-        store.Write(lease);
-
-        Assert.Equal(
-            new BackendRecoveryResult(
-                BackendRecoveryKind.Unsafe,
-                Backend: null,
-                lease,
-                "The supervisor recorded in the backend lease is still running or unreadable."),
-            BackendLeaseRecovery.TryRecover(
-                store,
-                lease.PublicPort,
-                lease.BackendExecutable,
                 lease.CodexHome));
     }
 
@@ -274,7 +244,6 @@ public sealed class BackendLeaseTests : IDisposable
         var result = BackendLeaseRecovery.TryRecover(
             store,
             lease.PublicPort,
-            lease.BackendExecutable,
             lease.CodexHome,
             (_, _) => throw new IOException("Injected TCP table failure."));
 

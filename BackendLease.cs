@@ -172,22 +172,20 @@ internal static class BackendLeaseRecovery
     internal static BackendRecoveryResult TryRecover(
         BackendLeaseStore store,
         int publicPort,
-        string expectedExecutable,
         string? expectedCodexHome) => TryRecover(
             store,
             publicPort,
-            expectedExecutable,
             expectedCodexHome,
             WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy);
 
     internal static BackendRecoveryResult TryRecover(
         BackendLeaseStore store,
         int publicPort,
-        string expectedExecutable,
         string? expectedCodexHome,
         Func<int, int, bool> ownsLoopbackListener)
     {
         ArgumentNullException.ThrowIfNull(ownsLoopbackListener);
+        // The caller owns the public-port mutex; a persisted supervisor PID is not durable identity.
         var loadResult = store.Load();
         if (loadResult.Kind == BackendLeaseLoadKind.Missing)
         {
@@ -208,7 +206,6 @@ internal static class BackendLeaseRecovery
         {
             installationMatches =
                 lease.PublicPort == publicPort &&
-                SamePath(lease.BackendExecutable, expectedExecutable) &&
                 SameOptionalPath(lease.CodexHome, expectedCodexHome);
         }
         catch (Exception exception) when (
@@ -224,15 +221,6 @@ internal static class BackendLeaseRecovery
                 lease,
                 "The persisted backend lease does not match this installation.");
         }
-        if (!ProcessHasExited(lease.OwnerSupervisorProcessId))
-        {
-            return new(
-                BackendRecoveryKind.Unsafe,
-                Backend: null,
-                lease,
-                "The supervisor recorded in the backend lease is still running or unreadable.");
-        }
-
         WindowsProcessGroup backend;
         try
         {
@@ -327,22 +315,4 @@ internal static class BackendLeaseRecovery
         Path.GetFullPath(left).Equals(
             Path.GetFullPath(right),
             StringComparison.OrdinalIgnoreCase);
-
-    private static bool ProcessHasExited(int processId)
-    {
-        try
-        {
-            using var process = System.Diagnostics.Process.GetProcessById(processId);
-            return process.HasExited;
-        }
-        catch (ArgumentException)
-        {
-            return true;
-        }
-        catch (Exception exception) when (
-            exception is InvalidOperationException or System.ComponentModel.Win32Exception)
-        {
-            return false;
-        }
-    }
 }
