@@ -381,6 +381,71 @@ public sealed class SupervisorRelayTests : IDisposable
     }
 
     [Fact]
+    public async Task ForeignPrivateListenerNeverOpensPublicGate()
+    {
+        var publicPort = FindAvailablePort();
+        var privatePort = 0;
+        var trackedProcessId = 0;
+        WindowsProcessGroup? foreign = null;
+        try
+        {
+            var exitCode = await OwnedSupervisorRuntime.RunAsync(
+                    publicPort,
+                    root,
+                    CancellationToken.None,
+                    port =>
+                    {
+                        privatePort = port;
+                        foreign = StartHarnessBackend(
+                            port,
+                            Path.Combine(root, "foreign-started.txt"));
+                        var tracked = StartIdleProcess(
+                            Path.Combine(root, "tracked-started.txt"));
+                        trackedProcessId = tracked.Id;
+                        return tracked;
+                    })
+                .WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Equal(1, exitCode);
+            Assert.NotNull(foreign);
+            Assert.False(foreign.HasExited);
+            Assert.False(ProcessIsRunning(trackedProcessId));
+            Assert.True(CanBind(publicPort));
+            Assert.False(CanBind(privatePort));
+            Assert.Equal(
+                BackendLeaseLoadKind.Missing,
+                new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(root)).Load().Kind);
+            var status = await ReadStatusAsync("backendOwnershipLost");
+            Assert.Equal(
+                new SupervisorStatus(
+                    State: "backendOwnershipLost",
+                    SupervisorProcessId: Environment.ProcessId,
+                    BackendProcessId: trackedProcessId,
+                    Port: publicPort,
+                    CodexHome: FutureProcessEnvironment.ResolveCodexHome(),
+                    ConsecutiveFailures: 0,
+                    LastExitCode: null,
+                    UpdatedAtUtc: status.UpdatedAtUtc,
+                    NextRetryAtUtc: null,
+                    Detail: "The private listener is not owned by the supervised backend.",
+                    SupervisorStartedAtUtc: status.SupervisorStartedAtUtc,
+                    SupervisorExecutable: status.SupervisorExecutable),
+                status);
+        }
+        finally
+        {
+            if (foreign is { HasExited: false })
+            {
+                foreign.Kill();
+                await foreign.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            foreign?.Dispose();
+        }
+
+        Assert.True(CanBind(privatePort));
+    }
+
+    [Fact]
     public async Task BackendRestartKeepsPublicEndpointGatedUntilReplacementIsReady()
     {
         var publicPort = FindAvailablePort();
@@ -634,6 +699,21 @@ public sealed class SupervisorRelayTests : IDisposable
         {
             startInfo.ArgumentList.Add(startGatePath);
         }
+        var process = WindowsProcessGroup.Start(startInfo);
+        harnesses.Enqueue(new(process.Id, process.StartedAtUtc, executable));
+        return process;
+    }
+
+    private WindowsProcessGroup StartIdleProcess(string fixtureStartedPath)
+    {
+        var executable = HarnessExecutable();
+        var startInfo = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = false,
+            WorkingDirectory = root,
+        };
+        startInfo.ArgumentList.Add("idle-process");
+        startInfo.ArgumentList.Add(fixtureStartedPath);
         var process = WindowsProcessGroup.Start(startInfo);
         harnesses.Enqueue(new(process.Id, process.StartedAtUtc, executable));
         return process;
