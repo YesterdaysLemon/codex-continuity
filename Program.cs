@@ -510,7 +510,7 @@ internal static class Program
         return result.State?.LastError is null ? 0 : 1;
     }
 
-    private static SupervisorStatus NewSupervisorStatus(
+    internal static SupervisorStatus NewSupervisorStatus(
         string state,
         int port,
         string codexHome,
@@ -532,7 +532,7 @@ internal static class Program
             ProcessStartedAtUtc,
             Environment.ProcessPath);
 
-    private static async Task AwaitLogPumpsAsync(params Task[] pumps)
+    internal static async Task AwaitLogPumpsAsync(params Task[] pumps)
     {
         try
         {
@@ -1301,7 +1301,7 @@ internal static class Program
         return WindowsProcessGroup.Start(startInfo);
     }
 
-    private static async Task<bool> WaitUntilReadyAsync(
+    internal static async Task<bool> WaitUntilReadyAsync(
         int port,
         WindowsProcessGroup process,
         TimeSpan timeout,
@@ -1416,7 +1416,7 @@ internal static class Program
         }
     }
 
-    private static async Task PumpLogAsync(
+    internal static async Task PumpLogAsync(
         StreamReader reader,
         RollingLogWriter logWriter,
         CancellationToken cancellationToken)
@@ -1546,7 +1546,7 @@ internal static class Program
         return new ProcessResult(process.ExitCode, await stdout, await stderr);
     }
 
-    private static int FindAvailablePort(params int[] excludedPorts)
+    internal static int FindAvailablePort(params int[] excludedPorts)
     {
         while (true)
         {
