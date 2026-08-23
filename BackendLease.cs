@@ -58,7 +58,7 @@ internal sealed record BackendLeaseLoadResult(
 
 internal sealed class BackendLeaseStore(string path)
 {
-    private const long MaximumBytes = 64 * 1024;
+    private const int MaximumBytes = 64 * 1024;
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -67,24 +67,43 @@ internal sealed class BackendLeaseStore(string path)
 
     internal BackendLeaseLoadResult Load()
     {
-        if (!File.Exists(path))
-        {
-            return new(BackendLeaseLoadKind.Missing, Lease: null);
-        }
-
         try
         {
-            if (new FileInfo(path).Length > MaximumBytes)
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete,
+                bufferSize: 4096,
+                FileOptions.SequentialScan);
+            var bytes = new byte[MaximumBytes + 1];
+            var bytesRead = 0;
+            while (bytesRead < bytes.Length)
+            {
+                var read = stream.Read(bytes, bytesRead, bytes.Length - bytesRead);
+                if (read == 0)
+                {
+                    break;
+                }
+                bytesRead += read;
+            }
+            if (bytesRead > MaximumBytes)
             {
                 return new(BackendLeaseLoadKind.Invalid, Lease: null);
             }
+
             var lease = JsonSerializer.Deserialize<BackendLease>(
-                File.ReadAllText(path),
+                bytes.AsSpan(0, bytesRead),
                 SerializerOptions);
             lease?.Validate();
             return lease is null
                 ? new(BackendLeaseLoadKind.Invalid, Lease: null)
                 : new(BackendLeaseLoadKind.Loaded, lease);
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return new(BackendLeaseLoadKind.Missing, Lease: null);
         }
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException or JsonException or
@@ -98,15 +117,19 @@ internal sealed class BackendLeaseStore(string path)
     {
         ArgumentNullException.ThrowIfNull(lease);
         lease.Validate();
+        var serialized = JsonSerializer.SerializeToUtf8Bytes(lease, SerializerOptions);
+        if (serialized.Length > MaximumBytes)
+        {
+            throw new InvalidDataException(
+                $"Backend lease exceeds the {MaximumBytes}-byte limit.");
+        }
         var directory = Path.GetDirectoryName(path)
             ?? throw new InvalidOperationException($"Backend lease path has no directory: {path}");
         Directory.CreateDirectory(directory);
         var temporaryPath = $"{path}.tmp-{Guid.NewGuid():N}";
         try
         {
-            File.WriteAllText(
-                temporaryPath,
-                JsonSerializer.Serialize(lease, SerializerOptions));
+            File.WriteAllBytes(temporaryPath, serialized);
             File.Move(temporaryPath, path, overwrite: true);
         }
         finally
@@ -150,8 +173,21 @@ internal static class BackendLeaseRecovery
         BackendLeaseStore store,
         int publicPort,
         string expectedExecutable,
-        string? expectedCodexHome)
+        string? expectedCodexHome) => TryRecover(
+            store,
+            publicPort,
+            expectedExecutable,
+            expectedCodexHome,
+            WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy);
+
+    internal static BackendRecoveryResult TryRecover(
+        BackendLeaseStore store,
+        int publicPort,
+        string expectedExecutable,
+        string? expectedCodexHome,
+        Func<int, int, bool> ownsLoopbackListener)
     {
+        ArgumentNullException.ThrowIfNull(ownsLoopbackListener);
         var loadResult = store.Load();
         if (loadResult.Kind == BackendLeaseLoadKind.Missing)
         {
@@ -187,6 +223,14 @@ internal static class BackendLeaseRecovery
                 Backend: null,
                 lease,
                 "The persisted backend lease does not match this installation.");
+        }
+        if (!ProcessHasExited(lease.OwnerSupervisorProcessId))
+        {
+            return new(
+                BackendRecoveryKind.Unsafe,
+                Backend: null,
+                lease,
+                "The supervisor recorded in the backend lease is still running or unreadable.");
         }
 
         WindowsProcessGroup backend;
@@ -243,14 +287,20 @@ internal static class BackendLeaseRecovery
         bool ownsPort;
         try
         {
-            ownsPort = WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy(
+            ownsPort = ownsLoopbackListener(
                 lease.BackendPort,
                 lease.BackendProcessId);
         }
-        catch
+        catch (Exception exception) when (
+            exception is IOException or InvalidDataException or
+                System.ComponentModel.Win32Exception)
         {
             backend.Dispose();
-            throw;
+            return new(
+                BackendRecoveryKind.Unsafe,
+                Backend: null,
+                lease,
+                "Private loopback port ownership could not be inspected.");
         }
         if (!ownsPort)
         {
@@ -277,4 +327,22 @@ internal static class BackendLeaseRecovery
         Path.GetFullPath(left).Equals(
             Path.GetFullPath(right),
             StringComparison.OrdinalIgnoreCase);
+
+    private static bool ProcessHasExited(int processId)
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(processId);
+            return process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
 }

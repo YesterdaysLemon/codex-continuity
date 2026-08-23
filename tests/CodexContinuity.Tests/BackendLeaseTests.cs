@@ -44,6 +44,28 @@ public sealed class BackendLeaseTests : IDisposable
             store.Load());
     }
 
+    [Fact]
+    public void DirectoryAtLeasePathIsInvalidRatherThanMissing()
+    {
+        var path = ContinuityPaths.BackendLeaseFile(root);
+        Directory.CreateDirectory(path);
+
+        Assert.Equal(
+            new BackendLeaseLoadResult(BackendLeaseLoadKind.Invalid, Lease: null),
+            new BackendLeaseStore(path).Load());
+    }
+
+    [Fact]
+    public void RefusesToWriteLeaseThatCannotBeReadWithinBound()
+    {
+        var lease = ValidLease() with
+        {
+            BackendExecutable = $"C:\\{new string('a', 70 * 1024)}",
+        };
+
+        Assert.Throws<InvalidDataException>(() => Store().Write(lease));
+    }
+
     [Theory]
     [InlineData(0, 45123, 45124)]
     [InlineData(1, 45123, 45123)]
@@ -73,7 +95,7 @@ public sealed class BackendLeaseTests : IDisposable
             ?? throw new InvalidOperationException("Could not locate the test process.");
         var lease = ValidLease() with
         {
-            OwnerSupervisorProcessId = Environment.ProcessId + 1,
+            OwnerSupervisorProcessId = int.MaxValue,
             BackendProcessId = Environment.ProcessId,
             BackendPort = port,
             BackendExecutable = executable,
@@ -103,6 +125,7 @@ public sealed class BackendLeaseTests : IDisposable
             ?? throw new InvalidOperationException("Could not locate the test process.");
         var lease = ValidLease() with
         {
+            OwnerSupervisorProcessId = int.MaxValue,
             BackendProcessId = Environment.ProcessId,
             BackendExecutable = executable,
             CodexHome = root,
@@ -117,8 +140,126 @@ public sealed class BackendLeaseTests : IDisposable
             executable,
             root);
 
-        Assert.Equal(BackendRecoveryKind.Unsafe, result.Kind);
-        Assert.Null(result.Backend);
+        Assert.Equal(
+            new BackendRecoveryResult(
+                BackendRecoveryKind.Unsafe,
+                Backend: null,
+                lease,
+                "The leased backend does not own its private loopback port."),
+            result);
+    }
+
+    [Fact]
+    public void DistinguishesMissingStaleAndInstallationMismatch()
+    {
+        var store = Store();
+        Assert.Equal(
+            new BackendRecoveryResult(
+                BackendRecoveryKind.None,
+                Backend: null,
+                Lease: null,
+                Detail: null),
+            BackendLeaseRecovery.TryRecover(
+                store,
+                45123,
+                ValidLease().BackendExecutable,
+                ValidLease().CodexHome));
+
+        var staleLease = ValidLease() with
+        {
+            OwnerSupervisorProcessId = int.MaxValue - 1,
+            BackendProcessId = int.MaxValue,
+        };
+        store.Write(staleLease);
+        Assert.Equal(
+            new BackendRecoveryResult(
+                BackendRecoveryKind.Stale,
+                Backend: null,
+                staleLease,
+                "The leased backend process no longer exists."),
+            BackendLeaseRecovery.TryRecover(
+                store,
+                staleLease.PublicPort,
+                staleLease.BackendExecutable,
+                staleLease.CodexHome));
+
+        var mismatch = BackendLeaseRecovery.TryRecover(
+            store,
+            45125,
+            staleLease.BackendExecutable,
+            staleLease.CodexHome);
+        Assert.Equal(
+            new BackendRecoveryResult(
+                BackendRecoveryKind.Unsafe,
+                Backend: null,
+                staleLease,
+                "The persisted backend lease does not match this installation."),
+            mismatch);
+    }
+
+    [Fact]
+    public void MalformedLeaseProducesUnsafeRecoveryDecision()
+    {
+        var store = Store();
+        File.WriteAllText(ContinuityPaths.BackendLeaseFile(root), "{not-json");
+
+        Assert.Equal(
+            new BackendRecoveryResult(
+                BackendRecoveryKind.Unsafe,
+                Backend: null,
+                Lease: null,
+                "The persisted backend lease is invalid."),
+            BackendLeaseRecovery.TryRecover(
+                store,
+                45123,
+                ValidLease().BackendExecutable,
+                ValidLease().CodexHome));
+    }
+
+    [Fact]
+    public void RejectsRecoveryWhileRecordedSupervisorIsAlive()
+    {
+        var lease = CurrentProcessLease(backendPort: 45124) with
+        {
+            OwnerSupervisorProcessId = Environment.ProcessId,
+        };
+        var store = Store();
+        store.Write(lease);
+
+        Assert.Equal(
+            new BackendRecoveryResult(
+                BackendRecoveryKind.Unsafe,
+                Backend: null,
+                lease,
+                "The supervisor recorded in the backend lease is still running or unreadable."),
+            BackendLeaseRecovery.TryRecover(
+                store,
+                lease.PublicPort,
+                lease.BackendExecutable,
+                lease.CodexHome));
+    }
+
+    [Fact]
+    public void PortInspectionFailureProducesUnsafeRecoveryDecision()
+    {
+        var lease = CurrentProcessLease(backendPort: 45124);
+        var store = Store();
+        store.Write(lease);
+
+        var result = BackendLeaseRecovery.TryRecover(
+            store,
+            lease.PublicPort,
+            lease.BackendExecutable,
+            lease.CodexHome,
+            (_, _) => throw new IOException("Injected TCP table failure."));
+
+        Assert.Equal(
+            new BackendRecoveryResult(
+                BackendRecoveryKind.Unsafe,
+                Backend: null,
+                lease,
+                "Private loopback port ownership could not be inspected."),
+            result);
     }
 
     private BackendLeaseStore Store()
@@ -129,7 +270,7 @@ public sealed class BackendLeaseTests : IDisposable
 
     private static BackendLease ValidLease() => new(
         BackendLease.CurrentSchemaVersion,
-        OwnerSupervisorProcessId: 10,
+        OwnerSupervisorProcessId: int.MaxValue,
         BackendProcessId: 11,
         PublicPort: 45123,
         BackendPort: 45124,
@@ -139,6 +280,20 @@ public sealed class BackendLeaseTests : IDisposable
             "cmd.exe"),
         CodexHome: Path.GetTempPath(),
         BackendStartedAtUtc: DateTimeOffset.UtcNow);
+
+    private BackendLease CurrentProcessLease(int backendPort)
+    {
+        using var current = Process.GetCurrentProcess();
+        return ValidLease() with
+        {
+            BackendProcessId = Environment.ProcessId,
+            BackendPort = backendPort,
+            BackendExecutable = Environment.ProcessPath
+                ?? throw new InvalidOperationException("Could not locate the test process."),
+            CodexHome = root,
+            BackendStartedAtUtc = current.StartTime.ToUniversalTime(),
+        };
+    }
 
     public void Dispose()
     {
