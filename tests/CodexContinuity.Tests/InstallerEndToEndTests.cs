@@ -286,13 +286,19 @@ public sealed class InstallerEndToEndTests : IDisposable
             SupervisorCompatibilityScope.ForStateDirectory(root),
             RunUpdater,
             RunOwnedSupervisor);
-        await runtimeEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-
-        Assert.False(serveTask.IsCompleted);
-        Assert.False(capturedShutdownToken.IsCancellationRequested);
-        Assert.False(updaterCancelled.Task.IsCompleted);
-        allowRuntimeExit.SetResult();
-        var exitCode = await serveTask.WaitAsync(TimeSpan.FromSeconds(5));
+        var exitCode = 0;
+        try
+        {
+            await runtimeEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(serveTask.IsCompleted);
+            Assert.False(capturedShutdownToken.IsCancellationRequested);
+            Assert.False(updaterCancelled.Task.IsCompleted);
+        }
+        finally
+        {
+            allowRuntimeExit.TrySetResult();
+            exitCode = await serveTask.WaitAsync(TimeSpan.FromSeconds(5));
+        }
 
         Assert.Equal(23, exitCode);
         Assert.Equal(publicPort, capturedPort);
