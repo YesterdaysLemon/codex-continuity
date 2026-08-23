@@ -28,7 +28,8 @@ internal static class OwnedSupervisorRuntime
                 reportError: exception => Console.Error.WriteLine(
                     $"Loopback relay connection failed: {exception.Message}"));
         }
-        catch (System.Net.Sockets.SocketException)
+        catch (System.Net.Sockets.SocketException exception) when (
+            exception.SocketErrorCode == System.Net.Sockets.SocketError.AddressAlreadyInUse)
         {
             statusStore.Write(Program.NewSupervisorStatus(
                 "foreignEndpoint",
