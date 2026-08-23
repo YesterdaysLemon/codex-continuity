@@ -235,7 +235,7 @@ public sealed class WindowsProcessGroupTests
     }
 
     [Fact]
-    public async Task BoundedGracefulStopDeliversCtrlBreak()
+    public async Task BoundedStopDeliversCtrlBreakAndReturnsCleanExit()
     {
         var testDirectory = Path.Combine(
             Path.GetTempPath(),
@@ -261,9 +261,11 @@ public sealed class WindowsProcessGroupTests
                 () => File.Exists(Path.Combine(testDirectory, "ready.txt")),
                 TimeSpan.FromSeconds(5)));
 
-            Assert.True(await Program.StopAppServerGracefullyAsync(
-                process,
-                TimeSpan.FromSeconds(5)));
+            Assert.Equal(
+                Program.AppServerStopDisposition.CleanExit,
+                await Program.StopAppServerWithCtrlBreakAsync(
+                    process,
+                    TimeSpan.FromSeconds(5)));
             Assert.Equal(
                 "ControlBreak",
                 await File.ReadAllTextAsync(Path.Combine(testDirectory, "signal.txt")));

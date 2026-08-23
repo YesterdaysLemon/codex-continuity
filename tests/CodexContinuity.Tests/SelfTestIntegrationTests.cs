@@ -18,19 +18,20 @@ public sealed class SelfTestIntegrationTests : IDisposable
         var processId = 0;
 
         var result = await Program.RunSelfTestAsync(
-            startBackend: (port, _) => StartFakeBackend(port, "graceful", out processId),
-            gracefulStopTimeout: TimeSpan.FromSeconds(5));
+            startBackend: (port, _) => StartFakeBackend(port, "clean", out processId),
+            boundedStopTimeout: TimeSpan.FromSeconds(5));
 
         Assert.Equal(
             $"{{\"passed\":true,\"isolated\":true,\"appServerPid\":{processId}," +
             "\"threadId\":\"fake-thread\",\"relayed\":true,\"reconnected\":true," +
-            "\"threadPersistedAcrossReconnect\":true,\"gracefulStop\":true}",
+            "\"threadPersistedAcrossReconnect\":true,\"boundedStop\":true," +
+            "\"stopDisposition\":\"cleanExit\"}",
             result.ToJsonString());
         Assert.False(ProcessIsRunning(processId));
     }
 
     [Fact]
-    public async Task GracefulStopTimeoutForcesBackendCleanup()
+    public async Task BoundedStopTimeoutForcesBackendCleanup()
     {
         Directory.CreateDirectory(root);
         var processId = 0;
@@ -38,10 +39,10 @@ public sealed class SelfTestIntegrationTests : IDisposable
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             Program.RunSelfTestAsync(
                 startBackend: (port, _) => StartFakeBackend(port, "ignore", out processId),
-                gracefulStopTimeout: TimeSpan.FromMilliseconds(100)));
+                boundedStopTimeout: TimeSpan.FromMilliseconds(100)));
 
         Assert.Equal(
-            "The isolated app-server did not honor bounded graceful shutdown.",
+            "The isolated app-server did not honor bounded Ctrl+Break shutdown.",
             exception.Message);
         Assert.False(ProcessIsRunning(processId));
     }
@@ -74,9 +75,11 @@ public sealed class SelfTestIntegrationTests : IDisposable
         });
         await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.False(await Program.StopAppServerGracefullyAsync(
-            process,
-            TimeSpan.FromSeconds(1)));
+        Assert.Equal(
+            Program.AppServerStopDisposition.AlreadyExited,
+            await Program.StopAppServerWithCtrlBreakAsync(
+                process,
+                TimeSpan.FromSeconds(1)));
     }
 
     [Fact]
@@ -87,23 +90,27 @@ public sealed class SelfTestIntegrationTests : IDisposable
         using var process = StartFakeBackend(port, "nonzero", out _);
         await WaitUntilReadyAsync(port);
 
-        Assert.False(await Program.StopAppServerGracefullyAsync(
-            process,
-            TimeSpan.FromSeconds(5)));
+        Assert.Equal(
+            Program.AppServerStopDisposition.UnexpectedExit,
+            await Program.StopAppServerWithCtrlBreakAsync(
+                process,
+                TimeSpan.FromSeconds(5)));
         Assert.Equal(17, process.ExitCode);
     }
 
     [Fact]
-    public async Task WindowsControlExitAfterCtrlBreakIsReportedGraceful()
+    public async Task WindowsControlExitIsReportedWithoutClaimingGracefulDrain()
     {
         Directory.CreateDirectory(root);
         var port = AvailablePort();
         using var process = StartFakeBackend(port, "control-exit", out _);
         await WaitUntilReadyAsync(port);
 
-        Assert.True(await Program.StopAppServerGracefullyAsync(
-            process,
-            TimeSpan.FromSeconds(5)));
+        Assert.Equal(
+            Program.AppServerStopDisposition.WindowsControlExit,
+            await Program.StopAppServerWithCtrlBreakAsync(
+                process,
+                TimeSpan.FromSeconds(5)));
         Assert.Equal(unchecked((int)0xC000013A), process.ExitCode);
     }
 

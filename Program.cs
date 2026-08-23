@@ -763,14 +763,14 @@ internal static class Program
         var codexPath = FindCodexExecutable();
         var result = await RunSelfTestAsync(
             startBackend: (port, codexHome) => StartAppServer(codexPath, port, codexHome),
-            gracefulStopTimeout: TimeSpan.FromSeconds(10));
+            boundedStopTimeout: TimeSpan.FromSeconds(10));
         Console.WriteLine(result.ToJsonString(JsonOptions));
         return 0;
     }
 
     internal static async Task<JsonObject> RunSelfTestAsync(
         Func<int, string, WindowsProcessGroup> startBackend,
-        TimeSpan gracefulStopTimeout)
+        TimeSpan boundedStopTimeout)
     {
         var publicPort = FindAvailablePort();
         var backendPort = FindAvailablePort(publicPort);
@@ -858,13 +858,22 @@ internal static class Program
                 ["threadPersistedAcrossReconnect"] = true,
             };
             await relay.CloseGateAsync();
-            if (!await StopAppServerGracefullyAsync(process, gracefulStopTimeout))
+            var stopDisposition = await StopAppServerWithCtrlBreakAsync(
+                process,
+                boundedStopTimeout);
+            if (stopDisposition is not (
+                    AppServerStopDisposition.CleanExit or
+                    AppServerStopDisposition.WindowsControlExit))
             {
                 throw new InvalidOperationException(
-                    "The isolated app-server did not honor bounded graceful shutdown.");
+                    "The isolated app-server did not honor bounded Ctrl+Break shutdown.");
             }
             await Task.WhenAll(stdout, stderr);
-            result["gracefulStop"] = true;
+            result["boundedStop"] = true;
+            result["stopDisposition"] =
+                stopDisposition == AppServerStopDisposition.CleanExit
+                    ? "cleanExit"
+                    : "windowsControlExit";
             return result;
         }
         finally
@@ -907,27 +916,32 @@ internal static class Program
         }
     }
 
-    internal static async Task<bool> StopAppServerGracefullyAsync(
+    internal static async Task<AppServerStopDisposition> StopAppServerWithCtrlBreakAsync(
         WindowsProcessGroup process,
         TimeSpan timeout)
     {
         if (process.HasExited)
         {
-            return false;
+            return AppServerStopDisposition.AlreadyExited;
         }
         if (!process.SendCtrlBreak())
         {
-            return false;
+            return AppServerStopDisposition.AlreadyExited;
         }
         using var timeoutCancellation = new CancellationTokenSource(timeout);
         try
         {
             await process.WaitForExitAsync(timeoutCancellation.Token);
-            return process.ExitCode is 0 or StatusControlCExit;
+            return process.ExitCode switch
+            {
+                0 => AppServerStopDisposition.CleanExit,
+                StatusControlCExit => AppServerStopDisposition.WindowsControlExit,
+                _ => AppServerStopDisposition.UnexpectedExit,
+            };
         }
         catch (OperationCanceledException) when (timeoutCancellation.IsCancellationRequested)
         {
-            return false;
+            return AppServerStopDisposition.TimedOut;
         }
     }
 
@@ -1268,6 +1282,14 @@ internal static class Program
     };
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
+    internal enum AppServerStopDisposition
+    {
+        CleanExit,
+        WindowsControlExit,
+        AlreadyExited,
+        TimedOut,
+        UnexpectedExit,
+    }
     internal sealed record ThreadSummary(
         string Id,
         string? Name,
