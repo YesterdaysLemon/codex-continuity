@@ -10,66 +10,90 @@ internal static class WindowsTcpPortOwnership
     private const uint ErrorInsufficientBuffer = 122;
     private const uint TcpStateListen = 2;
     private const int TcpTableOwnerPidListener = 3;
+    private const int MaximumTableBytes = 4 * 1024 * 1024;
+    private const int MaximumReadAttempts = 4;
+
+    internal delegate uint TcpTableReader(IntPtr table, ref int size);
 
     internal static bool IsLoopbackListenerOwnedBy(int port, int processId)
+        => IsLoopbackListenerOwnedBy(port, processId, ReadNativeTable);
+
+    internal static bool IsLoopbackListenerOwnedBy(
+        int port,
+        int processId,
+        TcpTableReader readTable)
     {
         LoopbackEndpoint.ValidatePort(port);
         if (processId <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(processId));
         }
+        ArgumentNullException.ThrowIfNull(readTable);
 
         var bufferLength = 0;
-        var result = GetExtendedTcpTable(
-            IntPtr.Zero,
-            ref bufferLength,
-            sort: false,
-            checked((int)AddressFamily.InterNetwork),
-            TcpTableOwnerPidListener,
-            reserved: 0);
+        var result = readTable(IntPtr.Zero, ref bufferLength);
         if (result != ErrorInsufficientBuffer)
         {
             throw new Win32Exception(checked((int)result), "Could not size the TCP owner table.");
         }
 
-        var buffer = Marshal.AllocHGlobal(bufferLength);
-        try
+        for (var attempt = 0; attempt < MaximumReadAttempts; attempt++)
         {
-            result = GetExtendedTcpTable(
-                buffer,
-                ref bufferLength,
-                sort: false,
-                checked((int)AddressFamily.InterNetwork),
-                TcpTableOwnerPidListener,
-                reserved: 0);
-            if (result != 0)
+            if (bufferLength < sizeof(int) || bufferLength > MaximumTableBytes)
             {
-                throw new Win32Exception(
-                    checked((int)result),
-                    "Could not read the TCP owner table.");
+                throw new InvalidDataException(
+                    $"TCP owner table size {bufferLength} is outside the allowed range.");
             }
-
-            var rowCount = Marshal.ReadInt32(buffer);
-            var rowSize = Marshal.SizeOf<TcpRowOwnerPid>();
-            var rowAddress = IntPtr.Add(buffer, sizeof(int));
-            for (var index = 0; index < rowCount; index++)
+            var buffer = Marshal.AllocHGlobal(bufferLength);
+            try
             {
-                var row = Marshal.PtrToStructure<TcpRowOwnerPid>(
-                    IntPtr.Add(rowAddress, index * rowSize));
-                if (row.State == TcpStateListen &&
-                    row.OwningProcessId == processId &&
-                    DecodePort(row.LocalPort) == port &&
-                    new IPAddress(row.LocalAddress).Equals(IPAddress.Loopback))
+                result = readTable(buffer, ref bufferLength);
+                if (result == ErrorInsufficientBuffer)
                 {
-                    return true;
+                    continue;
                 }
+                if (result != 0)
+                {
+                    throw new Win32Exception(
+                        checked((int)result),
+                        "Could not read the TCP owner table.");
+                }
+                return ContainsOwnedListener(buffer, bufferLength, port, processId);
             }
-            return false;
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
         }
-        finally
+        throw new IOException("The TCP owner table changed too often to verify safely.");
+    }
+
+    private static bool ContainsOwnedListener(
+        IntPtr buffer,
+        int bufferLength,
+        int port,
+        int processId)
+    {
+        var rowCount = Marshal.ReadInt32(buffer);
+        var rowSize = Marshal.SizeOf<TcpRowOwnerPid>();
+        if (rowCount < 0 || rowCount > (bufferLength - sizeof(int)) / rowSize)
         {
-            Marshal.FreeHGlobal(buffer);
+            throw new InvalidDataException("TCP owner table row count exceeds its buffer.");
         }
+        var rowAddress = IntPtr.Add(buffer, sizeof(int));
+        for (var index = 0; index < rowCount; index++)
+        {
+            var row = Marshal.PtrToStructure<TcpRowOwnerPid>(
+                IntPtr.Add(rowAddress, index * rowSize));
+            if (row.State == TcpStateListen &&
+                row.OwningProcessId == processId &&
+                DecodePort(row.LocalPort) == port &&
+                new IPAddress(row.LocalAddress).Equals(IPAddress.Loopback))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static int DecodePort(uint encodedPort)
@@ -88,6 +112,14 @@ internal static class WindowsTcpPortOwnership
         internal readonly uint RemotePort;
         internal readonly int OwningProcessId;
     }
+
+    private static uint ReadNativeTable(IntPtr table, ref int size) => GetExtendedTcpTable(
+        table,
+        ref size,
+        sort: false,
+        checked((int)AddressFamily.InterNetwork),
+        TcpTableOwnerPidListener,
+        reserved: 0);
 
     [DllImport("iphlpapi.dll", SetLastError = true)]
     private static extern uint GetExtendedTcpTable(

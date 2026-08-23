@@ -2,6 +2,7 @@ using CodexContinuity.ProcessHarness;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Xunit;
 
@@ -129,8 +130,13 @@ public sealed class WindowsProcessGroupTests
     }
 
     [Fact]
-    public async Task AttachesToExistingProcessWithoutOwningItsLifetime()
+    public async Task AttachmentObservesExactTargetExitWithoutOwningItsLifetime()
     {
+        var testDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"codex-continuity-attachment-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(testDirectory);
+        var releasePath = Path.Combine(testDirectory, "release.txt");
         var powershell = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.Windows),
             "System32",
@@ -143,20 +149,38 @@ public sealed class WindowsProcessGroupTests
         };
         startInfo.ArgumentList.Add("-NoProfile");
         startInfo.ArgumentList.Add("-Command");
-        startInfo.ArgumentList.Add("Start-Sleep -Seconds 30");
-        using var owner = WindowsProcessGroup.Start(startInfo);
-
-        using (var attachment = WindowsProcessGroup.Attach(owner.Id))
+        startInfo.ArgumentList.Add(
+            $"while (-not (Test-Path -LiteralPath '{releasePath}')) {{ Start-Sleep -Milliseconds 20 }}; exit 259");
+        WindowsProcessGroup? owner = null;
+        try
         {
-            Assert.Equal(owner.Id, attachment.Id);
-            Assert.Equal(owner.StartedAtUtc, attachment.StartedAtUtc);
-            Assert.Equal(owner.ExecutablePath, attachment.ExecutablePath);
-            Assert.False(attachment.HasExited);
-        }
+            owner = WindowsProcessGroup.Start(startInfo);
+            using (var nonOwning = WindowsProcessGroup.Attach(owner.Id))
+            {
+                Assert.Equal(owner.Id, nonOwning.Id);
+                Assert.Equal(owner.StartedAtUtc, nonOwning.StartedAtUtc);
+                Assert.Equal(owner.ExecutablePath, nonOwning.ExecutablePath);
+                Assert.False(nonOwning.HasExited);
+            }
+            Assert.False(owner.HasExited);
 
-        Assert.False(owner.HasExited);
-        owner.Kill();
-        await owner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            using var observer = WindowsProcessGroup.Attach(owner.Id);
+            File.WriteAllText(releasePath, string.Empty);
+            await observer.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.True(observer.HasExited);
+            Assert.Equal(259, observer.ExitCode);
+        }
+        finally
+        {
+            if (owner is { HasExited: false })
+            {
+                owner.Kill();
+                await owner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            owner?.Dispose();
+            DeleteTestDirectory(testDirectory);
+        }
     }
 
     [Fact]
@@ -172,6 +196,42 @@ public sealed class WindowsProcessGroupTests
         Assert.False(WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy(
             port,
             int.MaxValue));
+    }
+
+    [Fact]
+    public void RetriesBoundedTcpTableGrowth()
+    {
+        const int rowBytes = sizeof(int) + (6 * sizeof(uint));
+        const int port = 45123;
+        var calls = 0;
+
+        uint ReadGrowingTable(IntPtr table, ref int size)
+        {
+            calls++;
+            size = rowBytes;
+            if (calls < 3)
+            {
+                return 122;
+            }
+            Marshal.WriteInt32(table, 0, 1);
+            Marshal.WriteInt32(table, 4, 2);
+            Marshal.WriteInt32(
+                table,
+                8,
+                BitConverter.ToInt32(IPAddress.Loopback.GetAddressBytes()));
+            Marshal.WriteInt32(
+                table,
+                12,
+                BitConverter.ToInt32([(byte)(port >> 8), (byte)(port & 0xff), 0, 0]));
+            Marshal.WriteInt32(table, 24, Environment.ProcessId);
+            return 0;
+        }
+
+        Assert.True(WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy(
+            port,
+            Environment.ProcessId,
+            ReadGrowingTable));
+        Assert.Equal(3, calls);
     }
 
     private static bool ProcessIsRunning(int processId)
