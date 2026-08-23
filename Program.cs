@@ -370,16 +370,14 @@ internal static class Program
             port,
             stateDirectory,
             updateLifetime.Token,
-            backendPort => StartAppServer(ResolveCodexPath(), backendPort),
-            ResolveCodexPath);
+            backendPort => StartAppServer(ResolveCodexPath(), backendPort));
     }
 
     internal static async Task<int> RunOwnedSupervisorAsync(
         int port,
         string stateDirectory,
         CancellationToken shutdownToken,
-        Func<int, WindowsProcessGroup> startBackend,
-        Func<string> resolveBackendExecutable)
+        Func<int, WindowsProcessGroup> startBackend)
     {
         Directory.CreateDirectory(stateDirectory);
         var logPath = ContinuityPaths.AppServerLogFile(stateDirectory);
@@ -436,7 +434,6 @@ internal static class Program
         var recovery = BackendLeaseRecovery.TryRecover(
             leaseStore,
             port,
-            resolveBackendExecutable(),
             codexHome);
         if (recovery.Kind == BackendRecoveryKind.Unsafe)
         {

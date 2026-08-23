@@ -40,8 +40,7 @@ public sealed class SupervisorRelayTests : IDisposable
             publicPort,
             root,
             shutdown.Token,
-            StartBackend,
-            HarnessExecutable);
+            StartBackend);
         try
         {
             var firstBody = await ReadWhenReadyAsync(publicPort);
@@ -113,8 +112,7 @@ public sealed class SupervisorRelayTests : IDisposable
             publicPort,
             root,
             shutdown.Token,
-            StartBackend,
-            HarnessExecutable);
+            StartBackend);
         try
         {
             Assert.Equal($"backend:{privatePort}", await ReadWhenReadyAsync(privatePort));
@@ -174,8 +172,7 @@ public sealed class SupervisorRelayTests : IDisposable
                 return StartHarnessBackend(
                     port,
                     Path.Combine(root, "unexpected-replacement.txt"));
-            },
-            HarnessExecutable);
+            });
         try
         {
             Assert.Equal($"backend:{backendPort}", await ReadWhenReadyAsync(publicPort));
