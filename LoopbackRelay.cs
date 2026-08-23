@@ -148,6 +148,8 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         }
     }
 
+    internal int PublicPort => publicPort;
+
     internal int ActiveConnectionCount
     {
         get
