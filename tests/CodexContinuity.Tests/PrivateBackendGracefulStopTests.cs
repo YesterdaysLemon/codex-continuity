@@ -191,6 +191,12 @@ public sealed class PrivateBackendGracefulStopTests
         Assert.False(decision.GateLease!.TryOpen());
         Assert.False(decision.GateLease.TryRetargetAndOpen(
             PrivateBackendTestProcess.AvailablePort(backend.Port, publicPort)));
+        Assert.Null(outcome.TryTakeTimedOutReservation(Target(backend, publicPort)));
+        using var reservation = outcome.TryTakeTimedOutReservation(target);
+        Assert.NotNull(reservation);
+        Assert.Null(outcome.TryTakeTimedOutReservation(target));
+        Assert.False(outcome.HasPendingStopReservation);
+        Assert.False(decision.GateLease.TryOpen());
     }
     [Fact]
     public async Task CallerCancellationDuringStopRetainsReservationWithoutForcingBackend()
