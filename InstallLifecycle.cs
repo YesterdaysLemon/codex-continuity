@@ -114,6 +114,9 @@ internal static class ContinuityPaths
     internal static string SupervisorLockFile(string stateDirectory) =>
         Path.Combine(stateDirectory, "supervisor.lock");
 
+    internal static string SupervisorHandoffFile(string stateDirectory) =>
+        Path.Combine(stateDirectory, "supervisor-handoff.json");
+
     internal static string BackendLeaseFile(string stateDirectory) =>
         Path.Combine(stateDirectory, "backend-lease.json");
 
