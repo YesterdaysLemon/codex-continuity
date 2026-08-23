@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using CodexContinuity;
 using Xunit;
 
@@ -6,69 +7,73 @@ namespace CodexContinuity.Tests;
 public sealed class PrivateBackendGracefulStopTests
 {
     [Fact]
-    public async Task BlockedPlanDoesNotSignalPrivateBackend()
+    public async Task RejectsInvalidPreSignalStateWithoutSignalingPrivateBackend()
     {
-        await using var backend = await PrivateBackendTestProcess.StartAsync();
+        await using var backend = await PrivateBackendTestProcess.StartAsync("ignore");
         var publicPort = PrivateBackendTestProcess.AvailablePort(backend.Port);
         await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
         var target = Target(backend, publicPort);
-        var decision = new GatedHandoffDecision(Plan(transitionReady: false), GateLease: null);
-
-        var outcome = await PrivateBackendGracefulStop.StopAsync(
-            decision,
+        var readyWithoutGate = new GatedHandoffDecision(
+            Plan(transitionReady: true),
+            GateLease: null);
+        foreach (var seconds in new[] { 0, 31 })
+        {
+            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+                PrivateBackendGracefulStop.StopAsync(
+                    readyWithoutGate,
+                    target,
+                    TimeSpan.FromSeconds(seconds),
+                    CancellationToken.None));
+        }
+        var missingGate = await PrivateBackendGracefulStop.StopAsync(
+            readyWithoutGate,
             target,
             TimeSpan.FromSeconds(1),
             CancellationToken.None);
+        Assert.Equal(PrivateBackendGracefulStopKind.GateUnavailable, missingGate.Kind);
 
-        Assert.Equal(PrivateBackendGracefulStopKind.BlockedByPlan, outcome);
-        Assert.False(File.Exists(backend.SignalMarkerPath));
-        Assert.False(backend.Process.HasExited);
+        foreach (var (transitionReady, backendReady) in new[]
+                 {
+                     (false, true),
+                     (true, false),
+                 })
+        {
+            var gateLease = await relay.CloseGateExclusivelyAsync();
+            var blocked = await PrivateBackendGracefulStop.StopAsync(
+                new GatedHandoffDecision(Plan(transitionReady, backendReady), gateLease),
+                target,
+                TimeSpan.FromSeconds(1),
+                CancellationToken.None);
+            Assert.Equal(PrivateBackendGracefulStopKind.BlockedByPlan, blocked.Kind);
+            Assert.False(blocked.HasPendingStopReservation);
+            Assert.True(gateLease.TryOpen());
+        }
+        await AssertNoSignalAsync(backend);
         Assert.False(relay.IsGated);
-    }
-
-    [Fact]
-    public async Task MissingGateLeaseDoesNotSignalPrivateBackend()
-    {
-        await using var backend = await PrivateBackendTestProcess.StartAsync();
-        var publicPort = PrivateBackendTestProcess.AvailablePort(backend.Port);
-        var target = Target(backend, publicPort);
-        var decision = new GatedHandoffDecision(Plan(transitionReady: true), GateLease: null);
-
-        var outcome = await PrivateBackendGracefulStop.StopAsync(
-            decision,
-            target,
-            TimeSpan.FromSeconds(1),
-            CancellationToken.None);
-
-        Assert.Equal(PrivateBackendGracefulStopKind.GateUnavailable, outcome);
-        Assert.False(File.Exists(backend.SignalMarkerPath));
-        Assert.False(backend.Process.HasExited);
     }
 
     [Fact]
     public async Task RelayBackendMismatchDoesNotSignalEitherPrivateBackend()
     {
-        await using var relayBackend = await PrivateBackendTestProcess.StartAsync();
+        await using var relayBackend = await PrivateBackendTestProcess.StartAsync("ignore");
         await using var targetBackend = await PrivateBackendTestProcess.StartAsync(
-            excludedPorts: relayBackend.Port);
+            "ignore",
+            relayBackend.Port);
         var publicPort = PrivateBackendTestProcess.AvailablePort(
             relayBackend.Port,
             targetBackend.Port);
         await using var relay = LoopbackRelay.Start(publicPort, relayBackend.Port);
         var decision = await ReadyDecisionAsync(relay);
         var target = Target(targetBackend, publicPort);
-
         var outcome = await PrivateBackendGracefulStop.StopAsync(
             decision,
             target,
             TimeSpan.FromSeconds(1),
             CancellationToken.None);
-
-        Assert.Equal(PrivateBackendGracefulStopKind.BackendIdentityMismatch, outcome);
-        Assert.False(File.Exists(relayBackend.SignalMarkerPath));
-        Assert.False(File.Exists(targetBackend.SignalMarkerPath));
-        Assert.False(relayBackend.Process.HasExited);
-        Assert.False(targetBackend.Process.HasExited);
+        Assert.Equal(PrivateBackendGracefulStopKind.BackendIdentityMismatch, outcome.Kind);
+        Assert.False(outcome.HasPendingStopReservation);
+        await AssertNoSignalAsync(relayBackend);
+        await AssertNoSignalAsync(targetBackend);
         Assert.True(relay.IsGated);
     }
 
@@ -79,51 +84,47 @@ public sealed class PrivateBackendGracefulStopTests
         bool throwInspectionError,
         string expectedName)
     {
-        await using var backend = await PrivateBackendTestProcess.StartAsync();
+        await using var backend = await PrivateBackendTestProcess.StartAsync("ignore");
         var publicPort = PrivateBackendTestProcess.AvailablePort(backend.Port);
         await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
         var decision = await ReadyDecisionAsync(relay);
         var target = Target(backend, publicPort);
-        var checks = new PrivateBackendGracefulStopChecks((_, _) =>
+        var checks = Checks((_, _) =>
             throwInspectionError ? throw new IOException("TCP table unavailable") : false);
-
         var outcome = await PrivateBackendGracefulStop.StopAsync(
             decision,
             target,
             TimeSpan.FromSeconds(1),
             CancellationToken.None,
             checks);
-
-        Assert.Equal(Enum.Parse<PrivateBackendGracefulStopKind>(expectedName), outcome);
-        Assert.False(File.Exists(backend.SignalMarkerPath));
-        Assert.False(backend.Process.HasExited);
+        Assert.Equal(Enum.Parse<PrivateBackendGracefulStopKind>(expectedName), outcome.Kind);
+        Assert.False(outcome.HasPendingStopReservation);
+        await AssertNoSignalAsync(backend);
         Assert.True(relay.IsGated);
     }
 
     [Fact]
     public async Task GateInvalidatedDuringOwnershipCheckDoesNotSignalPrivateBackend()
     {
-        await using var backend = await PrivateBackendTestProcess.StartAsync();
+        await using var backend = await PrivateBackendTestProcess.StartAsync("ignore");
         var publicPort = PrivateBackendTestProcess.AvailablePort(backend.Port);
         await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
         var decision = await ReadyDecisionAsync(relay);
         var target = Target(backend, publicPort);
-        var checks = new PrivateBackendGracefulStopChecks((_, _) =>
+        var checks = Checks((_, _) =>
         {
             relay.CloseGateAsync().GetAwaiter().GetResult();
             return true;
         });
-
         var outcome = await PrivateBackendGracefulStop.StopAsync(
             decision,
             target,
             TimeSpan.FromSeconds(1),
             CancellationToken.None,
             checks);
-
-        Assert.Equal(PrivateBackendGracefulStopKind.GateUnavailable, outcome);
-        Assert.False(File.Exists(backend.SignalMarkerPath));
-        Assert.False(backend.Process.HasExited);
+        Assert.Equal(PrivateBackendGracefulStopKind.GateUnavailable, outcome.Kind);
+        Assert.False(outcome.HasPendingStopReservation);
+        await AssertNoSignalAsync(backend);
         Assert.True(relay.IsGated);
     }
 
@@ -140,14 +141,13 @@ public sealed class PrivateBackendGracefulStopTests
         await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
         var decision = await ReadyDecisionAsync(relay);
         var target = Target(backend, publicPort);
-
         var outcome = await PrivateBackendGracefulStop.StopAsync(
             decision,
             target,
             TimeSpan.FromSeconds(5),
             CancellationToken.None);
-
-        Assert.Equal(Enum.Parse<PrivateBackendGracefulStopKind>(expectedName), outcome);
+        Assert.Equal(Enum.Parse<PrivateBackendGracefulStopKind>(expectedName), outcome.Kind);
+        Assert.False(outcome.HasPendingStopReservation);
         Assert.True(File.Exists(backend.SignalMarkerPath));
         Assert.True(backend.Process.HasExited);
         Assert.True(relay.IsGated);
@@ -161,43 +161,23 @@ public sealed class PrivateBackendGracefulStopTests
         await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
         var decision = await ReadyDecisionAsync(relay);
         var target = Target(backend, publicPort);
-
         var outcome = await PrivateBackendGracefulStop.StopAsync(
             decision,
             target,
             TimeSpan.FromMilliseconds(100),
             CancellationToken.None);
-
-        Assert.Equal(PrivateBackendGracefulStopKind.TimedOut, outcome);
+        Assert.Equal(PrivateBackendGracefulStopKind.TimedOut, outcome.Kind);
+        Assert.True(outcome.HasPendingStopReservation);
         Assert.True(File.Exists(backend.SignalMarkerPath));
         Assert.False(backend.Process.HasExited);
         Assert.True(relay.IsGated);
+        Assert.False(decision.GateLease!.TryOpen());
+        Assert.False(decision.GateLease.TryRetargetAndOpen(
+            PrivateBackendTestProcess.AvailablePort(backend.Port, publicPort)));
     }
 
     [Fact]
-    public async Task AlreadyExitedTargetIsReportedWithoutSendingSignal()
-    {
-        await using var backend = await PrivateBackendTestProcess.StartAsync();
-        var publicPort = PrivateBackendTestProcess.AvailablePort(backend.Port);
-        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
-        var target = Target(backend, publicPort);
-        backend.Process.Kill();
-        await backend.Process.WaitForExitAsync();
-        var decision = await ReadyDecisionAsync(relay);
-
-        var outcome = await PrivateBackendGracefulStop.StopAsync(
-            decision,
-            target,
-            TimeSpan.FromSeconds(1),
-            CancellationToken.None);
-
-        Assert.Equal(PrivateBackendGracefulStopKind.AlreadyExited, outcome);
-        Assert.False(File.Exists(backend.SignalMarkerPath));
-        Assert.True(relay.IsGated);
-    }
-
-    [Fact]
-    public async Task CallerCancellationDuringStopReleasesReservationWithoutForcingBackend()
+    public async Task CallerCancellationDuringStopRetainsReservationWithoutForcingBackend()
     {
         await using var backend = await PrivateBackendTestProcess.StartAsync("ignore");
         var publicPort = PrivateBackendTestProcess.AvailablePort(backend.Port);
@@ -205,7 +185,6 @@ public sealed class PrivateBackendGracefulStopTests
         var decision = await ReadyDecisionAsync(relay);
         var target = Target(backend, publicPort);
         using var cancellation = new CancellationTokenSource();
-
         var stop = PrivateBackendGracefulStop.StopAsync(
             decision,
             target,
@@ -215,56 +194,75 @@ public sealed class PrivateBackendGracefulStopTests
             () => File.Exists(backend.SignalMarkerPath),
             TimeSpan.FromSeconds(5));
         await cancellation.CancelAsync();
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stop);
+        var outcome = await stop;
+        Assert.Equal(PrivateBackendGracefulStopKind.CallerCanceled, outcome.Kind);
+        Assert.True(outcome.HasPendingStopReservation);
         Assert.True(signalObserved);
         Assert.False(backend.Process.HasExited);
         Assert.True(relay.IsGated);
-        Assert.True(decision.GateLease!.TryOpen());
+        Assert.False(decision.GateLease!.TryOpen());
+        Assert.False(decision.GateLease.TryRetargetAndOpen(
+            PrivateBackendTestProcess.AvailablePort(backend.Port, publicPort)));
+    }
+
+    [Fact]
+    public async Task StopUncertaintyAfterSignalRetainsReservation()
+    {
+        await using var backend = await PrivateBackendTestProcess.StartAsync("ignore");
+        var publicPort = PrivateBackendTestProcess.AvailablePort(backend.Port);
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+        var decision = await ReadyDecisionAsync(relay);
+        var target = Target(backend, publicPort);
+        using var stopCancellation = new CancellationTokenSource();
+        var checks = Checks(
+            (_, _) => true,
+            async (ownedTarget, _, _) =>
+            {
+                var stop = ownedTarget.StopGracefullyAsync(
+                    TimeSpan.FromSeconds(5),
+                    stopCancellation.Token);
+                var signalObserved = SpinWait.SpinUntil(
+                    () => File.Exists(backend.SignalMarkerPath),
+                    TimeSpan.FromSeconds(5));
+                await stopCancellation.CancelAsync();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stop);
+                Assert.True(signalObserved);
+                throw new Win32Exception("Exit state unavailable after signal.");
+            });
+        var outcome = await PrivateBackendGracefulStop.StopAsync(
+            decision,
+            target,
+            TimeSpan.FromSeconds(5),
+            CancellationToken.None,
+            checks);
+        Assert.Equal(PrivateBackendGracefulStopKind.Unknown, outcome.Kind);
+        Assert.True(outcome.HasPendingStopReservation);
+        Assert.True(File.Exists(backend.SignalMarkerPath));
+        Assert.False(backend.Process.HasExited);
+        Assert.True(relay.IsGated);
+        Assert.False(decision.GateLease!.TryOpen());
+        Assert.False(decision.GateLease.TryRetargetAndOpen(
+            PrivateBackendTestProcess.AvailablePort(backend.Port, publicPort)));
     }
 
     [Fact]
     public async Task CallerCancellationBeforeStopDoesNotSignalPrivateBackend()
     {
-        await using var backend = await PrivateBackendTestProcess.StartAsync();
+        await using var backend = await PrivateBackendTestProcess.StartAsync("ignore");
         var publicPort = PrivateBackendTestProcess.AvailablePort(backend.Port);
         await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
         var decision = await ReadyDecisionAsync(relay);
         var target = Target(backend, publicPort);
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
-
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             PrivateBackendGracefulStop.StopAsync(
                 decision,
                 target,
                 TimeSpan.FromSeconds(1),
                 cancellation.Token));
-
-        Assert.False(File.Exists(backend.SignalMarkerPath));
-        Assert.False(backend.Process.HasExited);
+        await AssertNoSignalAsync(backend);
         Assert.True(relay.IsGated);
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(31)]
-    public async Task RejectsUnboundedTimeoutBeforeSignalingPrivateBackend(int seconds)
-    {
-        await using var backend = await PrivateBackendTestProcess.StartAsync();
-        var publicPort = PrivateBackendTestProcess.AvailablePort(backend.Port);
-        var target = Target(backend, publicPort);
-        var decision = new GatedHandoffDecision(Plan(transitionReady: true), GateLease: null);
-
-        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
-            PrivateBackendGracefulStop.StopAsync(
-                decision,
-                target,
-                TimeSpan.FromSeconds(seconds),
-                CancellationToken.None));
-
-        Assert.False(File.Exists(backend.SignalMarkerPath));
-        Assert.False(backend.Process.HasExited);
     }
 
     private static PrivateBackendStopTarget Target(
@@ -276,10 +274,27 @@ public sealed class PrivateBackendGracefulStopTests
     private static async Task<GatedHandoffDecision> ReadyDecisionAsync(LoopbackRelay relay) =>
         new(Plan(transitionReady: true), await relay.CloseGateExclusivelyAsync());
 
-    private static ContinuityHandoffPlan Plan(bool transitionReady) => new(
+    private static async Task AssertNoSignalAsync(PrivateBackendTestProcess backend)
+    {
+        await Task.Delay(200);
+        Assert.False(File.Exists(backend.SignalMarkerPath));
+        Assert.False(backend.Process.HasExited);
+    }
+
+    private static PrivateBackendGracefulStopChecks Checks(
+        Func<int, int, bool> ownsListener,
+        Func<PrivateBackendStopTarget, TimeSpan, CancellationToken,
+            Task<Program.AppServerStopDisposition>>? stopTarget = null) => new(
+                ownsListener,
+                stopTarget ?? (static (target, timeout, cancellationToken) =>
+                    target.StopGracefullyAsync(timeout, cancellationToken)));
+
+    private static ContinuityHandoffPlan Plan(
+        bool transitionReady,
+        bool backendReady = true) => new(
         transitionReady ? "handoff" : "wait",
         transitionReady,
-        BackendReady: true,
+        backendReady,
         UpdateState: "loaded",
         PendingUpdate: false,
         ThreadCount: 0,
