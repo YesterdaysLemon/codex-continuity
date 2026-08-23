@@ -234,6 +234,61 @@ public sealed class InstallerEndToEndTests : IDisposable
             Program.RunUninstallMutation(root, server.Port, () => "uninstalled"));
     }
 
+    [Fact]
+    public async Task SupervisorUsesOwnedRelayRuntimeWithinUpdateLifetime()
+    {
+        Directory.CreateDirectory(root);
+        var publicPort = Program.FindAvailablePort();
+        var updaterCancelled = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var capturedPort = 0;
+        string? capturedStateDirectory = null;
+        var capturedShutdownToken = default(CancellationToken);
+        Func<int, WindowsProcessGroup>? capturedStartBackend = null;
+
+        async Task RunUpdater(
+            string _stateDirectory,
+            string _runningVersion,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                updaterCancelled.SetResult();
+            }
+        }
+
+        Task<int> RunOwnedSupervisor(
+            int port,
+            string stateDirectory,
+            CancellationToken shutdownToken,
+            Func<int, WindowsProcessGroup> startBackend)
+        {
+            capturedPort = port;
+            capturedStateDirectory = stateDirectory;
+            capturedShutdownToken = shutdownToken;
+            capturedStartBackend = startBackend;
+            return Task.FromResult(23);
+        }
+
+        var exitCode = await Program.ServeAsync(
+            publicPort,
+            root,
+            SupervisorCompatibilityScope.ForStateDirectory(root),
+            RunUpdater,
+            RunOwnedSupervisor);
+
+        Assert.Equal(23, exitCode);
+        Assert.Equal(publicPort, capturedPort);
+        Assert.Equal(root, capturedStateDirectory);
+        Assert.NotNull(capturedStartBackend);
+        Assert.True(capturedShutdownToken.IsCancellationRequested);
+        await updaterCancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
     public void Dispose()
     {
         for (var attempt = 1; Directory.Exists(root); attempt++)
