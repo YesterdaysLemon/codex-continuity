@@ -192,9 +192,13 @@ public sealed class PrivateBackendGracefulStopTests
         Assert.False(decision.GateLease.TryRetargetAndOpen(
             PrivateBackendTestProcess.AvailablePort(backend.Port, publicPort)));
         Assert.Null(outcome.TryTakeTimedOutReservation(Target(backend, publicPort)));
-        using var reservation = outcome.TryTakeTimedOutReservation(target);
-        Assert.NotNull(reservation);
-        Assert.Null(outcome.TryTakeTimedOutReservation(target));
+        using var barrier = new Barrier(participantCount: 2);
+        var takes = await Task.WhenAll(Enumerable.Range(0, 2).Select(_ => Task.Run(() =>
+        {
+            barrier.SignalAndWait();
+            return outcome.TryTakeTimedOutReservation(target);
+        })));
+        using var reservation = Assert.Single(takes, static candidate => candidate is not null);
         Assert.False(outcome.HasPendingStopReservation);
         Assert.False(decision.GateLease.TryOpen());
     }
@@ -218,6 +222,7 @@ public sealed class PrivateBackendGracefulStopTests
         await cancellation.CancelAsync();
         var outcome = await stop;
         Assert.Equal(PrivateBackendGracefulStopKind.CallerCanceled, outcome.Kind);
+        Assert.Null(outcome.TryTakeTimedOutReservation(target));
         Assert.True(outcome.HasPendingStopReservation);
         Assert.True(signalObserved);
         Assert.False(backend.Process.HasExited);
@@ -257,6 +262,7 @@ public sealed class PrivateBackendGracefulStopTests
             CancellationToken.None,
             checks);
         Assert.Equal(PrivateBackendGracefulStopKind.Unknown, outcome.Kind);
+        Assert.Null(outcome.TryTakeTimedOutReservation(target));
         Assert.True(outcome.HasPendingStopReservation);
         Assert.True(File.Exists(backend.SignalMarkerPath));
         Assert.False(backend.Process.HasExited);
