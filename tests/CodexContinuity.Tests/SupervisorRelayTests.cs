@@ -253,13 +253,18 @@ public sealed class SupervisorRelayTests : IDisposable
             StartBackend,
             delayForFailure: _ => TimeSpan.FromMinutes(1),
             waitForRestart: WaitForRestart);
-        await backoffEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.Equal(1, Volatile.Read(ref startCount));
-        Assert.Equal("backingOff", (await ReadStatusAsync("backingOff")).State);
-        await AssertEndpointUnavailableAsync(publicPort);
-
-        shutdown.Cancel();
-        Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+        try
+        {
+            await backoffEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(1, Volatile.Read(ref startCount));
+            Assert.Equal("backingOff", (await ReadStatusAsync("backingOff")).State);
+            await AssertEndpointUnavailableAsync(publicPort);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+        }
 
         Assert.Equal(1, Volatile.Read(ref startCount));
         Assert.False(ProcessIsRunning(backendProcessId));
