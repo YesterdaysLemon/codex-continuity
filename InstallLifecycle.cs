@@ -99,6 +99,22 @@ internal static class ContinuityPaths
     internal static string VersionsDirectory(string stateDirectory) =>
         Path.Combine(stateDirectory, "versions");
 
+    internal static string VersionDirectory(
+        string stateDirectory,
+        string version,
+        string executableSha256) =>
+        Path.Combine(
+            VersionsDirectory(stateDirectory),
+            $"{version}-{executableSha256[..12].ToLowerInvariant()}");
+
+    internal static string VersionedSupervisorExecutable(
+        string stateDirectory,
+        string version,
+        string executableSha256) =>
+        Path.Combine(
+            VersionDirectory(stateDirectory, version, executableSha256),
+            "CodexContinuity.exe");
+
     internal static string CommandDirectory(string stateDirectory) =>
         Path.Combine(stateDirectory, "bin");
 
@@ -150,7 +166,7 @@ internal interface IInstallPlatform
 
 internal sealed class InstallStateStore(string path)
 {
-    private const int MaximumDiscoveryStateBytes = 512 * 1024;
+    private const int MaximumStateBytes = 512 * 1024;
     private const int MaximumPathCharacters = 32767;
     internal const int CurrentSchemaVersion = 4;
 
@@ -167,7 +183,8 @@ internal sealed class InstallStateStore(string path)
             return null;
         }
 
-        return JsonSerializer.Deserialize<InstallState>(File.ReadAllText(path), SerializerOptions)
+        var bytes = ReadBoundedState();
+        return JsonSerializer.Deserialize<InstallState>(bytes.Span, SerializerOptions)
             ?? throw new InvalidDataException($"Install state at {path} is empty or invalid.");
     }
 
@@ -175,32 +192,7 @@ internal sealed class InstallStateStore(string path)
     {
         try
         {
-            using var stream = new FileStream(
-                path,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete);
-            if (stream.Length > MaximumDiscoveryStateBytes)
-            {
-                throw new InvalidDataException();
-            }
-            var bytes = new byte[MaximumDiscoveryStateBytes + 1];
-            var total = 0;
-            while (total < bytes.Length)
-            {
-                var read = stream.Read(bytes, total, bytes.Length - total);
-                if (read == 0)
-                {
-                    break;
-                }
-                total += read;
-            }
-            if (total > MaximumDiscoveryStateBytes)
-            {
-                throw new InvalidDataException();
-            }
-
-            using var document = JsonDocument.Parse(bytes.AsMemory(0, total));
+            using var document = JsonDocument.Parse(ReadBoundedState());
             if (document.RootElement.ValueKind != JsonValueKind.Object ||
                 !document.RootElement.TryGetProperty(
                     "installedExecutable",
@@ -272,6 +264,35 @@ internal sealed class InstallStateStore(string path)
         {
             File.Delete(path);
         }
+    }
+
+    private ReadOnlyMemory<byte> ReadBoundedState()
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        if (stream.Length > MaximumStateBytes)
+        {
+            throw new InvalidDataException();
+        }
+        var bytes = new byte[MaximumStateBytes + 1];
+        var total = 0;
+        while (total < bytes.Length)
+        {
+            var read = stream.Read(bytes, total, bytes.Length - total);
+            if (read == 0)
+            {
+                break;
+            }
+            total += read;
+        }
+        if (total > MaximumStateBytes)
+        {
+            throw new InvalidDataException();
+        }
+        return bytes.AsMemory(0, total);
     }
 }
 
@@ -777,11 +798,12 @@ internal sealed class InstallCoordinator(
         var version = assemblyVersion is null
             ? "dev"
             : $"{assemblyVersion.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}";
-        var versionDirectory = Path.Combine(
-            ContinuityPaths.VersionsDirectory(stateDirectory),
-            $"{version}-{hash[..12].ToLowerInvariant()}");
+        var versionDirectory = ContinuityPaths.VersionDirectory(stateDirectory, version, hash);
         Directory.CreateDirectory(versionDirectory);
-        var destination = Path.Combine(versionDirectory, "CodexContinuity.exe");
+        var destination = ContinuityPaths.VersionedSupervisorExecutable(
+            stateDirectory,
+            version,
+            hash);
         var supervisor = StageExecutable(sourceExecutable, destination);
         var tray = sourceTrayExecutable is null
             ? null

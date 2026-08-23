@@ -6,7 +6,7 @@ namespace CodexContinuity.Tests;
 public sealed class StagedSupervisorTransitionTests
 {
     [Fact]
-    public void LoadsExactRunningSelectedAndRollbackBuildsFromIndependentState()
+    public async Task LoadsExactRunningSelectedAndRollbackBuildsFromIndependentState()
     {
         using var fixture = new TransitionFixture();
 
@@ -17,7 +17,7 @@ public sealed class StagedSupervisorTransitionTests
                     fixture.Rollback,
                     fixture.Selected,
                     fixture.Rollback)),
-            fixture.Load());
+            await fixture.LoadAsync());
     }
 
     [Theory]
@@ -26,7 +26,8 @@ public sealed class StagedSupervisorTransitionTests
     [InlineData("unsupportedSchema")]
     [InlineData("inactive")]
     [InlineData("missingRollback")]
-    public void UnavailableInstallStateFailsClosed(string coordinate)
+    [InlineData("oversized")]
+    public async Task UnavailableInstallStateFailsClosed(string coordinate)
     {
         using var fixture = new TransitionFixture();
         var path = ContinuityPaths.InstallStateFile(fixture.Root);
@@ -56,49 +57,88 @@ public sealed class StagedSupervisorTransitionTests
                 };
                 fixture.SaveInstallState();
                 break;
+            case "oversized":
+                File.WriteAllBytes(path, new byte[(512 * 1024) + 1]);
+                break;
             default:
                 throw new InvalidOperationException($"Unknown install coordinate {coordinate}.");
         }
 
         Assert.Equal(
             StagedSupervisorTransitionLoadKind.InstallStateUnavailable,
-            fixture.Load().Kind);
+            (await fixture.LoadAsync()).Kind);
     }
 
     [Fact]
-    public void SelectedBuildMustBeIndependentlyVerified()
+    public async Task SelectedBuildMustBeIndependentlyVerified()
     {
         using var fixture = new TransitionFixture
         {
-            SelectedLoad = new(
-                ContinuitySelectedBuildLoadKind.UnverifiedExecutable,
-                Build: null),
+            ResolvedSelected = null,
         };
 
         Assert.Equal(
             StagedSupervisorTransitionLoadKind.SelectedBuildUnavailable,
-            fixture.Load().Kind);
+            (await fixture.LoadAsync()).Kind);
     }
 
     [Fact]
-    public void SelectedBuildMustUseItsContentAddressedContinuityPath()
+    public async Task SelectedResolutionIsBoundToTheCapturedInstallStatePath()
     {
         using var fixture = new TransitionFixture();
-        fixture.InstallState = fixture.InstallState with
+        var replacement = fixture.CreateBuild("0.5.0", 'c');
+        fixture.ResolveExecutable = _ =>
         {
-            InstalledExecutable = Path.Combine(fixture.Root, "CodexContinuity.exe"),
+            fixture.InstallState = fixture.InstallState with
+            {
+                InstalledExecutable = replacement.Executable,
+                BinarySha256 = replacement.ExecutableSha256,
+            };
+            fixture.SaveInstallState();
+            return replacement;
         };
+
+        Assert.Equal(
+            StagedSupervisorTransitionLoadKind.SelectedBuildUnavailable,
+            (await fixture.LoadAsync()).Kind);
+    }
+
+    [Theory]
+    [InlineData("filename")]
+    [InlineData("contentDirectory")]
+    [InlineData("versionsParent")]
+    public async Task SelectedBuildMustUseEveryContentAddressedPathCoordinate(
+        string coordinate)
+    {
+        using var fixture = new TransitionFixture();
+        var versionDirectory = Path.GetDirectoryName(fixture.Selected.Executable)!;
+        var executable = coordinate switch
+        {
+            "filename" => Path.Combine(versionDirectory, "not-continuity.exe"),
+            "contentDirectory" => Path.Combine(
+                ContinuityPaths.VersionsDirectory(fixture.Root),
+                $"{fixture.Selected.Version}-{new string('c', 12)}",
+                "CodexContinuity.exe"),
+            "versionsParent" => Path.Combine(
+                fixture.Root,
+                "not-versions",
+                Path.GetFileName(versionDirectory),
+                "CodexContinuity.exe"),
+            _ => throw new InvalidOperationException($"Unknown path coordinate {coordinate}."),
+        };
+        fixture.ResolvedSelected = fixture.Selected with { Executable = executable };
+        fixture.InstallState = fixture.InstallState with { InstalledExecutable = executable };
         fixture.SaveInstallState();
 
         Assert.Equal(
             StagedSupervisorTransitionLoadKind.SelectedBuildUnavailable,
-            fixture.Load().Kind);
+            (await fixture.LoadAsync()).Kind);
     }
 
     [Theory]
     [InlineData("missing")]
     [InlineData("malformed")]
-    public void UnavailableUpdateStateFailsClosed(string coordinate)
+    public async Task UnavailableUpdateStateFailsClosed(string coordinate)
     {
         using var fixture = new TransitionFixture();
         var path = ContinuityPaths.UpdateStatusFile(fixture.Root);
@@ -113,7 +153,7 @@ public sealed class StagedSupervisorTransitionTests
 
         Assert.Equal(
             StagedSupervisorTransitionLoadKind.UpdateStateUnavailable,
-            fixture.Load().Kind);
+            (await fixture.LoadAsync()).Kind);
     }
 
     [Theory]
@@ -122,9 +162,9 @@ public sealed class StagedSupervisorTransitionTests
     [InlineData("missingStagedTime")]
     [InlineData("alreadyApplied")]
     [InlineData("selectedDigest")]
-    [InlineData("installDigest")]
     [InlineData("duplicateRelease")]
-    public void PendingSelectedReleaseMustMatchEveryIndependentCoordinate(string coordinate)
+    [InlineData("selectedIdentityVersion")]
+    public async Task PendingSelectedReleaseMustMatchEveryIndependentCoordinate(string coordinate)
     {
         using var fixture = new TransitionFixture();
         var release = fixture.UpdateState.Releases.Single();
@@ -157,15 +197,16 @@ public sealed class StagedSupervisorTransitionTests
                     Releases = [release with { StagedExecutableSha256 = new string('c', 64) }],
                 };
                 break;
-            case "installDigest":
-                fixture.InstallState = fixture.InstallState with
-                {
-                    BinarySha256 = new string('c', 64),
-                };
-                fixture.SaveInstallState();
-                break;
             case "duplicateRelease":
                 fixture.UpdateState = fixture.UpdateState with { Releases = [release, release] };
+                break;
+            case "selectedIdentityVersion":
+                fixture.ResolvedSelected = fixture.CreateBuild("0.5.0", 'b');
+                fixture.InstallState = fixture.InstallState with
+                {
+                    InstalledExecutable = fixture.ResolvedSelected.Executable,
+                };
+                fixture.SaveInstallState();
                 break;
             default:
                 throw new InvalidOperationException($"Unknown update coordinate {coordinate}.");
@@ -174,7 +215,22 @@ public sealed class StagedSupervisorTransitionTests
 
         Assert.Equal(
             StagedSupervisorTransitionLoadKind.NoPendingStagedUpdate,
-            fixture.Load().Kind);
+            (await fixture.LoadAsync()).Kind);
+    }
+
+    [Fact]
+    public async Task SelectedBuildMustMatchTheCapturedInstallDigest()
+    {
+        using var fixture = new TransitionFixture();
+        fixture.InstallState = fixture.InstallState with
+        {
+            BinarySha256 = new string('c', 64),
+        };
+        fixture.SaveInstallState();
+
+        Assert.Equal(
+            StagedSupervisorTransitionLoadKind.SelectedBuildUnavailable,
+            (await fixture.LoadAsync()).Kind);
     }
 
     [Theory]
@@ -182,7 +238,7 @@ public sealed class StagedSupervisorTransitionTests
     [InlineData("version")]
     [InlineData("runningDigest")]
     [InlineData("rollbackDigest")]
-    public void RollbackMustMatchTheRunningBuildAndStagedLedger(string coordinate)
+    public async Task RollbackMustMatchTheRunningBuildAndStagedLedger(string coordinate)
     {
         using var fixture = new TransitionFixture();
         var release = fixture.UpdateState.Releases.Single();
@@ -192,7 +248,12 @@ public sealed class StagedSupervisorTransitionTests
                 fixture.ResolvedRollback = null;
                 break;
             case "version":
-                fixture.ResolvedRollback = fixture.Rollback with { Version = "9.0.0" };
+                fixture.ResolvedRollback = fixture.CreateBuild("9.0.0", 'a');
+                fixture.InstallState = fixture.InstallState with
+                {
+                    PreviousInstalledExecutable = fixture.ResolvedRollback.Executable,
+                };
+                fixture.SaveInstallState();
                 break;
             case "runningDigest":
                 fixture.UpdateState = fixture.UpdateState with
@@ -213,11 +274,11 @@ public sealed class StagedSupervisorTransitionTests
 
         Assert.Equal(
             StagedSupervisorTransitionLoadKind.RollbackBuildUnavailable,
-            fixture.Load().Kind);
+            (await fixture.LoadAsync()).Kind);
     }
 
     [Fact]
-    public void RollbackBuildMustUseItsContentAddressedContinuityPath()
+    public async Task RollbackBuildMustUseItsContentAddressedContinuityPath()
     {
         using var fixture = new TransitionFixture();
         fixture.ResolvedRollback = fixture.Rollback with
@@ -227,7 +288,67 @@ public sealed class StagedSupervisorTransitionTests
 
         Assert.Equal(
             StagedSupervisorTransitionLoadKind.RollbackBuildUnavailable,
-            fixture.Load().Kind);
+            (await fixture.LoadAsync()).Kind);
+    }
+
+    [Fact]
+    public async Task CoherentStagedDowngradeIsNotAPendingUpdate()
+    {
+        using var fixture = new TransitionFixture(selectedVersion: "0.2.0");
+
+        Assert.Equal(
+            StagedSupervisorTransitionLoadKind.NoPendingStagedUpdate,
+            (await fixture.LoadAsync()).Kind);
+    }
+
+    [Fact]
+    public async Task PublisherVerificationBindsRollbackAndSelectedExecutables()
+    {
+        using var fixture = new TransitionFixture();
+        string? trusted = null;
+        IReadOnlyList<string>? candidates = null;
+        fixture.VerifyMatchingPublisher = (observedTrusted, observedCandidates, _) =>
+        {
+            trusted = observedTrusted;
+            candidates = observedCandidates;
+            return Task.CompletedTask;
+        };
+
+        Assert.Equal(StagedSupervisorTransitionLoadKind.Loaded, (await fixture.LoadAsync()).Kind);
+        Assert.Equal(fixture.Rollback.Executable, trusted);
+        Assert.Equal([fixture.Selected.Executable], candidates);
+    }
+
+    [Fact]
+    public async Task UntrustedPublisherFailsClosed()
+    {
+        using var fixture = new TransitionFixture
+        {
+            VerifyMatchingPublisher = (_, _, _) =>
+                Task.FromException(new InvalidDataException("untrusted")),
+        };
+
+        Assert.Equal(
+            StagedSupervisorTransitionLoadKind.PublisherVerificationUnavailable,
+            (await fixture.LoadAsync()).Kind);
+    }
+
+    [Fact]
+    public async Task BuildChangedDuringPublisherVerificationFailsClosed()
+    {
+        using var fixture = new TransitionFixture();
+        fixture.VerifyMatchingPublisher = (_, _, _) =>
+        {
+            fixture.ResolvedSelected = fixture.Selected with
+            {
+                ExecutableSha256 = new string('c', 64),
+            };
+            return Task.CompletedTask;
+        };
+
+        Assert.Equal(
+            StagedSupervisorTransitionLoadKind.SelectedBuildUnavailable,
+            (await fixture.LoadAsync()).Kind);
     }
 
     private sealed class TransitionFixture : IDisposable
@@ -235,14 +356,14 @@ public sealed class StagedSupervisorTransitionTests
         internal static readonly DateTimeOffset Now =
             DateTimeOffset.Parse("2026-08-23T12:00:00Z");
 
-        internal TransitionFixture()
+        internal TransitionFixture(string selectedVersion = "0.4.0")
         {
             Root = Path.Combine(
                 Path.GetTempPath(),
                 $"codex-continuity-staged-transition-tests-{Guid.NewGuid():N}");
             Directory.CreateDirectory(Root);
             Rollback = Build("0.3.0", 'a');
-            Selected = Build("0.4.0", 'b');
+            Selected = Build(selectedVersion, 'b');
             InstallState = new InstallState(
                 InstallStateStore.CurrentSchemaVersion,
                 Port: 45123,
@@ -283,9 +404,7 @@ public sealed class StagedSupervisorTransitionTests
                 AppliedCount: 0,
                 Releases: [release],
                 RunningExecutableSha256: Rollback.ExecutableSha256);
-            SelectedLoad = new(
-                ContinuitySelectedBuildLoadKind.Loaded,
-                new ContinuityBuildIdentity(Selected.Version, Selected.ExecutableSha256));
+            ResolvedSelected = Selected;
             ResolvedRollback = Rollback;
             SaveInstallState();
             SaveUpdateState();
@@ -296,17 +415,28 @@ public sealed class StagedSupervisorTransitionTests
         internal SupervisorExecutableIdentity Rollback { get; }
         internal InstallState InstallState { get; set; }
         internal ContinuityUpdateState UpdateState { get; set; }
-        internal ContinuitySelectedBuildLoadResult SelectedLoad { get; init; }
+        internal SupervisorExecutableIdentity? ResolvedSelected { get; set; }
         internal SupervisorExecutableIdentity? ResolvedRollback { get; set; }
+        internal Func<string, SupervisorExecutableIdentity?>? ResolveExecutable { get; set; }
+        internal Func<string, IReadOnlyList<string>, CancellationToken, Task>?
+            VerifyMatchingPublisher { get; set; }
 
-        internal StagedSupervisorTransitionLoadResult Load() =>
-            StagedSupervisorTransitionReader.Load(
+        internal Task<StagedSupervisorTransitionLoadResult> LoadAsync() =>
+            StagedSupervisorTransitionReader.LoadAsync(
                 Root,
                 new StagedSupervisorTransitionChecks(
-                    _ => SelectedLoad,
-                    executable => PathsEqual(executable, Rollback.Executable)
-                        ? ResolvedRollback
-                        : null));
+                    executable => ResolveExecutable?.Invoke(executable) ??
+                        (PathsEqual(executable, InstallState.InstalledExecutable)
+                            ? ResolvedSelected
+                            : InstallState.PreviousInstalledExecutable is { } rollbackExecutable &&
+                              PathsEqual(executable, rollbackExecutable)
+                                ? ResolvedRollback
+                                : null),
+                    (trusted, candidates, cancellationToken) =>
+                        VerifyMatchingPublisher?.Invoke(
+                            trusted,
+                            candidates,
+                            cancellationToken) ?? Task.CompletedTask));
 
         internal void SaveInstallState() => new InstallStateStore(
             ContinuityPaths.InstallStateFile(Root)).Save(InstallState);
@@ -316,19 +446,20 @@ public sealed class StagedSupervisorTransitionTests
 
         public void Dispose() => Directory.Delete(Root, recursive: true);
 
-        private SupervisorExecutableIdentity Build(
+        internal SupervisorExecutableIdentity CreateBuild(
             string version,
             char sha256Character)
         {
             var sha256 = new string(sha256Character, 64);
             return new(
                 version,
-                Path.Combine(
-                    ContinuityPaths.VersionsDirectory(Root),
-                    $"{version}-{sha256[..12]}",
-                    "CodexContinuity.exe"),
+                ContinuityPaths.VersionedSupervisorExecutable(Root, version, sha256),
                 sha256);
         }
+
+        private SupervisorExecutableIdentity Build(
+            string version,
+            char sha256Character) => CreateBuild(version, sha256Character);
 
         private static bool PathsEqual(string left, string right) =>
             Path.GetFullPath(left).Equals(

@@ -15,6 +15,7 @@ internal enum StagedSupervisorTransitionLoadKind
     SelectedBuildUnavailable,
     NoPendingStagedUpdate,
     RollbackBuildUnavailable,
+    PublisherVerificationUnavailable,
 }
 
 internal sealed record StagedSupervisorTransitionLoadResult(
@@ -22,17 +23,17 @@ internal sealed record StagedSupervisorTransitionLoadResult(
     StagedSupervisorTransitionBuilds? Builds);
 
 internal sealed record StagedSupervisorTransitionChecks(
-    Func<string, ContinuitySelectedBuildLoadResult> LoadSelectedBuild,
-    Func<string, SupervisorExecutableIdentity?> ResolveExecutable)
+    Func<string, SupervisorExecutableIdentity?> ResolveExecutable,
+    Func<string, IReadOnlyList<string>, CancellationToken, Task> VerifyMatchingPublisher)
 {
     internal static StagedSupervisorTransitionChecks Native { get; } = new(
-        ContinuitySelectedBuildReader.Load,
-        ResolveNativeExecutable);
+        ResolveNativeExecutable,
+        AuthenticodeReleaseVerifier.VerifyMatchingPublisherAsync);
 
     internal void Validate()
     {
-        ArgumentNullException.ThrowIfNull(LoadSelectedBuild);
         ArgumentNullException.ThrowIfNull(ResolveExecutable);
+        ArgumentNullException.ThrowIfNull(VerifyMatchingPublisher);
     }
 
     private static SupervisorExecutableIdentity? ResolveNativeExecutable(string executable)
@@ -46,11 +47,13 @@ internal sealed record StagedSupervisorTransitionChecks(
 
 internal static class StagedSupervisorTransitionReader
 {
-    internal static StagedSupervisorTransitionLoadResult Load(
+    internal static async Task<StagedSupervisorTransitionLoadResult> LoadAsync(
         string stateDirectory,
-        StagedSupervisorTransitionChecks? checks = null)
+        StagedSupervisorTransitionChecks? checks = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(stateDirectory);
+        cancellationToken.ThrowIfCancellationRequested();
         checks ??= StagedSupervisorTransitionChecks.Native;
         checks.Validate();
 
@@ -77,17 +80,13 @@ internal static class StagedSupervisorTransitionReader
             return Unavailable(StagedSupervisorTransitionLoadKind.InstallStateUnavailable);
         }
 
-        var selectedLoad = checks.LoadSelectedBuild(stateDirectory);
-        if (selectedLoad.Kind != ContinuitySelectedBuildLoadKind.Loaded ||
-            selectedLoad.Build is not { } selectedBuild)
-        {
-            return Unavailable(StagedSupervisorTransitionLoadKind.SelectedBuildUnavailable);
-        }
-        var selectedIdentity = new SupervisorExecutableIdentity(
-            selectedBuild.Version,
-            Path.GetFullPath(installState.InstalledExecutable),
-            selectedBuild.ExecutableSha256);
-        if (!IsVersionedSupervisorPath(stateDirectory, selectedIdentity))
+        var selectedIdentity = checks.ResolveExecutable(installState.InstalledExecutable);
+        if (selectedIdentity is null ||
+            !PathsEqual(selectedIdentity.Executable, installState.InstalledExecutable) ||
+            !IsVersionedSupervisorPath(stateDirectory, selectedIdentity) ||
+            !selectedIdentity.ExecutableSha256.Equals(
+                installState.BinarySha256,
+                StringComparison.OrdinalIgnoreCase))
         {
             return Unavailable(StagedSupervisorTransitionLoadKind.SelectedBuildUnavailable);
         }
@@ -101,9 +100,9 @@ internal static class StagedSupervisorTransitionReader
         }
         if (!updateState.RunningProcessObserved ||
             updateState.RunningExecutableSha256 is not { } runningSha256 ||
-            updateState.SelectedVersion.Equals(
-                updateState.RunningVersion,
-                StringComparison.OrdinalIgnoreCase))
+            ContinuitySemanticVersion.Compare(
+                updateState.SelectedVersion,
+                updateState.RunningVersion) <= 0)
         {
             return Unavailable(StagedSupervisorTransitionLoadKind.NoPendingStagedUpdate);
         }
@@ -137,6 +136,7 @@ internal static class StagedSupervisorTransitionReader
 
         var rollback = checks.ResolveExecutable(rollbackExecutable);
         if (rollback is null ||
+            !PathsEqual(rollback.Executable, rollbackExecutable) ||
             !IsVersionedSupervisorPath(stateDirectory, rollback) ||
             !rollback.Version.Equals(updateState.RunningVersion, StringComparison.OrdinalIgnoreCase) ||
             !rollback.ExecutableSha256.Equals(runningSha256, StringComparison.OrdinalIgnoreCase) ||
@@ -145,12 +145,40 @@ internal static class StagedSupervisorTransitionReader
             return Unavailable(StagedSupervisorTransitionLoadKind.RollbackBuildUnavailable);
         }
 
+        try
+        {
+            await checks.VerifyMatchingPublisher(
+                rollback.Executable,
+                [selectedIdentity.Executable],
+                cancellationToken);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or InvalidDataException or
+                InvalidOperationException or NotSupportedException or
+                System.ComponentModel.Win32Exception)
+        {
+            return Unavailable(
+                StagedSupervisorTransitionLoadKind.PublisherVerificationUnavailable);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var verifiedSelected = checks.ResolveExecutable(selectedIdentity.Executable);
+        if (!BuildsEqual(verifiedSelected, selectedIdentity))
+        {
+            return Unavailable(StagedSupervisorTransitionLoadKind.SelectedBuildUnavailable);
+        }
+        var verifiedRollback = checks.ResolveExecutable(rollback.Executable);
+        if (!BuildsEqual(verifiedRollback, rollback))
+        {
+            return Unavailable(StagedSupervisorTransitionLoadKind.RollbackBuildUnavailable);
+        }
+
         return new(
             StagedSupervisorTransitionLoadKind.Loaded,
             new StagedSupervisorTransitionBuilds(
-                RunningBuild: rollback,
-                SelectedBuild: selectedIdentity,
-                RollbackBuild: rollback));
+                RunningBuild: verifiedRollback!,
+                SelectedBuild: verifiedSelected!,
+                RollbackBuild: verifiedRollback!));
     }
 
     private static StagedSupervisorTransitionLoadResult Unavailable(
@@ -164,17 +192,12 @@ internal static class StagedSupervisorTransitionReader
         {
             build.Validate();
             var executable = Path.GetFullPath(build.Executable);
-            var versionDirectory = Path.GetDirectoryName(executable);
-            return Path.GetFileName(executable).Equals(
-                       "CodexContinuity.exe",
-                       StringComparison.OrdinalIgnoreCase) &&
-                versionDirectory is not null &&
-                Path.GetFileName(versionDirectory).Equals(
-                    $"{build.Version}-{build.ExecutableSha256[..12]}",
-                    StringComparison.OrdinalIgnoreCase) &&
-                Path.GetDirectoryName(versionDirectory)?.Equals(
-                    Path.GetFullPath(ContinuityPaths.VersionsDirectory(stateDirectory)),
-                    StringComparison.OrdinalIgnoreCase) == true;
+            return PathsEqual(
+                executable,
+                ContinuityPaths.VersionedSupervisorExecutable(
+                    stateDirectory,
+                    build.Version,
+                    build.ExecutableSha256));
         }
         catch (Exception exception) when (
             exception is ArgumentException or InvalidDataException or NotSupportedException or
@@ -183,4 +206,19 @@ internal static class StagedSupervisorTransitionReader
             return false;
         }
     }
+
+    private static bool BuildsEqual(
+        SupervisorExecutableIdentity? first,
+        SupervisorExecutableIdentity second) =>
+        first is not null &&
+        first.Version.Equals(second.Version, StringComparison.OrdinalIgnoreCase) &&
+        PathsEqual(first.Executable, second.Executable) &&
+        first.ExecutableSha256.Equals(
+            second.ExecutableSha256,
+            StringComparison.OrdinalIgnoreCase);
+
+    private static bool PathsEqual(string first, string second) =>
+        Path.GetFullPath(first).Equals(
+            Path.GetFullPath(second),
+            StringComparison.OrdinalIgnoreCase);
 }
