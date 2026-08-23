@@ -30,6 +30,11 @@ public sealed class RpcReadBudgetTests
                 new ThreadLifecycleStatus("idle", [], Malformed: false))],
             Program.RpcClient.ParseThreadData(JsonNode.Parse(
                 """[{"id":"thread-2","name":"Fixture","status":{"type":"idle"}}]""")));
+
+        Assert.Equal(
+            [new ThreadLifecycleStatus("idle", [], Malformed: false)],
+            Program.RpcClient.ParseThreadLifecycleData(JsonNode.Parse(
+                """[{"id":{"ignored":true},"name":["ignored"],"status":{"type":"idle"}}]""")));
     }
 
     [Fact]
@@ -119,6 +124,50 @@ public sealed class RpcReadBudgetTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.ListThreadsAsync(
             operationTimeout: TimeSpan.FromMilliseconds(50)));
         await delayedServer;
+    }
+
+    [Fact]
+    public async Task ReadinessConnectAndListHonorCallerCancellation()
+    {
+        var readinessPort = AvailablePort();
+        using (var listener = new HttpListener())
+        {
+            listener.Prefixes.Add($"http://127.0.0.1:{readinessPort}/");
+            listener.Start();
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                Program.IsReadyAsync(
+                    readinessPort,
+                    TimeSpan.FromSeconds(10),
+                    cancellation.Token).WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+
+        var connectPort = AvailablePort();
+        using (var listener = new HttpListener())
+        {
+            listener.Prefixes.Add($"http://127.0.0.1:{connectPort}/");
+            listener.Start();
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                Program.RpcClient.ConnectAsync(
+                    $"ws://127.0.0.1:{connectPort}",
+                    cancellationToken: cancellation.Token).WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+
+        var (url, server) = StartServer(async socket =>
+        {
+            await CompleteInitializationAsync(socket);
+            _ = await ReceiveAsync(socket);
+            await Task.Delay(250);
+        });
+        await using var client = await Program.RpcClient.ConnectAsync(url);
+        using (var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(50)))
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                client.ListThreadLifecyclesAsync(
+                    cancellationToken: cancellation.Token).WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        await server;
     }
 
     private static (string Url, Task Server) StartServer(Func<WebSocket, Task> handle)

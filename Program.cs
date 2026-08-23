@@ -1316,19 +1316,24 @@ internal static class Program
         }
     }
 
-    private static async Task<bool> IsReadyAsync(int port, TimeSpan timeout)
+    internal static async Task<bool> IsReadyAsync(
+        int port,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default)
     {
         using var client = new HttpClient { Timeout = timeout };
         try
         {
-            using var response = await client.GetAsync(LoopbackEndpoint.ReadyUrl(port));
+            using var response = await client.GetAsync(
+                LoopbackEndpoint.ReadyUrl(port),
+                cancellationToken);
             return response.IsSuccessStatusCode;
         }
         catch (HttpRequestException)
         {
             return false;
         }
-        catch (TaskCanceledException)
+        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             return false;
         }
@@ -1557,12 +1562,15 @@ internal static class Program
 
         public static async Task<RpcClient> ConnectAsync(
             string url,
-            int maximumResponseBytes = RpcReadBudget.DefaultMaximumMessageBytes)
+            int maximumResponseBytes = RpcReadBudget.DefaultMaximumMessageBytes,
+            CancellationToken cancellationToken = default)
         {
             var client = new RpcClient();
             try
             {
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+                timeout.CancelAfter(TimeSpan.FromSeconds(10));
                 await client.socket.ConnectAsync(new Uri(url), timeout.Token);
                 var initialize = await client.RequestAsync(
                     "initialize",
@@ -1597,17 +1605,48 @@ internal static class Program
             }
         }
 
-        public async Task<List<ThreadSummary>> ListThreadsAsync(
+        public Task<List<ThreadSummary>> ListThreadsAsync(
             int maximumThreads = RpcReadBudget.DefaultMaximumItems,
             int maximumPages = RpcReadBudget.DefaultMaximumPages,
             int maximumMessageBytes = RpcReadBudget.DefaultMaximumMessageBytes,
-            TimeSpan? operationTimeout = null)
+            TimeSpan? operationTimeout = null,
+            CancellationToken cancellationToken = default) =>
+            ListThreadPagesAsync(
+                ParseThreadData,
+                maximumThreads,
+                maximumPages,
+                maximumMessageBytes,
+                operationTimeout,
+                cancellationToken);
+
+        public Task<List<ThreadLifecycleStatus>> ListThreadLifecyclesAsync(
+            int maximumThreads = RpcReadBudget.DefaultMaximumItems,
+            int maximumPages = RpcReadBudget.DefaultMaximumPages,
+            int maximumMessageBytes = RpcReadBudget.DefaultMaximumMessageBytes,
+            TimeSpan? operationTimeout = null,
+            CancellationToken cancellationToken = default) =>
+            ListThreadPagesAsync(
+                ParseThreadLifecycleData,
+                maximumThreads,
+                maximumPages,
+                maximumMessageBytes,
+                operationTimeout,
+                cancellationToken);
+
+        private async Task<List<T>> ListThreadPagesAsync<T>(
+            Func<JsonNode?, IReadOnlyList<T>> parseData,
+            int maximumThreads,
+            int maximumPages,
+            int maximumMessageBytes,
+            TimeSpan? operationTimeout,
+            CancellationToken cancellationToken)
         {
             ArgumentOutOfRangeException.ThrowIfLessThan(maximumMessageBytes, 1);
-            using var timeout = new CancellationTokenSource(
-                operationTimeout ?? RpcReadBudget.DefaultOperationTimeout);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+            timeout.CancelAfter(operationTimeout ?? RpcReadBudget.DefaultOperationTimeout);
             var budget = new RpcReadBudget(maximumThreads, maximumPages);
-            var threads = new List<ThreadSummary>();
+            var threads = new List<T>();
             string? cursor = null;
             do
             {
@@ -1625,13 +1664,34 @@ internal static class Program
                 ThrowIfRpcError(response, "thread/list");
                 var result = response["result"]?.AsObject()
                     ?? throw new InvalidOperationException("thread/list returned no result.");
-                var page = ParseThreadData(result["data"]);
+                var page = parseData(result["data"]);
                 budget.AddItems(page.Count);
                 threads.AddRange(page);
                 cursor = result["nextCursor"]?.GetValue<string>();
                 budget.ObserveCursor(cursor);
             }
             while (cursor is not null);
+            return threads;
+        }
+
+        internal static IReadOnlyList<ThreadLifecycleStatus> ParseThreadLifecycleData(
+            JsonNode? dataNode)
+        {
+            if (dataNode is not JsonArray data)
+            {
+                throw new InvalidOperationException("thread/list returned no data array.");
+            }
+
+            var threads = new List<ThreadLifecycleStatus>(data.Count);
+            foreach (var node in data)
+            {
+                if (node is not JsonObject thread)
+                {
+                    throw new InvalidOperationException(
+                        "thread/list returned a malformed thread entry.");
+                }
+                threads.Add(ThreadLifecycleStatus.Parse(thread["status"]));
+            }
             return threads;
         }
 
