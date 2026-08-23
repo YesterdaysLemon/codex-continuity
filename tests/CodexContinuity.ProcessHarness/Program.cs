@@ -40,6 +40,13 @@ internal static class Program
             return RunProcessGroupChild(args[1], args[2], args[3]);
         }
 
+        if (args.FirstOrDefault() == "idle-process")
+        {
+            File.WriteAllText(args[1], "ready");
+            Thread.Sleep(Timeout.InfiniteTimeSpan);
+            return 0;
+        }
+
         if (args.FirstOrDefault() is "self-test" or "install")
         {
             var recordPath = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "record-path.txt"));
