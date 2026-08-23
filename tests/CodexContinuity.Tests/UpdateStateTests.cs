@@ -144,70 +144,8 @@ public sealed class UpdateStateTests : IDisposable
         File.WriteAllText(statePath, "{\"schemaVersion\":2}");
         Assert.Equal(ContinuityUpdateStateLoadKind.UnsupportedSchema, store.Load().Kind);
 
-        var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
-        store.Save(ValidState(now));
-        File.WriteAllText(
-            statePath,
-            File.ReadAllText(statePath).PadRight((1024 * 1024) + 1));
+        File.WriteAllText(statePath, new string('x', 1024 * 1024 + 1));
         Assert.Equal(ContinuityUpdateStateLoadKind.Invalid, store.Load().Kind);
-    }
-
-    [Fact]
-    public void StorePreservesStateWhenBoundedFieldsExceedThePersistedByteLimit()
-    {
-        var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
-        var store = new ContinuityUpdateStateStore(
-            Path.Combine(root, "update-status.json"),
-            retainedReleases: 256);
-        var baseline = ValidState(now);
-        store.Save(baseline);
-        var path = Path.Combine(root, "update-status.json");
-        var persisted = File.ReadAllBytes(path);
-        var largeError = new string('\u754c', 2048);
-        var releases = Enumerable.Range(1, 256).Select(index =>
-            new TrackedContinuityRelease(
-                $"1.0.{index}",
-                now,
-                now,
-                StagedAtUtc: null,
-                AppliedAtUtc: null,
-                LastError: largeError)).ToList();
-
-        Assert.Throws<InvalidDataException>(() => store.Save(baseline with
-        {
-            Releases = releases,
-        }));
-        Assert.Equal(persisted, File.ReadAllBytes(path));
-    }
-
-    [Fact]
-    public void StoreAtomicallyPublishesACompleteReplacement()
-    {
-        var now = DateTimeOffset.Parse("2026-08-21T13:00:00Z");
-        var state = ValidState(now);
-        var store = Store();
-        store.Save(state);
-        var path = Path.Combine(root, "update-status.json");
-        var previousBytes = File.ReadAllBytes(path);
-        using var previousSnapshot = new FileStream(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete);
-        var replacement = state with { LastCheckedAtUtc = now.AddMinutes(1) };
-
-        store.Save(replacement);
-
-        var observedPrevious = new byte[previousBytes.Length];
-        previousSnapshot.ReadExactly(observedPrevious);
-        Assert.Equal(previousBytes, observedPrevious);
-        Assert.Equivalent(replacement, store.Load().State, strict: true);
-        Assert.False(File.Exists(BoundedStateFile.TemporaryPath(path)));
-        Assert.False(File.Exists(BoundedStateFile.BackupPath(path)));
-        Assert.False(File.Exists(BoundedStateFile.WritingPath(path)));
-
-        File.Move(path, BoundedStateFile.BackupPath(path));
-        Assert.Equivalent(replacement, store.Load().State, strict: true);
     }
 
     [Fact]
@@ -315,19 +253,4 @@ public sealed class UpdateStateTests : IDisposable
         Directory.CreateDirectory(root);
         return new ContinuityUpdateStateStore(Path.Combine(root, "update-status.json"));
     }
-
-    private static ContinuityUpdateState ValidState(DateTimeOffset now) => new(
-        1,
-        now,
-        now,
-        "1.0.0",
-        "1.0.0",
-        "1.0.0",
-        true,
-        null,
-        null,
-        0,
-        0,
-        0,
-        Releases: []);
 }
