@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using CodexContinuity;
 using Xunit;
 
@@ -112,13 +113,41 @@ public sealed class SupervisorSuccessorHandoffTests
         }).Validate());
         Assert.Throws<InvalidDataException>(() => (handoff with
         {
-            ExpiresAtUtc = handoff.CreatedAtUtc + SupervisorSuccessorHandoff.MaximumLifetime +
-                TimeSpan.FromTicks(1),
-        }).Validate());
-        Assert.Throws<InvalidDataException>(() => (handoff with
-        {
             HandoffId = handoff.HandoffId.ToUpperInvariant(),
         }).Validate());
+    }
+
+    [Theory]
+    [InlineData("maximumLifetime")]
+    [InlineData("nonPositiveLifetime")]
+    [InlineData("futureSupervisorStart")]
+    [InlineData("futureBackendStart")]
+    public void EveryTemporalCoordinateFailsClosedIndependently(string coordinate)
+    {
+        var handoff = Handoff();
+        var invalid = coordinate switch
+        {
+            "maximumLifetime" => handoff with
+            {
+                ExpiresAtUtc = handoff.CreatedAtUtc +
+                    SupervisorSuccessorHandoff.MaximumLifetime + TimeSpan.FromTicks(1),
+            },
+            "nonPositiveLifetime" => handoff with { ExpiresAtUtc = handoff.CreatedAtUtc },
+            "futureSupervisorStart" => handoff with
+            {
+                PreviousSupervisorStartedAtUtc = handoff.CreatedAtUtc + TimeSpan.FromTicks(1),
+            },
+            "futureBackendStart" => handoff with
+            {
+                Backend = handoff.Backend with
+                {
+                    BackendStartedAtUtc = handoff.CreatedAtUtc + TimeSpan.FromTicks(1),
+                },
+            },
+            _ => throw new InvalidOperationException($"Unknown temporal coordinate {coordinate}."),
+        };
+
+        Assert.Throws<InvalidDataException>(invalid.Validate);
     }
 
     [Theory]
@@ -221,7 +250,14 @@ public sealed class SupervisorSuccessorHandoffTests
         try
         {
             var store = Store(root);
-            store.Write(Handoff());
+            var original = Handoff();
+            store.Write(original);
+            var path = ContinuityPaths.SupervisorHandoffFile(root);
+            using var originalReader = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
             var replacement = Handoff() with
             {
                 HandoffId = Guid.Parse("fedcba98-7654-3210-fedc-ba9876543210").ToString("N"),
@@ -229,6 +265,8 @@ public sealed class SupervisorSuccessorHandoffTests
 
             store.Write(replacement);
 
+            var originalJson = JsonNode.Parse(originalReader)!.AsObject();
+            Assert.Equal(original.HandoffId, originalJson["handoffId"]!.GetValue<string>());
             Assert.Equal(replacement, store.Load(Now).Handoff);
             Assert.Empty(Directory.EnumerateFiles(root, "*.tmp-*"));
         }
@@ -238,26 +276,21 @@ public sealed class SupervisorSuccessorHandoffTests
         }
     }
 
-    [Fact]
-    public void MissingNestedIdentitiesFailClosedWithoutEscapingTheLoader()
+    [Theory]
+    [InlineData("runningBuild")]
+    [InlineData("selectedBuild")]
+    [InlineData("rollbackBuild")]
+    [InlineData("backend")]
+    public void EachMissingNestedIdentityFailsClosedWithoutEscapingTheLoader(string propertyName)
     {
         var root = TemporaryDirectory();
         try
         {
             var path = ContinuityPaths.SupervisorHandoffFile(root);
-            File.WriteAllText(
-                path,
-                """
-                {
-                  "schemaVersion": 1,
-                  "handoffId": "0123456789abcdef0123456789abcdef",
-                  "previousSupervisorProcessId": 42,
-                  "previousSupervisorStartedAtUtc": "2026-08-23T11:00:00Z",
-                  "publicPort": 45123,
-                  "createdAtUtc": "2026-08-23T12:00:00Z",
-                  "expiresAtUtc": "2026-08-23T12:01:00Z"
-                }
-                """);
+            Store(root).Write(Handoff());
+            var manifest = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+            manifest[propertyName] = null;
+            File.WriteAllText(path, manifest.ToJsonString());
 
             Assert.Equal(
                 SupervisorSuccessorHandoffLoadKind.Invalid,

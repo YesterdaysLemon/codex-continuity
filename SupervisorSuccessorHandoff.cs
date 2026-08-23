@@ -217,7 +217,14 @@ internal sealed class SupervisorSuccessorHandoffStore(string path)
         try
         {
             File.WriteAllBytes(temporaryPath, serialized);
-            File.Move(temporaryPath, path, overwrite: true);
+            if (File.Exists(path))
+            {
+                File.Replace(temporaryPath, path, destinationBackupFileName: null);
+            }
+            else
+            {
+                File.Move(temporaryPath, path);
+            }
         }
         finally
         {
