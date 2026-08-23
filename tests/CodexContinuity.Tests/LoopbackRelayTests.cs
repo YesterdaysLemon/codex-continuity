@@ -1,5 +1,6 @@
 using CodexContinuity;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -61,6 +62,72 @@ public sealed class LoopbackRelayTests
         }
 
         relay.OpenGate();
+        using var accepted = await ConnectAsync(publicPort);
+        Assert.Equal("backend:ready", await RoundTripAsync(accepted, "ready"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AdmissionRejectionFailsClosedAndAcceptLoopSurvives(bool afterConnect)
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        var denyEnabled = 1;
+        var checks = 0;
+        var reports = new ConcurrentQueue<Exception>();
+        await using var relay = LoopbackRelay.Start(
+            publicPort,
+            backend.Port,
+            reportError: reports.Enqueue,
+            backendAdmission: (_, connectedBackend) =>
+            {
+                Interlocked.Increment(ref checks);
+                return Volatile.Read(ref denyEnabled) == 0 ||
+                    (connectedBackend is not null) != afterConnect;
+            });
+
+        using var refused = await ConnectAsync(publicPort);
+
+        await AssertConnectionClosedAsync(refused);
+        await WaitUntilAsync(() => relay.ActiveConnectionCount == 0);
+        Assert.Equal(afterConnect ? 2 : 1, Volatile.Read(ref checks));
+        Assert.Empty(reports);
+
+        Volatile.Write(ref denyEnabled, 0);
+        using var accepted = await ConnectAsync(publicPort);
+        Assert.Equal("backend:ready", await RoundTripAsync(accepted, "ready"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AdmissionExceptionsAreReportedAndAcceptLoopSurvives(bool afterConnect)
+    {
+        await using var backend = new TaggedBackend("backend:");
+        var publicPort = AvailablePort();
+        var throwEnabled = 1;
+        var reports = new ConcurrentQueue<Exception>();
+        await using var relay = LoopbackRelay.Start(
+            publicPort,
+            backend.Port,
+            reportError: reports.Enqueue,
+            backendAdmission: (_, connectedBackend) =>
+            {
+                if (Volatile.Read(ref throwEnabled) == 1 &&
+                    (connectedBackend is not null) == afterConnect)
+                {
+                    throw new IOException("admission failed");
+                }
+                return true;
+            });
+
+        using var refused = await ConnectAsync(publicPort);
+        await AssertConnectionClosedAsync(refused);
+        await WaitUntilAsync(() => relay.ActiveConnectionCount == 0);
+        Assert.Single(reports);
+
+        Volatile.Write(ref throwEnabled, 0);
         using var accepted = await ConnectAsync(publicPort);
         Assert.Equal("backend:ready", await RoundTripAsync(accepted, "ready"));
     }
@@ -349,6 +416,10 @@ public sealed class LoopbackRelayTests
                     break;
                 }
                 catch (SocketException) when (shutdown.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (ObjectDisposedException) when (shutdown.IsCancellationRequested)
                 {
                     break;
                 }
