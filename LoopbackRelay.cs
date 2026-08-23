@@ -163,7 +163,6 @@ internal sealed class LoopbackRelay : IAsyncDisposable
             gated = true;
             gateEpoch++;
             exclusiveGateEpoch = null;
-            backendStopReservationEpoch = null;
             snapshot = [.. connections];
         }
 
@@ -338,6 +337,11 @@ internal sealed class LoopbackRelay : IAsyncDisposable
                 throw new InvalidOperationException(
                     "The relay backend is owned by an exclusive gate transition.");
             }
+            if (backendStopReservationEpoch is not null)
+            {
+                throw new InvalidOperationException(
+                    "The relay backend is reserved for a stop transition.");
+            }
             backendPort = port;
         }
     }
@@ -356,6 +360,11 @@ internal sealed class LoopbackRelay : IAsyncDisposable
             {
                 throw new InvalidOperationException(
                     "The relay gate is owned by an exclusive gate transition.");
+            }
+            if (backendStopReservationEpoch is not null)
+            {
+                throw new InvalidOperationException(
+                    "The relay gate is reserved for a backend stop transition.");
             }
             gated = false;
             gateEpoch++;
