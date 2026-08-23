@@ -321,19 +321,32 @@ internal static class Program
         int port,
         string stateDirectory,
         SupervisorCompatibilityScope compatibilityScope,
-        Func<string, string, CancellationToken, Task> runUpdates) => ServeAsync(
+        Func<string, string, CancellationToken, Task> runUpdates,
+        Func<
+            int,
+            string,
+            CancellationToken,
+            Func<int, WindowsProcessGroup>,
+            Task<int>>? runOwnedSupervisor = null) => ServeAsync(
             port,
             stateDirectory,
             compatibilityScope,
             runUpdates,
-            Fail);
+            Fail,
+            runOwnedSupervisor);
 
     private static async Task<int> ServeAsync(
         int port,
         string stateDirectory,
         SupervisorCompatibilityScope compatibilityScope,
         Func<string, string, CancellationToken, Task> runUpdates,
-        Func<string, int> reportFailure)
+        Func<string, int> reportFailure,
+        Func<
+            int,
+            string,
+            CancellationToken,
+            Func<int, WindowsProcessGroup>,
+            Task<int>>? runOwnedSupervisor = null)
     {
         using var supervisorLock = TryAcquireSupervisorLock(stateDirectory);
         if (supervisorLock is null)
@@ -359,118 +372,23 @@ internal static class Program
             return reportFailure($"A Codex Continuity supervisor already owns port {port}.");
         }
 
-        Directory.CreateDirectory(stateDirectory);
-        var logPath = ContinuityPaths.AppServerLogFile(stateDirectory);
-        var logWriter = new RollingLogWriter(logPath);
-        var statusStore = new SupervisorStatusStore(
-            ContinuityPaths.SupervisorStatusFile(stateDirectory));
-        var backoff = new RestartBackoffPolicy();
-        var codexHome = FutureProcessEnvironment.ResolveCodexHome();
-        var consecutiveFailures = 0;
         await using var updateLifetime = new SupervisorUpdateLifetime(
             stateDirectory,
             ProductVersion(),
             runUpdates);
-        var shutdownToken = updateLifetime.Token;
-        Console.WriteLine(
-            $"Supervising {LoopbackEndpoint.WebSocketUrl(port)} with logs at {logPath}");
-
-        while (!shutdownToken.IsCancellationRequested)
-        {
-            if (await IsReadyAsync(port, TimeSpan.FromMilliseconds(500)))
-            {
-                statusStore.Write(NewSupervisorStatus(
-                    "foreignEndpoint",
-                    port,
-                    codexHome,
-                    backendProcessId: null,
-                    consecutiveFailures,
-                    lastExitCode: null,
-                    nextRetryAtUtc: null,
-                    "An endpoint not owned by this supervisor already uses the configured port."));
-                return reportFailure(
-                    "The configured loopback port is already owned by another endpoint; refusing to adopt its thread store.");
-            }
-
-            var codexPath = FindCodexExecutable(persistedEnvironmentOnly: true);
-            using var process = StartAppServer(codexPath, port);
-            var startedAt = DateTimeOffset.UtcNow;
-            var stdout = PumpLogAsync(process.StandardOutput, logWriter, shutdownToken);
-            var stderr = PumpLogAsync(process.StandardError, logWriter, shutdownToken);
-
-            if (!await WaitUntilReadyAsync(port, process, TimeSpan.FromSeconds(20), shutdownToken))
-            {
-                if (!process.HasExited)
-                {
-                    process.Kill();
-                }
-                await process.WaitForExitAsync();
-            }
-            else
-            {
-                statusStore.Write(NewSupervisorStatus(
-                    "running",
-                    port,
-                    codexHome,
-                    process.Id,
-                    consecutiveFailures,
-                    lastExitCode: null,
-                    nextRetryAtUtc: null,
-                    $"Listening on {LoopbackEndpoint.WebSocketUrl(port)}"));
-                Console.WriteLine($"Continuity backend ready (PID {process.Id}).");
-                try
-                {
-                    await process.WaitForExitAsync(shutdownToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    if (!process.HasExited)
-                    {
-                        process.Kill();
-                        await process.WaitForExitAsync();
-                    }
-                }
-            }
-
-            await AwaitLogPumpsAsync(stdout, stderr);
-            if (!shutdownToken.IsCancellationRequested)
-            {
-                var uptime = DateTimeOffset.UtcNow - startedAt;
-                consecutiveFailures = uptime >= TimeSpan.FromMinutes(2)
-                    ? 1
-                    : consecutiveFailures + 1;
-                var delay = backoff.DelayForFailure(
-                    consecutiveFailures,
-                    Random.Shared.NextDouble());
-                var nextRetryAt = DateTimeOffset.UtcNow + delay;
-                statusStore.Write(NewSupervisorStatus(
-                    "backingOff",
-                    port,
-                    codexHome,
-                    backendProcessId: null,
-                    consecutiveFailures,
-                    process.ExitCode,
-                    nextRetryAt,
-                    $"App-server exited after {uptime}."));
-                Console.Error.WriteLine(
-                    $"App-server exited with code {process.ExitCode}; restarting in {delay.TotalSeconds:F1} seconds.");
-                if (!await WaitForRestartAsync(delay, shutdownToken))
-                {
-                    break;
-                }
-            }
-        }
-
-        statusStore.Write(NewSupervisorStatus(
-            "stopped",
+        runOwnedSupervisor ??= static (publicPort, directory, shutdownToken, startBackend) =>
+            OwnedSupervisorRuntime.RunAsync(
+                publicPort,
+                directory,
+                shutdownToken,
+                startBackend);
+        return await runOwnedSupervisor(
             port,
-            codexHome,
-            backendProcessId: null,
-            consecutiveFailures,
-            lastExitCode: null,
-            nextRetryAtUtc: null,
-            "Supervisor stopped without changing future-launch configuration."));
-        return 0;
+            stateDirectory,
+            updateLifetime.Token,
+            backendPort => StartAppServer(
+                FindCodexExecutable(persistedEnvironmentOnly: true),
+                backendPort));
     }
 
     internal static async Task<bool> WaitForRestartAsync(
