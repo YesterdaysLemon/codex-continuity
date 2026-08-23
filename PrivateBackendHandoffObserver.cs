@@ -7,25 +7,26 @@ namespace CodexContinuity;
 internal sealed record PrivateBackendObservationChecks(
     Func<int, int, bool> IsListenerOwnedBy,
     Func<int, TimeSpan, CancellationToken, Task<bool>> IsReady,
-    Func<int, CancellationToken, Task<IReadOnlyList<ThreadLifecycleStatus>>> ReadLifecycles)
+    Func<int, int, CancellationToken, Task<IReadOnlyList<ThreadLifecycleStatus>>>
+        ReadOwnedLifecycles)
 {
     internal static PrivateBackendObservationChecks Native { get; } = new(
         WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy,
         Program.IsReadyAsync,
-        static async (port, cancellationToken) =>
+        static async (port, processId, cancellationToken) =>
         {
-            await using var client = await Program.RpcClient.ConnectAsync(
+            await using var client = await Program.RpcClient.ConnectOwnedAsync(
                 LoopbackEndpoint.WebSocketUrl(port),
-                cancellationToken: cancellationToken);
-            return await client.ListThreadLifecyclesAsync(
-                cancellationToken: cancellationToken);
+                processId,
+                cancellationToken);
+            return await client.ListOwnedThreadLifecyclesAsync(cancellationToken);
         });
 
     internal void Validate()
     {
         ArgumentNullException.ThrowIfNull(IsListenerOwnedBy);
         ArgumentNullException.ThrowIfNull(IsReady);
-        ArgumentNullException.ThrowIfNull(ReadLifecycles);
+        ArgumentNullException.ThrowIfNull(ReadOwnedLifecycles);
     }
 }
 
@@ -54,14 +55,19 @@ internal static class PrivateBackendHandoffObserver
             backendProcessId,
             cancellationToken,
             checks);
+        cancellationToken.ThrowIfCancellationRequested();
         var updateState = new ContinuityUpdateStateStore(
             ContinuityPaths.UpdateStatusFile(stateDirectory)).Load();
+        cancellationToken.ThrowIfCancellationRequested();
         var selectedBuild = ContinuitySelectedBuildReader.Load(stateDirectory);
-        return ContinuityHandoffPlanner.Create(
+        cancellationToken.ThrowIfCancellationRequested();
+        var plan = ContinuityHandoffPlanner.Create(
             snapshot.BackendReady,
             snapshot.Threads,
             updateState,
             selectedBuild);
+        cancellationToken.ThrowIfCancellationRequested();
+        return plan;
     }
 
     private static async Task<ContinuityThreadSnapshot> ObserveThreadsAsync(
@@ -79,10 +85,14 @@ internal static class PrivateBackendHandoffObserver
                 return new(BackendReady: false, Threads: []);
             }
 
-            var threads = await checks.ReadLifecycles(backendPort, cancellationToken);
+            var threads = await checks.ReadOwnedLifecycles(
+                backendPort,
+                backendProcessId,
+                cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             if (!checks.IsListenerOwnedBy(backendPort, backendProcessId) ||
-                !await checks.IsReady(backendPort, ReadinessTimeout, cancellationToken))
+                !await checks.IsReady(backendPort, ReadinessTimeout, cancellationToken) ||
+                !checks.IsListenerOwnedBy(backendPort, backendProcessId))
             {
                 return new(BackendReady: false, Threads: []);
             }

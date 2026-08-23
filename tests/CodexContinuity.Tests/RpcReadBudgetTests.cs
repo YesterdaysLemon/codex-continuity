@@ -97,6 +97,94 @@ public sealed class RpcReadBudgetTests
             threads.Select(thread => (thread.Id, thread.Name, thread.Status)));
         Assert.All(threads, thread => Assert.False(thread.Activity.Malformed));
         await server;
+
+        var (lifecycleUrl, lifecycleServer) = StartServer(async socket =>
+        {
+            await CompleteInitializationAsync(socket);
+            var first = await ReceiveAsync(socket);
+            await RespondAsync(socket, first, new JsonObject
+            {
+                ["data"] = JsonNode.Parse(
+                    """[{"id":{"ignored":true},"name":["ignored"],"status":{"type":"active","activeFlags":[]}}]"""),
+                ["nextCursor"] = "lifecycle-page-2",
+            });
+            var second = await ReceiveAsync(socket);
+            Assert.Equal(
+                "lifecycle-page-2",
+                second["params"]?["cursor"]?.GetValue<string>());
+            await RespondAsync(socket, second, new JsonObject
+            {
+                ["data"] = JsonNode.Parse(
+                    """[{"id":null,"name":{"ignored":true},"status":{"type":"idle"}}]"""),
+                ["nextCursor"] = null,
+            });
+        });
+        var connectionChecks = 0;
+        await using var lifecycleClient = await Program.RpcClient.ConnectOwnedAsync(
+            lifecycleUrl,
+            expectedBackendProcessId: 42,
+            CancellationToken.None,
+            (_, processId) =>
+            {
+                connectionChecks++;
+                return processId == 42;
+            });
+        var lifecycles = await lifecycleClient.ListOwnedThreadLifecyclesAsync(
+            CancellationToken.None);
+        Assert.Equivalent(
+            new ThreadLifecycleStatus[]
+            {
+                new ThreadLifecycleStatus("active", [], Malformed: false),
+                new ThreadLifecycleStatus("idle", [], Malformed: false),
+            },
+            lifecycles,
+            strict: true);
+        Assert.True(connectionChecks >= 4);
+        await lifecycleServer;
+    }
+
+    [Fact]
+    public async Task OwnedRpcRejectsAForeignConnectedSessionBeforeInitialization()
+    {
+        var (url, server) = StartServer(_ => Task.Delay(250));
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Program.RpcClient.ConnectOwnedAsync(
+                url,
+                expectedBackendProcessId: 42,
+                CancellationToken.None,
+                (_, _) => false));
+
+        Assert.Contains("not owned", error.Message, StringComparison.OrdinalIgnoreCase);
+        await server;
+    }
+
+    [Fact]
+    public async Task OwnedRpcRejectsConnectionOwnershipLossAfterLifecycleRead()
+    {
+        var (url, server) = StartServer(async socket =>
+        {
+            await CompleteInitializationAsync(socket);
+            var list = await ReceiveAsync(socket);
+            await RespondAsync(socket, list, new JsonObject
+            {
+                ["data"] = JsonNode.Parse("""[{"status":{"type":"idle"}}]"""),
+                ["nextCursor"] = null,
+            });
+        });
+        var connectionChecks = 0;
+        await using var client = await Program.RpcClient.ConnectOwnedAsync(
+            url,
+            expectedBackendProcessId: 42,
+            CancellationToken.None,
+            (_, _) => ++connectionChecks < 4);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.ListOwnedThreadLifecyclesAsync(CancellationToken.None));
+
+        Assert.Contains("not owned", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(4, connectionChecks);
+        await server;
     }
 
     [Fact]
