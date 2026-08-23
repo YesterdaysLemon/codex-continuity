@@ -23,24 +23,34 @@ public sealed class SafePrivateBackendStopTests
         {
             backendPort = AvailablePort();
         }
+        var foreignPort = AvailablePort();
+        while (foreignPort == publicPort || foreignPort == backendPort)
+        {
+            foreignPort = AvailablePort();
+        }
         await using var relay = LoopbackRelay.Start(publicPort, backendPort);
         WindowsProcessGroup? process = null;
+        WindowsProcessGroup? foreignProcess = null;
         try
         {
-            var startInfo = new ProcessStartInfo(HarnessExecutable())
-            {
-                UseShellExecute = false,
-                WorkingDirectory = testDirectory,
-            };
-            startInfo.ArgumentList.Add("fake-self-test-app-server");
-            startInfo.ArgumentList.Add(backendPort.ToString());
-            startInfo.ArgumentList.Add("clean");
-            process = WindowsProcessGroup.Start(startInfo);
+            process = StartTestBackend(testDirectory, backendPort);
+            foreignProcess = StartTestBackend(testDirectory, foreignPort);
             await WaitUntilReadyAsync(backendPort);
+            await WaitUntilReadyAsync(foreignPort);
             var decision = await GatedHandoffTransition.CloseAndRecomputeAsync(
                 relay,
                 _ => Task.FromResult(Plan(transitionReady: true)));
 
+            Assert.Equal(
+                PrivateBackendStopKind.BackendOwnershipLost,
+                await SafePrivateBackendStop.StopAsync(
+                    decision,
+                    PrivateBackendStopTarget.From(foreignProcess),
+                    TimeSpan.FromSeconds(5),
+                    TimeSpan.FromSeconds(1),
+                    CancellationToken.None));
+            Assert.False(foreignProcess.HasExited);
+            Assert.False(process.HasExited);
             Assert.Equal(
                 PrivateBackendStopKind.GracefulExit,
                 await SafePrivateBackendStop.StopAsync(
@@ -50,6 +60,7 @@ public sealed class SafePrivateBackendStopTests
                     TimeSpan.FromSeconds(1),
                     CancellationToken.None));
             Assert.True(process.HasExited);
+            Assert.False(foreignProcess.HasExited);
             Assert.True(relay.IsGated);
         }
         finally
@@ -60,6 +71,12 @@ public sealed class SafePrivateBackendStopTests
                 await process.WaitForExitAsync();
             }
             process?.Dispose();
+            if (foreignProcess is { HasExited: false })
+            {
+                foreignProcess.Kill();
+                await foreignProcess.WaitForExitAsync();
+            }
+            foreignProcess?.Dispose();
             Directory.Delete(testDirectory, recursive: true);
         }
     }
@@ -427,6 +444,19 @@ public sealed class SafePrivateBackendStopTests
             await Task.Delay(50);
         }
         throw new TimeoutException("The private test backend did not become ready.");
+    }
+
+    private static WindowsProcessGroup StartTestBackend(string workingDirectory, int port)
+    {
+        var startInfo = new ProcessStartInfo(HarnessExecutable())
+        {
+            UseShellExecute = false,
+            WorkingDirectory = workingDirectory,
+        };
+        startInfo.ArgumentList.Add("fake-self-test-app-server");
+        startInfo.ArgumentList.Add(port.ToString());
+        startInfo.ArgumentList.Add("clean");
+        return WindowsProcessGroup.Start(startInfo);
     }
 
     private static string HarnessExecutable() => Path.ChangeExtension(
