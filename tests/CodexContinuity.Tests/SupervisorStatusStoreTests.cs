@@ -89,6 +89,31 @@ public sealed class SupervisorStatusStoreTests : IDisposable
     }
 
     [Fact]
+    public void RejectsPathFieldsBeyondFullWindowsDomain()
+    {
+        Directory.CreateDirectory(root);
+        var path = ContinuityPaths.SupervisorStatusFile(root);
+        var store = new SupervisorStatusStore(path);
+        SupervisorStatus[] invalidStatuses =
+        [
+            Status() with { CodexHome = new string('h', 32768) },
+            Status() with { SupervisorExecutable = $"C:\\{new string('e', 32765)}" },
+        ];
+
+        foreach (var status in invalidStatuses)
+        {
+            Assert.Throws<InvalidDataException>(() => store.Write(status));
+            File.WriteAllText(
+                path,
+                JsonSerializer.Serialize(status, new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                }));
+            Assert.Equal(SupervisorStatusLoadKind.Unsafe, store.Load().Kind);
+        }
+    }
+
+    [Fact]
     public void AtomicWriteSucceedsWhileStatusReadHandleIsOpen()
     {
         var path = ContinuityPaths.SupervisorStatusFile(root);
