@@ -16,6 +16,15 @@ public sealed class PrivateBackendGracefulStopTests
         var readyWithoutGate = new GatedHandoffDecision(
             Plan(transitionReady: true),
             GateLease: null);
+        foreach (var seconds in new[] { 0, 31 })
+        {
+            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+                PrivateBackendGracefulStop.StopAsync(
+                    readyWithoutGate,
+                    target,
+                    TimeSpan.FromSeconds(seconds),
+                    CancellationToken.None));
+        }
         var missingGate = await PrivateBackendGracefulStop.StopAsync(
             readyWithoutGate,
             target,
@@ -42,7 +51,6 @@ public sealed class PrivateBackendGracefulStopTests
         await AssertNoSignalAsync(backend);
         Assert.False(relay.IsGated);
     }
-
     [Fact]
     public async Task RelayBackendMismatchDoesNotSignalEitherPrivateBackend()
     {
@@ -67,7 +75,6 @@ public sealed class PrivateBackendGracefulStopTests
         await AssertNoSignalAsync(targetBackend);
         Assert.True(relay.IsGated);
     }
-
     [Theory]
     [InlineData(false, "BackendOwnershipLost")]
     [InlineData(true, "Unknown")]
@@ -93,7 +100,6 @@ public sealed class PrivateBackendGracefulStopTests
         await AssertNoSignalAsync(backend);
         Assert.True(relay.IsGated);
     }
-
     [Fact]
     public async Task GateInvalidatedDuringOwnershipCheckDoesNotSignalPrivateBackend()
     {
@@ -118,7 +124,6 @@ public sealed class PrivateBackendGracefulStopTests
         await AssertNoSignalAsync(backend);
         Assert.True(relay.IsGated);
     }
-
     [Theory]
     [InlineData("clean", "CleanExit", true)]
     [InlineData("control-exit", "WindowsControlExit", true)]
@@ -165,7 +170,6 @@ public sealed class PrivateBackendGracefulStopTests
         Assert.True(backend.Process.HasExited);
         Assert.True(relay.IsGated);
     }
-
     [Fact]
     public async Task TimedOutGracefulStopLeavesPrivateBackendRunningAndRelayClosed()
     {
@@ -188,7 +192,6 @@ public sealed class PrivateBackendGracefulStopTests
         Assert.False(decision.GateLease.TryRetargetAndOpen(
             PrivateBackendTestProcess.AvailablePort(backend.Port, publicPort)));
     }
-
     [Fact]
     public async Task CallerCancellationDuringStopRetainsReservationWithoutForcingBackend()
     {
@@ -217,7 +220,6 @@ public sealed class PrivateBackendGracefulStopTests
         Assert.False(decision.GateLease.TryRetargetAndOpen(
             PrivateBackendTestProcess.AvailablePort(backend.Port, publicPort)));
     }
-
     [Fact]
     public async Task StopUncertaintyAfterSignalRetainsReservation()
     {
@@ -257,7 +259,6 @@ public sealed class PrivateBackendGracefulStopTests
         Assert.False(decision.GateLease.TryRetargetAndOpen(
             PrivateBackendTestProcess.AvailablePort(backend.Port, publicPort)));
     }
-
     [Fact]
     public async Task CallerCancellationBeforeStopDoesNotSignalPrivateBackend()
     {
@@ -277,7 +278,6 @@ public sealed class PrivateBackendGracefulStopTests
         await AssertNoSignalAsync(backend);
         Assert.True(relay.IsGated);
     }
-
     private static PrivateBackendStopTarget Target(
         PrivateBackendTestProcess backend,
         int publicPort) => PrivateBackendStopTarget.FromOwnedLease(
