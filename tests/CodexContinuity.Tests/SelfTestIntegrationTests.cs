@@ -114,6 +114,35 @@ public sealed class SelfTestIntegrationTests : IDisposable
         Assert.Equal(unchecked((int)0xC000013A), process.ExitCode);
     }
 
+    [Fact]
+    public async Task CallerCancellationDuringGracefulStopDoesNotBecomeTimeout()
+    {
+        Directory.CreateDirectory(root);
+        var port = AvailablePort();
+        using var process = StartFakeBackend(port, "ignore", out _);
+        try
+        {
+            await WaitUntilReadyAsync(port);
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(20));
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                Program.StopAppServerWithCtrlBreakAsync(
+                    process,
+                    TimeSpan.FromSeconds(5),
+                    cancellation.Token));
+
+            Assert.False(process.HasExited);
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill();
+                await process.WaitForExitAsync();
+            }
+        }
+    }
+
     private WindowsProcessGroup StartFakeBackend(
         int port,
         string stopBehavior,
