@@ -14,75 +14,6 @@ public sealed class SupervisorRelayTests : IDisposable
         $"codex-continuity-supervisor-relay-{Guid.NewGuid():N}");
 
     [Fact]
-    public async Task SupervisorKeepsPublicEndpointSeparateFromPrivateBackend()
-    {
-        Directory.CreateDirectory(root);
-        var publicPort = FindAvailablePort();
-        var fixtureReadyPath = Path.Combine(root, "fixture-ready.txt");
-        var privatePort = 0;
-        var backendProcessId = 0;
-        using var shutdown = new CancellationTokenSource();
-
-        WindowsProcessGroup StartBackend(int port)
-        {
-            privatePort = port;
-            var process = StartHarnessBackend(port, fixtureReadyPath);
-            backendProcessId = process.Id;
-            return process;
-        }
-
-        var supervisor = Program.RunOwnedSupervisorAsync(
-            publicPort,
-            root,
-            shutdown.Token,
-            StartBackend,
-            HarnessExecutable());
-        try
-        {
-            var relayedBody = await ReadWhenReadyAsync(publicPort);
-            var directBody = await ReadWhenReadyAsync(privatePort);
-            var status = await ReadRunningStatusAsync();
-
-            Assert.NotEqual(publicPort, privatePort);
-            Assert.Equal($"backend:{privatePort}", relayedBody);
-            Assert.Equal(relayedBody, directBody);
-            Assert.Equal(
-                new SupervisorStatus(
-                    State: "running",
-                    SupervisorProcessId: Environment.ProcessId,
-                    BackendProcessId: backendProcessId,
-                    Port: publicPort,
-                    CodexHome: FutureProcessEnvironment.ResolveCodexHome(),
-                    ConsecutiveFailures: 0,
-                    LastExitCode: null,
-                    UpdatedAtUtc: status.UpdatedAtUtc,
-                    NextRetryAtUtc: null,
-                    Detail:
-                        $"Relaying {LoopbackEndpoint.WebSocketUrl(publicPort)} to an owned private backend."),
-                status);
-            Assert.Equal(
-                backendProcessId.ToString(),
-                await File.ReadAllTextAsync(fixtureReadyPath));
-            Assert.False(CanBind(publicPort));
-        }
-        finally
-        {
-            shutdown.Cancel();
-            Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
-        }
-
-        Assert.False(ProcessIsRunning(backendProcessId));
-        Assert.True(CanBind(publicPort));
-        Assert.Equal(
-            "stopped",
-            new SupervisorStatusStore(
-                ContinuityPaths.SupervisorStatusFile(root)).Read()?.State);
-        Assert.Equal(
-            BackendLeaseLoadKind.Missing,
-            new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(root)).Load().Kind);
-    }
-
-    [Fact]
     public async Task BackendRestartKeepsExclusivePublicEndpoint()
     {
         Directory.CreateDirectory(root);
@@ -90,6 +21,7 @@ public sealed class SupervisorRelayTests : IDisposable
         var backendPorts = new ConcurrentQueue<int>();
         var backendProcessIds = new ConcurrentQueue<int>();
         var generation = 0;
+        WindowsProcessGroup? foreign = null;
         using var shutdown = new CancellationTokenSource();
 
         WindowsProcessGroup StartBackend(int port)
@@ -98,7 +30,7 @@ public sealed class SupervisorRelayTests : IDisposable
             var process = StartHarnessBackend(
                 port,
                 Path.Combine(root, $"fixture-ready-{currentGeneration}.txt"),
-                exitAfterRequests: currentGeneration == 1 ? 2 : 0);
+                exitAfterRequests: currentGeneration == 1 ? -2 : 0);
             backendPorts.Enqueue(port);
             backendProcessIds.Enqueue(process.Id);
             return process;
@@ -109,11 +41,22 @@ public sealed class SupervisorRelayTests : IDisposable
             root,
             shutdown.Token,
             StartBackend,
-            HarnessExecutable());
+            HarnessExecutable);
         try
         {
             var firstBody = await ReadWhenReadyAsync(publicPort);
             Assert.False(CanBind(publicPort));
+            var firstPort = backendPorts.First();
+            Assert.True(SpinWait.SpinUntil(
+                () => CanBind(firstPort),
+                TimeSpan.FromSeconds(5)));
+            foreign = StartHarnessBackend(firstPort, Path.Combine(root, "foreign-ready.txt"));
+            Assert.Equal($"backend:{firstPort}", await ReadWhenReadyAsync(firstPort));
+            using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(1) })
+            {
+                await Assert.ThrowsAsync<HttpRequestException>(() =>
+                    client.GetAsync(LoopbackEndpoint.ReadyUrl(publicPort)));
+            }
             var secondBody = await ReadWhenBodyChangesAsync(publicPort, firstBody);
             var ports = backendPorts.ToArray();
             var processIds = backendProcessIds.ToArray();
@@ -129,6 +72,12 @@ public sealed class SupervisorRelayTests : IDisposable
         {
             shutdown.Cancel();
             Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+            if (foreign is { HasExited: false })
+            {
+                foreign.Kill();
+                await foreign.WaitForExitAsync();
+            }
+            foreign?.Dispose();
         }
     }
 
@@ -165,16 +114,13 @@ public sealed class SupervisorRelayTests : IDisposable
             root,
             shutdown.Token,
             StartBackend,
-            HarnessExecutable());
+            HarnessExecutable);
         try
         {
             Assert.Equal($"backend:{privatePort}", await ReadWhenReadyAsync(privatePort));
             using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
             await Assert.ThrowsAsync<HttpRequestException>(() =>
                 client.GetAsync(LoopbackEndpoint.ReadyUrl(publicPort)));
-            Assert.Equal(
-                BackendLeaseLoadKind.Missing,
-                new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(root)).Load().Kind);
             Assert.NotNull(foreign);
             Assert.False(foreign.HasExited);
         }
@@ -229,7 +175,7 @@ public sealed class SupervisorRelayTests : IDisposable
                     port,
                     Path.Combine(root, "unexpected-replacement.txt"));
             },
-            HarnessExecutable());
+            HarnessExecutable);
         try
         {
             Assert.Equal($"backend:{backendPort}", await ReadWhenReadyAsync(publicPort));

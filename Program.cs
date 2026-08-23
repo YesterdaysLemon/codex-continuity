@@ -363,13 +363,15 @@ internal static class Program
             stateDirectory,
             ProductVersion(),
             runUpdates);
-        var codexPath = FindCodexExecutable(persistedEnvironmentOnly: true);
+        string? codexPath = null;
+        string ResolveCodexPath() => codexPath ??= FindCodexExecutable(
+            persistedEnvironmentOnly: true);
         return await RunOwnedSupervisorAsync(
             port,
             stateDirectory,
             updateLifetime.Token,
-            backendPort => StartAppServer(codexPath, backendPort),
-            codexPath);
+            backendPort => StartAppServer(ResolveCodexPath(), backendPort),
+            ResolveCodexPath);
     }
 
     internal static async Task<int> RunOwnedSupervisorAsync(
@@ -377,7 +379,7 @@ internal static class Program
         string stateDirectory,
         CancellationToken shutdownToken,
         Func<int, WindowsProcessGroup> startBackend,
-        string backendExecutable)
+        Func<string> resolveBackendExecutable)
     {
         Directory.CreateDirectory(stateDirectory);
         var logPath = ContinuityPaths.AppServerLogFile(stateDirectory);
@@ -392,10 +394,49 @@ internal static class Program
         Console.WriteLine(
             $"Supervising {LoopbackEndpoint.WebSocketUrl(port)} with logs at {logPath}");
 
+        var backendPort = FindAvailablePort(port);
+        var activeBackendProcessId = 0;
+        LoopbackRelay relay;
+        try
+        {
+            relay = LoopbackRelay.Start(
+                port,
+                backendPort,
+                startGated: true,
+                reportError: exception => Console.Error.WriteLine(
+                    $"Loopback relay connection failed: {exception.Message}"),
+                backendAdmission: (candidatePort, connectedBackend) =>
+                {
+                    var processId = Volatile.Read(ref activeBackendProcessId);
+                    return processId > 0 && (connectedBackend is null
+                        ? WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy(
+                            candidatePort,
+                            processId)
+                        : WindowsTcpPortOwnership.IsLoopbackConnectionAcceptedBy(
+                            connectedBackend,
+                            processId));
+                });
+        }
+        catch (System.Net.Sockets.SocketException)
+        {
+            statusStore.Write(NewSupervisorStatus(
+                "foreignEndpoint",
+                port,
+                codexHome,
+                backendProcessId: null,
+                consecutiveFailures,
+                lastExitCode: null,
+                nextRetryAtUtc: null,
+                "An endpoint not owned by this supervisor already uses the configured port."));
+            return Fail(
+                "The configured loopback port is already owned by another endpoint; refusing to adopt its thread store.");
+        }
+        await using var ownedRelay = relay;
+
         var recovery = BackendLeaseRecovery.TryRecover(
             leaseStore,
             port,
-            backendExecutable,
+            resolveBackendExecutable(),
             codexHome);
         if (recovery.Kind == BackendRecoveryKind.Unsafe)
         {
@@ -417,35 +458,10 @@ internal static class Program
         }
 
         var recoveredBackend = recovery.Backend;
-        var backendPort = recoveredBackend is null
-            ? FindAvailablePort(port)
-            : recovery.Lease!.BackendPort;
-        LoopbackRelay relay;
-        try
+        if (recoveredBackend is not null)
         {
-            relay = LoopbackRelay.Start(
-                port,
-                backendPort,
-                startGated: true,
-                reportError: exception => Console.Error.WriteLine(
-                    $"Loopback relay connection failed: {exception.Message}"));
+            backendPort = recovery.Lease!.BackendPort;
         }
-        catch (System.Net.Sockets.SocketException)
-        {
-            recoveredBackend?.Dispose();
-            statusStore.Write(NewSupervisorStatus(
-                "foreignEndpoint",
-                port,
-                codexHome,
-                backendProcessId: null,
-                consecutiveFailures,
-                lastExitCode: null,
-                nextRetryAtUtc: null,
-                "An endpoint not owned by this supervisor already uses the configured port."));
-            return Fail(
-                "The configured loopback port is already owned by another endpoint; refusing to adopt its thread store.");
-        }
-        await using var ownedRelay = relay;
 
         while (!shutdownToken.IsCancellationRequested)
         {
@@ -453,6 +469,7 @@ internal static class Program
             var recovered = recoveredBackend is not null;
             var process = recoveredBackend ?? startBackend(backendPort);
             recoveredBackend = null;
+            Volatile.Write(ref activeBackendProcessId, process.Id);
             var leaseActive = recovered;
             try
             {
@@ -514,7 +531,38 @@ internal static class Program
                     Console.WriteLine($"Continuity backend ready (PID {process.Id}).");
                     try
                     {
-                        await process.WaitForExitAsync(shutdownToken);
+                        var backendOutcome = await WaitForOwnedBackendAsync(
+                            backendPort,
+                            process,
+                            shutdownToken);
+                        if (backendOutcome != BackendWaitOutcome.Exited)
+                        {
+                            var ownershipLost = backendOutcome == BackendWaitOutcome.OwnershipLost;
+                            var detail = ownershipLost
+                                ? "The private listener is no longer owned by the supervised backend."
+                                : "Private listener ownership could not be inspected; preserving the backend lease.";
+                            statusStore.Write(NewSupervisorStatus(
+                                ownershipLost ? "backendOwnershipLost" : "backendOwnershipUnknown",
+                                port,
+                                codexHome,
+                                process.Id,
+                                consecutiveFailures,
+                                lastExitCode: null,
+                                nextRetryAtUtc: null,
+                                detail));
+                            await relay.CloseGateAsync();
+                            if (!ownershipLost)
+                            {
+                                return Fail(detail);
+                            }
+                            if (!process.HasExited)
+                            {
+                                process.Kill();
+                                await process.WaitForExitAsync();
+                            }
+                            leaseStore.Delete();
+                            leaseActive = false;
+                        }
                     }
                     catch (OperationCanceledException)
                     {
@@ -573,8 +621,17 @@ internal static class Program
                     backendPort = FindAvailablePort(port, backendPort);
                 }
             }
+            catch
+            {
+                if (!relay.IsGated)
+                {
+                    await relay.CloseGateAsync();
+                }
+                throw;
+            }
             finally
             {
+                Volatile.Write(ref activeBackendProcessId, 0);
                 if (!leaseActive && !process.HasExited)
                 {
                     process.Kill();
@@ -1450,6 +1507,37 @@ internal static class Program
             }
         }
         return false;
+    }
+
+    private static async Task<BackendWaitOutcome> WaitForOwnedBackendAsync(
+        int port,
+        WindowsProcessGroup process,
+        CancellationToken cancellationToken)
+    {
+        while (!process.HasExited)
+        {
+            try
+            {
+                if (!WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy(port, process.Id))
+                {
+                    return BackendWaitOutcome.OwnershipLost;
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                Console.Error.WriteLine($"Backend ownership inspection failed: {exception.Message}");
+                return BackendWaitOutcome.OwnershipUnknown;
+            }
+            await Task.Delay(100, cancellationToken);
+        }
+        return BackendWaitOutcome.Exited;
+    }
+
+    private enum BackendWaitOutcome
+    {
+        Exited,
+        OwnershipLost,
+        OwnershipUnknown,
     }
 
     private static async Task<bool> WaitUntilManagedSupervisorReadyAsync(

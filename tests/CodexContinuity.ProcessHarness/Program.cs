@@ -159,6 +159,11 @@ internal static class Program
                     {
                         await RespondToReadyRequestAsync(client, port, shutdown.Token);
                         requestCount++;
+                        if (exitAfterRequests < 0 && requestCount == -exitAfterRequests)
+                        {
+                            listener.Stop();
+                            await Task.Delay(Timeout.InfiniteTimeSpan, shutdown.Token);
+                        }
                         if (requestCount == exitAfterRequests)
                         {
                             return 17;
