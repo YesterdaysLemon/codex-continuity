@@ -1207,6 +1207,50 @@ public sealed class SupervisorRelayTests : IDisposable
         Assert.True(accepted.Connected);
     }
 
+    [Fact]
+    public async Task SuccessfulUpdateLaunchPreservesBackendAndLeaseWhileSupervisorExits()
+    {
+        var publicPort = FindAvailablePort();
+        var fixtureStartedPath = Path.Combine(root, "preserved-update-backend.txt");
+        var applyStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var backendProcessId = 0;
+
+        var exitCode = await OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            CancellationToken.None,
+            port =>
+            {
+                var process = StartHarnessBackend(port, fixtureStartedPath);
+                backendProcessId = process.Id;
+                return process;
+            },
+            tryApplyUpdate: async (relay, lease, backendPort, processId, _) =>
+            {
+                Assert.Equal(backendProcessId, processId);
+                Assert.Equal(processId, lease.BackendProcessId);
+                Assert.Equal(backendPort, lease.BackendPort);
+                await relay.CloseGateExclusivelyAsync();
+                applyStarted.TrySetResult();
+                return true;
+            }).WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(0, exitCode);
+        await applyStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(ProcessIsRunning(backendProcessId));
+        var persisted = new BackendLeaseStore(
+            ContinuityPaths.BackendLeaseFile(root)).Load();
+        Assert.Equal(BackendLeaseLoadKind.Loaded, persisted.Kind);
+        Assert.Equal(backendProcessId, persisted.Lease!.BackendProcessId);
+        Assert.True(CanBind(publicPort));
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+        Assert.Equal(
+            $"backend:{persisted.Lease.BackendPort}",
+            await client.GetStringAsync(
+                $"http://127.0.0.1:{persisted.Lease.BackendPort}/readyz"));
+    }
+
     private async Task<SupervisorStatus> ReadStatusAsync(string state)
     {
         var store = new SupervisorStatusStore(ContinuityPaths.SupervisorStatusFile(root));

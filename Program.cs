@@ -38,6 +38,7 @@ internal static class Program
                 "update" => await UpdateAsync(),
                 "update-policy" => UpdatePolicy(args),
                 "serve" => await ServeAsync(port, args),
+                "rollback-helper" => await RollbackHelperAsync(port, args),
                 "install" => await InstallAsync(
                     port,
                     args.Contains("--start-now", StringComparer.OrdinalIgnoreCase),
@@ -320,18 +321,20 @@ internal static class Program
         var stateDirectories = LifecycleStateDirectories();
         var desktopWaitPlan = CodexDesktopProcesses.ParseWaitPlan(args);
         var successorRequest = SupervisorSuccessorAdmission.ParseRequest(args);
+        AdmittedSupervisorSuccessor? successor = null;
         if (successorRequest is not null)
         {
             var executable = Environment.ProcessPath
                 ?? throw new InvalidOperationException(
                     "The successor supervisor executable path is unavailable.");
-            await SupervisorSuccessorAdmission.PrepareAsync(
+            var handoff = await SupervisorSuccessorAdmission.PrepareAsync(
                 stateDirectory,
                 successorRequest,
                 port,
                 FutureProcessEnvironment.ResolveCodexHome(),
                 executable,
                 CancellationToken.None);
+            successor = new(handoff, successorRequest.Role);
         }
         return await ServeAsync(
             port,
@@ -340,6 +343,7 @@ internal static class Program
             CreateInstallCoordinator(stateDirectory),
             AutomaticUpdateRunner.RunAsync,
             Fail,
+            successor: successor,
             waitBeforeFirstBackend: !desktopWaitPlan.WaitForNaturalClosure
                 ? null
                 : cancellationToken => CodexDesktopProcesses.WaitForNaturalClosureAsync(
@@ -367,12 +371,14 @@ internal static class Program
         InstallCoordinator coordinator,
         Func<string, string, CancellationToken, Task> runUpdates,
         Func<string, int> reportFailure,
-        Func<CancellationToken, Task>? waitBeforeFirstBackend = null) => ServeAsync(
+        Func<CancellationToken, Task>? waitBeforeFirstBackend = null,
+        AdmittedSupervisorSuccessor? successor = null) => ServeAsync(
             port,
             stateDirectory,
             ProductionSupervisorCompatibilityScope(lifecycleStateDirectories, coordinator),
             runUpdates,
             reportFailure,
+            successor: successor,
             waitBeforeFirstBackend: waitBeforeFirstBackend);
 
     internal static Task<int> ServeAsync(
@@ -405,7 +411,8 @@ internal static class Program
             CancellationToken,
             Func<int, WindowsProcessGroup>,
             Task<int>>? runOwnedSupervisor = null,
-        Func<CancellationToken, Task>? waitBeforeFirstBackend = null)
+        Func<CancellationToken, Task>? waitBeforeFirstBackend = null,
+        AdmittedSupervisorSuccessor? successor = null)
     {
         using var supervisorLock = TryAcquireSupervisorLock(stateDirectory);
         if (supervisorLock is null)
@@ -437,6 +444,7 @@ internal static class Program
             runUpdates);
         if (runOwnedSupervisor is null)
         {
+            var applyMonitor = new SupervisorUpdateApplyMonitor(stateDirectory);
             return await OwnedSupervisorRuntime.RunAsync(
                 port,
                 stateDirectory,
@@ -444,12 +452,14 @@ internal static class Program
                 backendPort => StartAppServer(
                     FindCodexExecutable(persistedEnvironmentOnly: true),
                     backendPort),
-                waitBeforeFirstBackend: waitBeforeFirstBackend);
+                waitBeforeFirstBackend: waitBeforeFirstBackend,
+                tryApplyUpdate: applyMonitor.TryLaunchAsync,
+                successor: successor);
         }
-        if (waitBeforeFirstBackend is not null)
+        if (waitBeforeFirstBackend is not null || successor is not null)
         {
             throw new InvalidOperationException(
-                "An injected supervisor runtime cannot use the production desktop wait gate.");
+                "An injected supervisor runtime cannot use production lifecycle handoff state.");
         }
         return await runOwnedSupervisor(
             port,
@@ -495,6 +505,77 @@ internal static class Program
         }
         Console.WriteLine(JsonSerializer.Serialize(result.State, JsonOptions));
         return result.State?.LastError is null ? 0 : 1;
+    }
+
+    private static async Task<int> RollbackHelperAsync(int port, string[] args)
+    {
+        var request = SupervisorSuccessorAdmission.ParseRequest(args)
+            ?? throw new ArgumentException("Rollback helper requires a successor handoff.");
+        if (request.Role != SupervisorSuccessorRole.Selected)
+        {
+            throw new ArgumentException("Rollback helper must run as the selected build.");
+        }
+        var executable = Environment.ProcessPath
+            ?? throw new InvalidOperationException("Rollback helper executable path is unavailable.");
+        var handoff = await SupervisorSuccessorAdmission.PrepareAsync(
+            ContinuityPaths.StateDirectory,
+            request,
+            port,
+            FutureProcessEnvironment.ResolveCodexHome(),
+            executable,
+            CancellationToken.None);
+        return await SupervisorRollbackHelper.CompleteAsync(
+            ContinuityPaths.StateDirectory,
+            handoff,
+            ActivateRollbackAsync,
+            ReadPublicThreadIdsAsync,
+            CodexDesktopProcesses.Capture,
+            () => DateTimeOffset.UtcNow,
+            CancellationToken.None);
+    }
+
+    private static async Task<bool> ActivateRollbackAsync(
+        SupervisorSuccessorHandoff handoff,
+        CancellationToken cancellationToken)
+    {
+        var rollback = AutomaticUpdateRunner.ResolveBuildIdentity(
+            handoff.RollbackBuild.Executable);
+        if (rollback is null ||
+            !rollback.Version.Equals(
+                handoff.RollbackBuild.Version,
+                StringComparison.OrdinalIgnoreCase) ||
+            !rollback.ExecutableSha256.Equals(
+                handoff.RollbackBuild.ExecutableSha256,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "The rollback supervisor executable no longer matches the handoff.");
+        }
+        using var process = DetachedProcessLauncher.Start(
+            handoff.RollbackBuild.Executable,
+            [
+                "serve",
+                "--port",
+                handoff.PublicPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ],
+            Path.GetDirectoryName(handoff.RollbackBuild.Executable)
+                ?? throw new InvalidOperationException(
+                    "The rollback supervisor has no working directory."));
+        return await WaitUntilManagedSupervisorActivatedAsync(
+            handoff.PublicPort,
+            process,
+            TimeSpan.FromSeconds(20),
+            cancellationToken) == SupervisorActivationKind.Running;
+    }
+
+    private static async Task<IReadOnlyList<string>> ReadPublicThreadIdsAsync(
+        int port,
+        CancellationToken cancellationToken)
+    {
+        await using var client = await RpcClient.ConnectAsync(
+            LoopbackEndpoint.WebSocketUrl(port),
+            cancellationToken: cancellationToken);
+        return await client.ListThreadIdsAsync(cancellationToken: cancellationToken);
     }
 
     private static int UpdatePolicy(string[] args) => UpdatePolicy(
@@ -2055,6 +2136,20 @@ internal static class Program
             CancellationToken cancellationToken = default) =>
             ListThreadPagesAsync(
                 ParseThreadLifecycleData,
+                maximumThreads,
+                maximumPages,
+                maximumMessageBytes,
+                operationTimeout,
+                cancellationToken);
+
+        internal Task<List<string>> ListThreadIdsAsync(
+            int maximumThreads = RpcReadBudget.DefaultMaximumItems,
+            int maximumPages = RpcReadBudget.DefaultMaximumPages,
+            int maximumMessageBytes = RpcReadBudget.DefaultMaximumMessageBytes,
+            TimeSpan? operationTimeout = null,
+            CancellationToken cancellationToken = default) =>
+            ListThreadPagesAsync(
+                ParseThreadIdData,
                 maximumThreads,
                 maximumPages,
                 maximumMessageBytes,
