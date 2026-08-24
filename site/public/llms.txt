@@ -36,7 +36,7 @@ CodexContinuity repair
 CodexContinuity uninstall
 ```
 
-Uninstall restores only configuration still owned by Continuity and never stops a running backend. Installed files and logs are removed at the next Windows sign-in. The supported v0.3.0 release target is Windows 11 x64 only; no macOS or Linux build is available. See the repository README and SECURITY.md before production use.
+Uninstall restores only configuration still owned by Continuity and never stops a running backend. Installed files and logs are removed at the next Windows sign-in. The supported v0.4.0 release target is Windows 11 x64 only; no macOS or Linux build is available. See the repository README and SECURITY.md before production use.
 
 ## Canonical links
 
