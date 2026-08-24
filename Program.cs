@@ -35,6 +35,7 @@ internal static class Program
                 "status" => await PrintStatusAsync(port),
                 "handoff-plan" => await PrintHandoffPlanAsync(port),
                 "update" => await UpdateAsync(),
+                "update-policy" => UpdatePolicy(args),
                 "serve" => await ServeAsync(port, args),
                 "install" => await InstallAsync(
                     port,
@@ -105,6 +106,7 @@ internal static class Program
               status      Check backend health and count active threads.
               handoff-plan  Read whether lifecycle work must wait, apply an update, or may hand off.
               update      Check for and safely stage a verified Continuity release.
+              update-policy  Inspect or opt into idle-window activation of verified updates.
               serve       Supervise a loopback WebSocket app-server.
               install     Configure future desktop launches and start at user logon.
               attach      Arm or start the installed supervisor without touching Codex.
@@ -492,6 +494,50 @@ internal static class Program
         }
         Console.WriteLine(JsonSerializer.Serialize(result.State, JsonOptions));
         return result.State?.LastError is null ? 0 : 1;
+    }
+
+    private static int UpdatePolicy(string[] args) => UpdatePolicy(
+        args,
+        ContinuityPaths.StateDirectory,
+        () => DateTimeOffset.UtcNow,
+        Console.Out);
+
+    internal static int UpdatePolicy(
+        string[] args,
+        string stateDirectory,
+        Func<DateTimeOffset> utcNow,
+        TextWriter output)
+    {
+        var enable = args.Contains("--enable", StringComparer.OrdinalIgnoreCase);
+        var disable = args.Contains("--disable", StringComparer.OrdinalIgnoreCase);
+        if (enable && disable)
+        {
+            throw new ArgumentException("Choose either --enable or --disable, not both.");
+        }
+        var store = new ContinuityUpdateApplyPolicyStore(
+            ContinuityPaths.UpdateApplyPolicyFile(stateDirectory));
+        ContinuityUpdateApplyPolicy Policy()
+        {
+            var loaded = store.Load();
+            return loaded.Kind switch
+            {
+                ContinuityUpdateApplyLoadKind.Missing =>
+                    ContinuityUpdateApplyPolicy.Default(utcNow()),
+                ContinuityUpdateApplyLoadKind.Loaded => loaded.Policy!,
+                _ => throw new InvalidDataException(
+                    $"The persisted update apply policy is {loaded.Kind.ToString().ToLowerInvariant()}.")
+            };
+        }
+
+        var policy = Policy();
+        if (enable || disable)
+        {
+            using var lifecycleLock = ContinuityLifecycleLock.Acquire(stateDirectory);
+            policy = Policy().WithAutomaticApply(enable, utcNow());
+            store.Save(policy);
+        }
+        output.WriteLine(JsonSerializer.Serialize(policy, JsonOptions));
+        return 0;
     }
 
     internal static SupervisorStatus NewSupervisorStatus(
