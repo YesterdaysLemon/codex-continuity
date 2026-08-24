@@ -2014,6 +2014,21 @@ internal static class Program
                 operationTimeout,
                 cancellationToken);
 
+        internal async Task<List<string>> ListOwnedThreadIdsAsync(
+            CancellationToken cancellationToken)
+        {
+            VerifyOwnedConnection();
+            var threadIds = await ListThreadPagesAsync(
+                ParseThreadIdData,
+                RpcReadBudget.DefaultMaximumItems,
+                RpcReadBudget.DefaultMaximumPages,
+                RpcReadBudget.DefaultMaximumMessageBytes,
+                RpcReadBudget.DefaultOperationTimeout,
+                cancellationToken);
+            VerifyOwnedConnection();
+            return threadIds;
+        }
+
         internal async Task<List<ThreadLifecycleStatus>> ListOwnedThreadLifecyclesAsync(
             CancellationToken cancellationToken)
         {
@@ -2084,6 +2099,36 @@ internal static class Program
                 threads.Add(ThreadLifecycleStatus.Parse(thread["status"]));
             }
             return threads;
+        }
+
+        internal static IReadOnlyList<string> ParseThreadIdData(JsonNode? dataNode)
+        {
+            if (dataNode is not JsonArray data)
+            {
+                throw new InvalidOperationException("thread/list returned no data array.");
+            }
+
+            var threadIds = new List<string>(data.Count);
+            foreach (var node in data)
+            {
+                if (node is not JsonObject thread ||
+                    thread["id"] is not JsonValue idValue ||
+                    !idValue.TryGetValue<string>(out var id) ||
+                    string.IsNullOrWhiteSpace(id) ||
+                    id.Length > SupervisorSuccessorHandoff.MaximumThreadIdCharacters ||
+                    id.Any(char.IsControl))
+                {
+                    throw new InvalidOperationException(
+                        "thread/list returned a malformed thread identity.");
+                }
+                threadIds.Add(id);
+            }
+            if (threadIds.Distinct(StringComparer.Ordinal).Count() != threadIds.Count)
+            {
+                throw new InvalidOperationException(
+                    "thread/list returned duplicate thread identities.");
+            }
+            return threadIds;
         }
 
         internal static IReadOnlyList<ThreadSummary> ParseThreadData(JsonNode? dataNode)

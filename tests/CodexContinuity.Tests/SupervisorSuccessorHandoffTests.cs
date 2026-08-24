@@ -19,11 +19,9 @@ public sealed class SupervisorSuccessorHandoffTests
 
             store.Write(expected);
 
-            Assert.Equal(
-                new SupervisorSuccessorHandoffLoadResult(
-                    SupervisorSuccessorHandoffLoadKind.Loaded,
-                    expected),
-                store.Load(Now));
+            var loaded = store.Load(Now);
+            Assert.Equal(SupervisorSuccessorHandoffLoadKind.Loaded, loaded.Kind);
+            Assert.Equivalent(expected, loaded.Handoff, strict: true);
         }
         finally
         {
@@ -41,11 +39,9 @@ public sealed class SupervisorSuccessorHandoffTests
             var handoff = Handoff();
             store.Write(handoff);
 
-            Assert.Equal(
-                new SupervisorSuccessorHandoffLoadResult(
-                    SupervisorSuccessorHandoffLoadKind.Expired,
-                    handoff),
-                store.Load(handoff.ExpiresAtUtc));
+            var expired = store.Load(handoff.ExpiresAtUtc);
+            Assert.Equal(SupervisorSuccessorHandoffLoadKind.Expired, expired.Kind);
+            Assert.Equivalent(handoff, expired.Handoff, strict: true);
         }
         finally
         {
@@ -114,6 +110,29 @@ public sealed class SupervisorSuccessorHandoffTests
         Assert.Throws<InvalidDataException>(() => (handoff with
         {
             HandoffId = handoff.HandoffId.ToUpperInvariant(),
+        }).Validate());
+    }
+
+    [Fact]
+    public void ProofMaterialContainsOnlyBoundedThreadAndDesktopIdentities()
+    {
+        var handoff = Handoff();
+
+        Assert.Throws<InvalidDataException>(() => (handoff with
+        {
+            PersistedThreadIds = ["thread-1", "thread-1"],
+        }).Validate());
+        Assert.Throws<InvalidDataException>(() => (handoff with
+        {
+            PersistedThreadIds = [new string('x', SupervisorSuccessorHandoff.MaximumThreadIdCharacters + 1)],
+        }).Validate());
+        Assert.Throws<InvalidDataException>(() => (handoff with
+        {
+            DesktopProcesses = [],
+        }).Validate());
+        Assert.Throws<InvalidDataException>(() => (handoff with
+        {
+            DesktopProcesses = [new CodexDesktopProcessIdentity(0, 1)],
         }).Validate());
     }
 
@@ -212,7 +231,7 @@ public sealed class SupervisorSuccessorHandoffTests
             };
 
             Assert.Throws<InvalidDataException>(() => store.Write(oversized));
-            Assert.Equal(original, store.Load(Now).Handoff);
+            Assert.Equivalent(original, store.Load(Now).Handoff, strict: true);
         }
         finally
         {
@@ -267,7 +286,7 @@ public sealed class SupervisorSuccessorHandoffTests
 
             var originalJson = JsonNode.Parse(originalReader)!.AsObject();
             Assert.Equal(original.HandoffId, originalJson["handoffId"]!.GetValue<string>());
-            Assert.Equal(replacement, store.Load(Now).Handoff);
+            Assert.Equivalent(replacement, store.Load(Now).Handoff, strict: true);
             Assert.Empty(Directory.EnumerateFiles(root, "*.tmp-*"));
         }
         finally
@@ -281,6 +300,8 @@ public sealed class SupervisorSuccessorHandoffTests
     [InlineData("selectedBuild")]
     [InlineData("rollbackBuild")]
     [InlineData("backend")]
+    [InlineData("persistedThreadIds")]
+    [InlineData("desktopProcesses")]
     public void EachMissingNestedIdentityFailsClosedWithoutEscapingTheLoader(string propertyName)
     {
         var root = TemporaryDirectory();
@@ -325,6 +346,8 @@ public sealed class SupervisorSuccessorHandoffTests
                 BackendExecutable: Path.Combine(Path.GetTempPath(), "codex.exe"),
                 codexHome,
                 BackendStartedAtUtc: Now - TimeSpan.FromMinutes(30)),
+            PersistedThreadIds: ["thread-1", "thread-2"],
+            DesktopProcesses: [new CodexDesktopProcessIdentity(44, Now.UtcTicks)],
             CreatedAtUtc: Now,
             ExpiresAtUtc: Now + TimeSpan.FromMinutes(1));
     }

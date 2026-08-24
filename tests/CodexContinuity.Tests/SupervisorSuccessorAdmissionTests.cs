@@ -75,7 +75,7 @@ public sealed class SupervisorSuccessorAdmissionTests : IDisposable
             },
             CancellationToken.None);
 
-        Assert.Equal(fixture.Handoff, admitted);
+        Assert.Equivalent(fixture.Handoff, admitted, strict: true);
         Assert.Equal(1, delays);
     }
 
@@ -237,6 +237,8 @@ public sealed class SupervisorSuccessorAdmissionTests : IDisposable
             SelectedBuild: Identity(selectedExecutable, selectedBuild),
             RollbackBuild: Identity(rollbackExecutable, rollbackBuild),
             Backend: backend,
+            PersistedThreadIds: ["thread-1"],
+            DesktopProcesses: [new CodexDesktopProcessIdentity(43, Now.UtcTicks)],
             CreatedAtUtc: Now - TimeSpan.FromSeconds(1),
             ExpiresAtUtc: Now + TimeSpan.FromMinutes(1));
         new SupervisorSuccessorHandoffStore(
