@@ -54,7 +54,7 @@ export default function Home() {
               View source <span aria-hidden="true">↗</span>
             </a>
           </div>
-          <p className="microcopy">v0.5.0 · Open source · No desktop patching</p>
+          <p className="microcopy">v0.6.0 · Open source · No desktop patching</p>
         </div>
 
         <div className="continuity-card" aria-label="Continuity architecture">
@@ -206,7 +206,7 @@ export default function Home() {
           <div className="terminal" aria-label="Installed Codex Continuity commands">
             <div className="terminal-bar">
               <span>CodexContinuity</span>
-              <span>user PATH / v0.5.0</span>
+              <span>user PATH / v0.6.0</span>
             </div>
             <pre><code>CodexContinuity status{"\n"}CodexContinuity probe{"\n"}CodexContinuity update-policy --enable{"\n"}CodexContinuity repair{"\n"}CodexContinuity uninstall</code></pre>
             <div className="terminal-foot">
@@ -256,7 +256,7 @@ export default function Home() {
           <p>
             Codex Continuity relies on experimental app-server transport and
             undocumented desktop environment hooks. A future Codex release may
-            change them. v0.5.0 supports Windows 11 x64 only; there is no macOS
+            change them. v0.6.0 supports Windows 11 x64 only; there is no macOS
             or Linux build today. The utility is deliberately small,
             fail-closed, and removable with one command.
           </p>
