@@ -18,4 +18,7 @@
     <RepositoryUrl>https://github.com/YesterdaysLemon/codex-continuity</RepositoryUrl>
     <ApplicationIcon>..\assets\CodexContinuity.ico</ApplicationIcon>
   </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\UpdateContracts.cs" Link="UpdateContracts.cs" />
+  </ItemGroup>
 </Project>

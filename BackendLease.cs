@@ -206,7 +206,9 @@ internal static class BackendLeaseRecovery
         {
             installationMatches =
                 lease.PublicPort == publicPort &&
-                SameOptionalPath(lease.CodexHome, expectedCodexHome);
+                SupervisorActivationSupport.SameOptionalPath(
+                    lease.CodexHome,
+                    expectedCodexHome);
         }
         catch (Exception exception) when (
             exception is ArgumentException or NotSupportedException or PathTooLongException)
@@ -306,10 +308,6 @@ internal static class BackendLeaseRecovery
             lease,
             "Recovered the verified backend left by a previous supervisor.");
     }
-
-    private static bool SameOptionalPath(string? left, string? right) =>
-        left is null && right is null ||
-        left is not null && right is not null && SamePath(left, right);
 
     private static bool SamePath(string left, string right) =>
         Path.GetFullPath(left).Equals(

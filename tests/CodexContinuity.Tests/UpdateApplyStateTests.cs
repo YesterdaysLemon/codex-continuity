@@ -191,6 +191,22 @@ public sealed class UpdateApplyStateTests : IDisposable
     [InlineData(ContinuityUpdateApplyStates.Active)]
     [InlineData(ContinuityUpdateApplyStates.RolledBack)]
     [InlineData(ContinuityUpdateApplyStates.Failed)]
+    public void ApplyStateContractRecognizesEveryPersistedState(string state) =>
+        Assert.True(ContinuityUpdateApplyStates.IsKnown(state));
+
+    [Theory]
+    [InlineData("future")]
+    [InlineData("")]
+    public void ApplyStateContractRejectsUnknownState(string state) =>
+        Assert.False(ContinuityUpdateApplyStates.IsKnown(state));
+
+    [Theory]
+    [InlineData(ContinuityUpdateApplyStates.StagedOnly)]
+    [InlineData(ContinuityUpdateApplyStates.Waiting)]
+    [InlineData(ContinuityUpdateApplyStates.Applying)]
+    [InlineData(ContinuityUpdateApplyStates.Active)]
+    [InlineData(ContinuityUpdateApplyStates.RolledBack)]
+    [InlineData(ContinuityUpdateApplyStates.Failed)]
     public void StatusStoreRoundTripsEveryBoundedState(string state)
     {
         var store = new ContinuityUpdateApplyStatusStore(

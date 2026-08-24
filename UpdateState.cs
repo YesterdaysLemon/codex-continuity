@@ -1,7 +1,22 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using CodexContinuity.Contracts;
 
 namespace CodexContinuity;
+
+internal static class ContinuityUpdateStates
+{
+    internal const string Active = ContinuityUpdateCheckStateNames.Active;
+    internal const string Inactive = ContinuityUpdateCheckStateNames.Inactive;
+    internal const string Staged = ContinuityUpdateCheckStateNames.Staged;
+    internal const string Deferred = ContinuityUpdateCheckStateNames.Deferred;
+    internal const string Failed = ContinuityUpdateCheckStateNames.Failed;
+    internal const string Unknown = ContinuityUpdateCheckStateNames.Unknown;
+    internal const string Ahead = ContinuityUpdateCheckStateNames.Ahead;
+    internal const string Observed = ContinuityUpdateCheckStateNames.Observed;
+
+    internal static bool IsKnown(string state) => ContinuityUpdateCheckStateNames.IsKnown(state);
+}
 
 internal sealed record TrackedContinuityRelease(
     string Version,
@@ -47,11 +62,11 @@ internal sealed record ContinuityUpdateState(
                     RunningVersion,
                     StringComparison.OrdinalIgnoreCase))
             {
-                return "active";
+                return ContinuityUpdateCheckStateNames.Active;
             }
             if (!RunningProcessObserved && latest?.AppliedAtUtc is not null)
             {
-                return "inactive";
+                return ContinuityUpdateCheckStateNames.Inactive;
             }
             if (latest?.StagedAtUtc is not null)
             {
@@ -59,22 +74,24 @@ internal sealed record ContinuityUpdateState(
                     latest.Version,
                     SelectedVersion,
                     StringComparison.OrdinalIgnoreCase)
-                        ? "staged"
-                        : "deferred";
+                        ? ContinuityUpdateCheckStateNames.Staged
+                        : ContinuityUpdateCheckStateNames.Deferred;
             }
             if (latest?.LastError is not null || LastError is not null)
             {
-                return "failed";
+                return ContinuityUpdateCheckStateNames.Failed;
             }
             if (LatestVersion is null)
             {
-                return "unknown";
+                return ContinuityUpdateCheckStateNames.Unknown;
             }
             if (!RunningProcessObserved)
             {
-                return "inactive";
+                return ContinuityUpdateCheckStateNames.Inactive;
             }
-            return CompareVersions(RunningVersion, LatestVersion) > 0 ? "ahead" : "observed";
+            return CompareVersions(RunningVersion, LatestVersion) > 0
+                ? ContinuityUpdateCheckStateNames.Ahead
+                : ContinuityUpdateCheckStateNames.Observed;
         }
     }
 

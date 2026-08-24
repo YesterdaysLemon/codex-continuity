@@ -15,7 +15,7 @@ internal sealed record PrivateBackendObservationChecks(
         Program.IsReadyAsync,
         static async (port, processId, cancellationToken) =>
         {
-            await using var client = await Program.RpcClient.ConnectOwnedAsync(
+            await using var client = await RpcClient.ConnectOwnedAsync(
                 LoopbackEndpoint.WebSocketUrl(port),
                 processId,
                 cancellationToken);

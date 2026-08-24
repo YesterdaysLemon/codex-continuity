@@ -272,7 +272,7 @@ internal static class SupervisorUpdateHandoffFactory
         if (supervisorProcessId <= 0 ||
             backend.OwnerSupervisorProcessId != supervisorProcessId ||
             backend.PublicPort != publicPort ||
-            !SameOptionalPath(backend.CodexHome, codexHome))
+            !SupervisorActivationSupport.SameOptionalPath(backend.CodexHome, codexHome))
         {
             throw new InvalidDataException(
                 "The backend lease does not belong to the running supervisor installation.");
@@ -313,10 +313,6 @@ internal static class SupervisorUpdateHandoffFactory
         SamePath(left.Executable, right.Executable) &&
         left.Version.Equals(right.Version, StringComparison.OrdinalIgnoreCase) &&
         left.ExecutableSha256.Equals(right.ExecutableSha256, StringComparison.OrdinalIgnoreCase);
-
-    private static bool SameOptionalPath(string? left, string? right) =>
-        left is null && right is null ||
-        left is not null && right is not null && SamePath(left, right);
 
     private static bool SamePath(string left, string right) => Path.GetFullPath(left).Equals(
         Path.GetFullPath(right),

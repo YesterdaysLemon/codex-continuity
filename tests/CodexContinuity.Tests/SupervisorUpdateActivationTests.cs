@@ -294,13 +294,44 @@ public sealed class SupervisorUpdateActivationTests : IDisposable
     [Fact]
     public void ErrorEvidenceIsSingleLineAndBoundedToPersistedLimit()
     {
-        var result = SupervisorUpdateApplyMonitor.BoundError(
+        var result = SupervisorActivationSupport.BoundError(
             $"before\r\n{new string('x', 4096)}");
 
         Assert.Equal(2048, result.Length);
         Assert.DoesNotContain('\r', result);
         Assert.DoesNotContain('\n', result);
         Assert.EndsWith("…", result);
+    }
+
+    [Fact]
+    public void ActivationSupportComparesOptionalPathsAndRequiresTheExpectedDesktopAnchor()
+    {
+        Assert.True(SupervisorActivationSupport.SameOptionalPath(null, null));
+        Assert.False(SupervisorActivationSupport.SameOptionalPath(null, root));
+        Assert.True(SupervisorActivationSupport.SameOptionalPath(
+            Path.Combine(root, "nested", "..", "anchor"),
+            Path.Combine(root, "anchor").ToUpperInvariant()));
+        Assert.False(SupervisorActivationSupport.SameOptionalPath(
+            Path.Combine(root, "anchor"),
+            Path.Combine(root, "other")));
+
+        var identity = new CodexDesktopProcessIdentity(100, Now.UtcTicks);
+        var running = new CodexDesktopObservation(
+            CodexDesktopObservationKind.Running,
+            [identity],
+            "running");
+        Assert.True(SupervisorActivationSupport.DesktopAnchorStillRunning(
+            [identity],
+            running));
+        Assert.False(SupervisorActivationSupport.DesktopAnchorStillRunning(
+            [identity],
+            new(CodexDesktopObservationKind.NotRunning, [], "gone")));
+        Assert.False(SupervisorActivationSupport.DesktopAnchorStillRunning(
+            [identity],
+            new(
+                CodexDesktopObservationKind.Running,
+                [new CodexDesktopProcessIdentity(101, Now.UtcTicks)],
+                "different")));
     }
 
     [Fact]

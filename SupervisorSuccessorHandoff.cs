@@ -82,7 +82,7 @@ internal sealed record SupervisorSuccessorHandoff(
         Backend.Validate();
         if (Backend.OwnerSupervisorProcessId != PreviousSupervisorProcessId ||
             Backend.PublicPort != PublicPort ||
-            !SameOptionalPath(Backend.CodexHome, CodexHome))
+            !SupervisorActivationSupport.SameOptionalPath(Backend.CodexHome, CodexHome))
         {
             throw new InvalidDataException(
                 "The leased backend does not belong to the previous supervisor handoff.");
@@ -118,11 +118,6 @@ internal sealed record SupervisorSuccessorHandoff(
     internal static bool IsSha256(string? value) =>
         value is { Length: 64 } && value.All(Uri.IsHexDigit);
 
-    private static bool SameOptionalPath(string? left, string? right) =>
-        left is null && right is null ||
-        left is not null && right is not null && Path.GetFullPath(left).Equals(
-            Path.GetFullPath(right),
-            StringComparison.OrdinalIgnoreCase);
 }
 
 internal enum SupervisorSuccessorHandoffLoadKind
