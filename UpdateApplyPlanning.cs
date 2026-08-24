@@ -84,6 +84,16 @@ internal static class ContinuityUpdateApplyPlanner
             return new(previous, BeginApply: false, PersistStatus: false);
         }
 
+        var eligibility = ContinuityUpdateApplySchedule.Evaluate(policy, nowUtc);
+        if (!eligibility.Eligible)
+        {
+            return new(Status(
+                ContinuityUpdateApplyStates.Waiting,
+                policy.Generation,
+                selectedBuild,
+                nowUtc), BeginApply: false);
+        }
+
         var ready = selectedBuild is not null &&
             plan.TransitionReady &&
             plan.PendingUpdate &&

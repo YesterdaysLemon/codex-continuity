@@ -151,6 +151,70 @@ public sealed class UpdateApplyPlanningTests
     }
 
     [Fact]
+    public void SnoozeFailsClosedAndStartsANewIdleProofAfterExpiry()
+    {
+        var policy = LoadedPolicy(enabled: true, generation: 4) with
+        {
+            Policy = LoadedPolicy(enabled: true, generation: 4).Policy! with
+            {
+                SnoozedUntilUtc = Now + TimeSpan.FromHours(1),
+            },
+        };
+        var priorIdle = WaitingStatus(4, Target, Now - TimeSpan.FromMinutes(1));
+
+        var snoozed = ContinuityUpdateApplyPlanner.Evaluate(
+            policy,
+            LoadedStatus(priorIdle),
+            ReadyPlan(),
+            Target,
+            Now,
+            TimeSpan.FromSeconds(1));
+        var resumed = ContinuityUpdateApplyPlanner.Evaluate(
+            policy,
+            LoadedStatus(snoozed.Status),
+            ReadyPlan(),
+            Target,
+            Now + TimeSpan.FromHours(1),
+            TimeSpan.FromSeconds(1));
+
+        Assert.False(snoozed.BeginApply);
+        Assert.Null(snoozed.Status.IdleSinceUtc);
+        Assert.False(resumed.BeginApply);
+        Assert.Equal(Now + TimeSpan.FromHours(1), resumed.Status.IdleSinceUtc);
+    }
+
+    [Theory]
+    [InlineData(22, 59, false)]
+    [InlineData(23, 0, true)]
+    [InlineData(6, 59, true)]
+    [InlineData(7, 0, false)]
+    public void OvernightActivationWindowUsesItsBoundTimeZone(
+        int hour,
+        int minute,
+        bool eligible)
+    {
+        var policy = LoadedPolicy(enabled: true, generation: 4) with
+        {
+            Policy = LoadedPolicy(enabled: true, generation: 4).Policy! with
+            {
+                ActivationWindow = new(23 * 60, 7 * 60, "UTC"),
+            },
+        };
+        var now = new DateTimeOffset(2026, 8, 24, hour, minute, 0, TimeSpan.Zero);
+
+        var decision = ContinuityUpdateApplyPlanner.Evaluate(
+            policy,
+            new(ContinuityUpdateApplyLoadKind.Missing, Status: null),
+            ReadyPlan(),
+            Target,
+            now,
+            TimeSpan.FromSeconds(1));
+
+        Assert.False(decision.BeginApply);
+        Assert.Equal(eligible ? now : null, decision.Status.IdleSinceUtc);
+    }
+
+    [Fact]
     public void HandoffBindsRunningSelectedRollbackBackendThreadsAndDesktop()
     {
         var fixture = HandoffFixture();

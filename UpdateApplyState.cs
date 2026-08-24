@@ -15,24 +15,131 @@ internal sealed record ContinuityUpdateApplyPolicy(
     int SchemaVersion,
     bool AutomaticApplyWhenIdle,
     long Generation,
-    DateTimeOffset UpdatedAtUtc)
+    DateTimeOffset UpdatedAtUtc,
+    DateTimeOffset? SnoozedUntilUtc = null,
+    ContinuityActivationWindow? ActivationWindow = null)
 {
-    internal const int CurrentSchemaVersion = 1;
+    internal const int CurrentSchemaVersion = 2;
+    internal const int LegacySchemaVersion = 1;
+    internal static readonly TimeSpan MaximumSnooze = TimeSpan.FromDays(7);
 
     internal static ContinuityUpdateApplyPolicy Default(DateTimeOffset nowUtc) => new(
         CurrentSchemaVersion,
         AutomaticApplyWhenIdle: false,
         Generation: 0,
-        UpdatedAtUtc: nowUtc);
+        UpdatedAtUtc: nowUtc,
+        SnoozedUntilUtc: null,
+        ActivationWindow: null);
 
     internal ContinuityUpdateApplyPolicy WithAutomaticApply(
         bool enabled,
         DateTimeOffset nowUtc) => this with
         {
+            SchemaVersion = CurrentSchemaVersion,
             AutomaticApplyWhenIdle = enabled,
             Generation = checked(Generation + 1),
             UpdatedAtUtc = nowUtc,
         };
+
+    internal ContinuityUpdateApplyPolicy WithSnooze(
+        DateTimeOffset? snoozedUntilUtc,
+        DateTimeOffset nowUtc)
+    {
+        if (snoozedUntilUtc is { } until &&
+            (until <= nowUtc || until - nowUtc > MaximumSnooze))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(snoozedUntilUtc),
+                "An activation snooze must end within the next seven days.");
+        }
+        return this with
+        {
+            SchemaVersion = CurrentSchemaVersion,
+            SnoozedUntilUtc = snoozedUntilUtc,
+            Generation = checked(Generation + 1),
+            UpdatedAtUtc = nowUtc,
+        };
+    }
+
+    internal ContinuityUpdateApplyPolicy WithActivationWindow(
+        ContinuityActivationWindow? activationWindow,
+        DateTimeOffset nowUtc)
+    {
+        activationWindow?.Validate();
+        return this with
+        {
+            SchemaVersion = CurrentSchemaVersion,
+            ActivationWindow = activationWindow,
+            Generation = checked(Generation + 1),
+            UpdatedAtUtc = nowUtc,
+        };
+    }
+}
+
+internal sealed record ContinuityActivationWindow(
+    int StartMinuteLocal,
+    int EndMinuteLocal,
+    string TimeZoneId)
+{
+    internal void Validate()
+    {
+        if (StartMinuteLocal is < 0 or >= 24 * 60 ||
+            EndMinuteLocal is < 0 or >= 24 * 60 ||
+            StartMinuteLocal == EndMinuteLocal)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(StartMinuteLocal),
+                "An activation window needs two distinct local times within one day.");
+        }
+        if (string.IsNullOrWhiteSpace(TimeZoneId) || TimeZoneId.Length > 128)
+        {
+            throw new ArgumentException("The activation-window time zone is invalid.", nameof(TimeZoneId));
+        }
+        try
+        {
+            _ = TimeZoneInfo.FindSystemTimeZoneById(TimeZoneId);
+        }
+        catch (Exception exception) when (
+            exception is TimeZoneNotFoundException or InvalidTimeZoneException)
+        {
+            throw new ArgumentException(
+                "The activation-window time zone is unavailable.",
+                nameof(TimeZoneId),
+                exception);
+        }
+    }
+}
+
+internal sealed record ContinuityUpdateApplyEligibility(
+    bool Eligible,
+    string Reason);
+
+internal static class ContinuityUpdateApplySchedule
+{
+    internal static ContinuityUpdateApplyEligibility Evaluate(
+        ContinuityUpdateApplyPolicy policy,
+        DateTimeOffset nowUtc)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        if (policy.SnoozedUntilUtc is { } snoozedUntilUtc && nowUtc < snoozedUntilUtc)
+        {
+            return new(false, "snoozed");
+        }
+        if (policy.ActivationWindow is not { } window)
+        {
+            return new(true, "anyTime");
+        }
+
+        window.Validate();
+        var local = TimeZoneInfo.ConvertTime(
+            nowUtc,
+            TimeZoneInfo.FindSystemTimeZoneById(window.TimeZoneId));
+        var minute = (local.Hour * 60) + local.Minute;
+        var inside = window.StartMinuteLocal < window.EndMinuteLocal
+            ? minute >= window.StartMinuteLocal && minute < window.EndMinuteLocal
+            : minute >= window.StartMinuteLocal || minute < window.EndMinuteLocal;
+        return new(inside, inside ? "insideWindow" : "outsideWindow");
+    }
 }
 
 internal sealed record ContinuityUpdateApplyPolicyLoadResult(
@@ -61,13 +168,24 @@ internal sealed class ContinuityUpdateApplyPolicyStore(string path)
             {
                 return Invalid();
             }
-            if (schemaVersion != ContinuityUpdateApplyPolicy.CurrentSchemaVersion)
+            if (schemaVersion is not (
+                    ContinuityUpdateApplyPolicy.LegacySchemaVersion or
+                    ContinuityUpdateApplyPolicy.CurrentSchemaVersion))
             {
                 return new(ContinuityUpdateApplyLoadKind.UnsupportedSchema, Policy: null);
             }
             var policy = JsonSerializer.Deserialize<ContinuityUpdateApplyPolicy>(
                 bytes.Span,
                 SerializerOptions);
+            if (policy?.SchemaVersion == ContinuityUpdateApplyPolicy.LegacySchemaVersion)
+            {
+                policy = policy with
+                {
+                    SchemaVersion = ContinuityUpdateApplyPolicy.CurrentSchemaVersion,
+                    SnoozedUntilUtc = null,
+                    ActivationWindow = null,
+                };
+            }
             return IsValid(policy)
                 ? new(ContinuityUpdateApplyLoadKind.Loaded, policy)
                 : Invalid();
@@ -108,7 +226,30 @@ internal sealed class ContinuityUpdateApplyPolicyStore(string path)
     {
         SchemaVersion: ContinuityUpdateApplyPolicy.CurrentSchemaVersion,
         Generation: >= 0,
-    } && policy.UpdatedAtUtc != default;
+    } &&
+        policy.UpdatedAtUtc != default &&
+        (policy.SnoozedUntilUtc is null ||
+            policy.SnoozedUntilUtc > policy.UpdatedAtUtc &&
+            policy.SnoozedUntilUtc - policy.UpdatedAtUtc <=
+                ContinuityUpdateApplyPolicy.MaximumSnooze) &&
+        IsValid(policy.ActivationWindow);
+
+    private static bool IsValid(ContinuityActivationWindow? window)
+    {
+        if (window is null)
+        {
+            return true;
+        }
+        try
+        {
+            window.Validate();
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
 
     private static ContinuityUpdateApplyPolicyLoadResult Invalid() => new(
         ContinuityUpdateApplyLoadKind.Invalid,
