@@ -95,7 +95,8 @@ Codex desktop UI  ── reconnectable WebSocket ──  supervised app-server
 - Checks for stable Continuity releases at supervisor start and every four
   hours. Automatic staging requires the archive checksum, a valid Authenticode
   signature from the same publisher as the installed build, and a passing
-  isolated self-test; it never restarts active agents.
+  isolated self-test; it never restarts active agents. Applying a staged build
+  remains off until the user explicitly enables safe idle activation.
 - Binds only to `127.0.0.1`; it does not expose Codex over the network.
 - Removes the desktop's blue in-app update prompt on future launches.
 - Leaves signed package delivery to Microsoft Store, Intune, or another
@@ -117,18 +118,31 @@ release can be **observed**, **staged**, or **active**:
   version for the next safe start.
 - **Active** means a supervisor process with that version is actually running.
 
-The updater never turns "downloaded" into "active" and never restarts the live
-backend or desktop to apply a release. Unsigned and development builds can still
+The updater never turns "downloaded" into "active" without proof. By default it
+only stages a verified build. If the user enables **Apply Continuity updates
+when idle (Codex stays open)** in the tray, Continuity requires the same staged
+target and an idle backend for 30 seconds, closes and drains its relay, then
+recomputes activity before launching the exact selected supervisor. A race
+cancels the attempt. The existing private backend, Codex home, configured port,
+and desktop process remain in place; the desktop reconnects to the new
+supervisor automatically.
+
+The successor must prove its executable identity, sampled thread IDs, the
+original desktop process, and a bounded client reconnection. Failed proof rolls
+back through the exact previous supervisor. Failure and rollback are suppressed
+until the user explicitly retries. Unsigned and development builds can still
 observe releases, but automatic staging fails closed; use the explicit manual
 installation path until publisher signing is configured.
 
 The tray's **Check for updates now** action runs the same verified staging path
-without interrupting the backend. When the backend is unavailable, **Restart
-Continuity backend** reapplies the installed configuration and starts only the
-owned supervisor; it still refuses a foreign endpoint on the configured port.
-Both actions use the selected versioned coordinator and are serialized so an
-update, repair, uninstall, or rollback cannot mutate installation state at the
-same time.
+without interrupting the backend. Its activation line distinguishes staged-only,
+waiting, applying, active, rolled-back, and failed states. The checked idle-apply
+control is the opt-in; failed generations expose a separate retry action. When
+the backend is unavailable, **Restart Continuity backend** reapplies the installed
+configuration and starts only the owned supervisor; it still refuses a foreign
+endpoint on the configured port. Mutating actions use the selected versioned
+coordinator and are serialized so update, policy, repair, uninstall, or rollback
+state cannot change concurrently.
 
 ## Requirements
 
@@ -201,8 +215,10 @@ directory without stopping its running backend. That legacy directory is
 removed at the next Windows sign-in.
 
 It never closes or restarts the running desktop app. Upgrades stage a new
-version and redirect only the next safe supervisor start; they do not overwrite
-the executable that currently owns active agents.
+version without overwriting the executable that currently owns active agents.
+With the optional idle-apply policy enabled, only the supervisor process changes;
+the owned private backend remains alive and the same desktop reconnects through
+the stable endpoint.
 
 ## Commands
 
@@ -212,6 +228,8 @@ the executable that currently owns active agents.
 | `handoff-plan` | Read the fail-closed lifecycle decision without stopping work or changing configuration. |
 | `probe` | Inspect desktop version, update manifest, and configuration. |
 | `update` | Check stable releases now and safely stage a verified newer build. |
+| `update-policy --enable` | Opt into applying a verified staged Continuity build after a stable idle window. Re-run to retry a failed generation. |
+| `update-policy --disable` | Keep verified Continuity updates staged until a later safe start. |
 | `serve` | Run the background supervisor. |
 | `install --start-now` | Configure future launches; start immediately or arm until the currently open desktop closes naturally. |
 | `install --no-tray` | Install headlessly without the notification-area controller. |
@@ -283,9 +301,10 @@ app-server cannot contend for the same threads. The next sign-in returns Codex
 to its normal bundled app-server and updater, then deletes Continuity's installed
 files and logs.
 
-If an automatic update was staged but should not become active, run `rollback`
-before the next supervisor start. The tray will continue to report the running
-version separately from the staged startup target.
+If a staged build should not activate automatically, uncheck the tray's idle-apply
+control or run `update-policy --disable`. Run `rollback` to select the previous
+known-good build for a future safe start. The tray reports the running version,
+staged target, and activation proof separately.
 
 ## What appears in Windows
 
@@ -297,8 +316,9 @@ version separately from the staged startup target.
 - **Installed Apps:** `Codex Continuity` exposes repair/modify and uninstall.
 
 Exiting or crashing the tray never stops the supervisor or its agents. The tray
-does not display thread names; it reports only health and aggregate active-agent
-count. Use `--no-tray` for servers, automation, or a completely headless setup.
+does not display thread names; it reports only health, aggregate active-agent
+count, update state, and activation proof. Use `--no-tray` for servers,
+automation, or a completely headless setup.
 
 ## Security and operational boundary
 
