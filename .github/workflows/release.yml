@@ -32,8 +32,14 @@ jobs:
       RELEASE_REF: ${{ inputs.release_ref || github.ref }}
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
       RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
-      SIGNING_REQUESTED: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 != '' || secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD != '' || vars.WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT != '' }}
+      WINDOWS_SIGNING_MODE: ${{ vars.WINDOWS_SIGNING_MODE }}
+      PFX_SIGNING_CONFIGURATION_PRESENT: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 != '' || secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD != '' || vars.WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT != '' }}
+      ARTIFACT_SIGNING_CONFIGURATION_PRESENT: ${{ secrets.WINDOWS_SIGNING_AZURE_CLIENT_ID != '' || secrets.WINDOWS_SIGNING_AZURE_TENANT_ID != '' || secrets.WINDOWS_SIGNING_AZURE_SUBSCRIPTION_ID != '' || vars.WINDOWS_ARTIFACT_SIGNING_ENDPOINT != '' || vars.WINDOWS_ARTIFACT_SIGNING_ACCOUNT_NAME != '' || vars.WINDOWS_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME != '' || vars.WINDOWS_SIGNING_EXPECTED_SUBSCRIBER_IDENTITY_EKU != '' || vars.WINDOWS_SIGNING_EXPECTED_ROOT_THUMBPRINT != '' }}
+      PFX_SIGNING_REQUESTED: ${{ vars.WINDOWS_SIGNING_MODE == 'pfx' }}
+      ARTIFACT_SIGNING_REQUESTED: ${{ vars.WINDOWS_SIGNING_MODE == 'artifact-signing' }}
       CONTINUITY_SIGNING_EXPECTED_THUMBPRINT: ${{ vars.WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT }}
+      CONTINUITY_SIGNING_EXPECTED_SUBSCRIBER_IDENTITY_EKU: ${{ vars.WINDOWS_SIGNING_EXPECTED_SUBSCRIBER_IDENTITY_EKU }}
+      CONTINUITY_SIGNING_EXPECTED_ROOT_THUMBPRINT: ${{ vars.WINDOWS_SIGNING_EXPECTED_ROOT_THUMBPRINT }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -44,6 +50,48 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - run: dotnet restore tests/CodexContinuity.Tests/CodexContinuity.Tests.csproj
+      - name: Validate release signing configuration
+        shell: pwsh
+        run: |
+          $mode = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_MODE)) { 'unsigned' } else { $env:WINDOWS_SIGNING_MODE }
+          if ($mode -notin @('unsigned', 'artifact-signing', 'pfx')) {
+            throw "WINDOWS_SIGNING_MODE must be unsigned, artifact-signing, or pfx; received '$mode'."
+          }
+          $pfxPresent = $env:PFX_SIGNING_CONFIGURATION_PRESENT -eq 'true'
+          $artifactPresent = $env:ARTIFACT_SIGNING_CONFIGURATION_PRESENT -eq 'true'
+          if ($mode -eq 'unsigned' -and ($pfxPresent -or $artifactPresent)) {
+            throw 'Signing settings are present, but WINDOWS_SIGNING_MODE is not selected. Set the mode explicitly or remove the partial configuration.'
+          }
+          if ($mode -eq 'pfx' -and $artifactPresent) {
+            throw 'PFX and Azure Artifact Signing settings cannot be configured together.'
+          }
+          if ($mode -eq 'artifact-signing' -and $pfxPresent) {
+            throw 'PFX settings cannot be configured while WINDOWS_SIGNING_MODE=artifact-signing.'
+          }
+          if ($mode -eq 'artifact-signing') {
+            $required = @{
+              'WINDOWS_SIGNING_AZURE_CLIENT_ID' = $env:WINDOWS_SIGNING_AZURE_CLIENT_ID
+              'WINDOWS_SIGNING_AZURE_TENANT_ID' = $env:WINDOWS_SIGNING_AZURE_TENANT_ID
+              'WINDOWS_SIGNING_AZURE_SUBSCRIPTION_ID' = $env:WINDOWS_SIGNING_AZURE_SUBSCRIPTION_ID
+              'WINDOWS_ARTIFACT_SIGNING_ENDPOINT' = $env:WINDOWS_ARTIFACT_SIGNING_ENDPOINT
+              'WINDOWS_ARTIFACT_SIGNING_ACCOUNT_NAME' = $env:WINDOWS_ARTIFACT_SIGNING_ACCOUNT_NAME
+              'WINDOWS_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME' = $env:WINDOWS_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME
+              'WINDOWS_SIGNING_EXPECTED_SUBSCRIBER_IDENTITY_EKU' = $env:CONTINUITY_SIGNING_EXPECTED_SUBSCRIBER_IDENTITY_EKU
+              'WINDOWS_SIGNING_EXPECTED_ROOT_THUMBPRINT' = $env:CONTINUITY_SIGNING_EXPECTED_ROOT_THUMBPRINT
+            }
+            $missing = @($required.GetEnumerator() | Where-Object { [string]::IsNullOrWhiteSpace($_.Value) } | ForEach-Object Key)
+            if ($missing.Count -gt 0) {
+              throw "Artifact Signing configuration is incomplete. Missing: $($missing -join ', ')."
+            }
+          }
+          Write-Host "Release signing mode: $mode"
+        env:
+          WINDOWS_SIGNING_AZURE_CLIENT_ID: ${{ secrets.WINDOWS_SIGNING_AZURE_CLIENT_ID }}
+          WINDOWS_SIGNING_AZURE_TENANT_ID: ${{ secrets.WINDOWS_SIGNING_AZURE_TENANT_ID }}
+          WINDOWS_SIGNING_AZURE_SUBSCRIPTION_ID: ${{ secrets.WINDOWS_SIGNING_AZURE_SUBSCRIPTION_ID }}
+          WINDOWS_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.WINDOWS_ARTIFACT_SIGNING_ENDPOINT }}
+          WINDOWS_ARTIFACT_SIGNING_ACCOUNT_NAME: ${{ vars.WINDOWS_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          WINDOWS_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ vars.WINDOWS_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
       - name: Verify release version
         shell: pwsh
         run: |
@@ -83,17 +131,50 @@ jobs:
           --runtime win-x64 --self-contained true
           -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
           --output publish-tray
-      - name: Sign release executables
-        if: env.SIGNING_REQUESTED == 'true'
+      - name: Sign release executables with legacy PFX
+        if: env.PFX_SIGNING_REQUESTED == 'true'
         shell: pwsh
         env:
           CONTINUITY_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
           CONTINUITY_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
         run: .\scripts\sign-release.ps1 -Paths publish/CodexContinuity.exe,publish-tray/CodexContinuity.Tray.exe
+      - name: Authenticate to Azure with OIDC
+        if: env.ARTIFACT_SIGNING_REQUESTED == 'true'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.WINDOWS_SIGNING_AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.WINDOWS_SIGNING_AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.WINDOWS_SIGNING_AZURE_SUBSCRIPTION_ID }}
+      - name: Sign release executables with Azure Artifact Signing
+        if: env.ARTIFACT_SIGNING_REQUESTED == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.WINDOWS_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.WINDOWS_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.WINDOWS_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          files: |
+            ${{ github.workspace }}\publish\CodexContinuity.exe
+            ${{ github.workspace }}\publish-tray\CodexContinuity.Tray.exe
+          file-digest: SHA256
+          enhanced-key-usage: 1.3.6.1.5.5.7.3.3
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
       - name: Verify release signing policy
         shell: pwsh
         run: |
-          if ($env:SIGNING_REQUESTED -eq 'true') {
+          if ($env:WINDOWS_SIGNING_MODE -eq 'pfx') {
+            .\scripts\sign-release.ps1 -Paths publish/CodexContinuity.exe,publish-tray/CodexContinuity.Tray.exe -VerifyOnly
+          } elseif ($env:WINDOWS_SIGNING_MODE -eq 'artifact-signing') {
             .\scripts\sign-release.ps1 -Paths publish/CodexContinuity.exe,publish-tray/CodexContinuity.Tray.exe -VerifyOnly
           } else {
             Write-Warning 'Authenticode certificate is not configured; release artifacts will be unsigned.'

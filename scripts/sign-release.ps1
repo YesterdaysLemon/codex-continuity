@@ -7,7 +7,11 @@ param(
 
     [switch]$RequireUnsigned,
 
-    [string]$ExpectedThumbprint = $env:CONTINUITY_SIGNING_EXPECTED_THUMBPRINT
+    [string]$ExpectedThumbprint = $env:CONTINUITY_SIGNING_EXPECTED_THUMBPRINT,
+
+    [string]$ExpectedSubscriberIdentityEku = $env:CONTINUITY_SIGNING_EXPECTED_SUBSCRIBER_IDENTITY_EKU,
+
+    [string]$ExpectedSignerRootThumbprint = $env:CONTINUITY_SIGNING_EXPECTED_ROOT_THUMBPRINT
 )
 
 Set-StrictMode -Version Latest
@@ -20,9 +24,19 @@ if ($resolvedPaths.Count -eq 0) {
 }
 
 $normalizedExpectedThumbprint = ConvertTo-NormalizedAuthenticodeThumbprint $ExpectedThumbprint
+$normalizedExpectedSubscriberIdentityEku =
+    ConvertTo-NormalizedAuthenticodeSubscriberIdentityEku $ExpectedSubscriberIdentityEku
+$normalizedExpectedRootThumbprint = ConvertTo-NormalizedAuthenticodeThumbprint $ExpectedSignerRootThumbprint
+$stableIdentityConfigured =
+    $null -ne $normalizedExpectedSubscriberIdentityEku -or
+    $null -ne $normalizedExpectedRootThumbprint
 
 if ($RequireUnsigned -and -not $VerifyOnly) {
     throw "RequireUnsigned can only be used with VerifyOnly."
+}
+
+if ($null -ne $normalizedExpectedThumbprint -and $stableIdentityConfigured) {
+    throw "Signing verification cannot combine a leaf thumbprint with a durable Artifact Signing identity."
 }
 
 $certificateBase64 = $env:CONTINUITY_SIGNING_CERTIFICATE_BASE64
@@ -73,44 +87,31 @@ try {
         }
     }
 
-    $signatures = @($resolvedPaths | ForEach-Object {
-            [PSCustomObject]@{
-                Path      = $_
-                Signature = Get-AuthenticodeSignature -LiteralPath $_
-            }
-        })
-    $policyArtifacts = @($signatures | ForEach-Object {
-            [PSCustomObject]@{
-                Path             = $_.Path
-                Status           = $_.Signature.Status.ToString()
-                SignerThumbprint = if ($null -eq $_.Signature.SignerCertificate) {
-                    $null
-                } else {
-                    $_.Signature.SignerCertificate.Thumbprint
-                }
-                HasTimestamp     = $null -ne $_.Signature.TimeStamperCertificate
-            }
-        })
+    $policyArtifacts = @(Get-AuthenticodePolicyArtifacts -Paths $resolvedPaths)
     Assert-AuthenticodeReleasePolicy `
         -Artifacts $policyArtifacts `
         -RequireUnsigned:$RequireUnsigned `
-        -ExpectedThumbprint $normalizedExpectedThumbprint
+        -ExpectedThumbprint $normalizedExpectedThumbprint `
+        -ExpectedSubscriberIdentityEku $normalizedExpectedSubscriberIdentityEku `
+        -ExpectedSignerRootThumbprint $normalizedExpectedRootThumbprint
     if ($RequireUnsigned) {
-        foreach ($artifact in $signatures) {
+        foreach ($artifact in $policyArtifacts) {
             Write-Warning "Verified unsigned development artifact: $($artifact.Path)"
         }
         return
     }
 
-    foreach ($artifact in $signatures) {
+    foreach ($artifact in $policyArtifacts) {
         $path = $artifact.Path
-        $signature = $artifact.Signature
-        $thumbprint = $signature.SignerCertificate.Thumbprint.ToUpperInvariant()
         if ($null -eq $signTool) {
             throw "Windows SDK signtool.exe is required to verify signed artifacts."
         }
         Invoke-SignToolVerification -SignToolPath $signTool.FullName -Path $path
-        Write-Host "Verified Authenticode signature for $path ($thumbprint)"
+        if ($null -ne $normalizedExpectedThumbprint) {
+            Write-Host "Verified Authenticode signature for $path ($($artifact.SignerThumbprint.ToUpperInvariant()))"
+        } else {
+            Write-Host "Verified Authenticode subscriber identity for $path (eku=$($artifact.SubscriberIdentityEku); root=$($artifact.SignerRootThumbprint))"
+        }
     }
 }
 finally {

@@ -276,31 +276,233 @@ public sealed class BootstrapInstallerTests
     }
 
     [Fact]
-    public void RequiresEveryCandidateToMatchTheTrustedPublisher()
+    public void AcceptsRotatedLeafCertificatesWhenDurableIdentityAndChainMatch()
     {
-        var trusted = new AuthenticodeSignature("installed.exe", "Valid", "trusted");
+        var trusted = Signature(
+            "installed.exe",
+            thumbprint: "A",
+            subject: "CN=YesterdaysLemon, O=YesterdaysLemon",
+            issuer: "CN=Microsoft Identity Verification Root Certificate Authority 2020",
+            rootThumbprint: "R");
 
         AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
             [
                 trusted,
-                new AuthenticodeSignature("candidate.exe", "Valid", "trusted"),
-                new AuthenticodeSignature("tray.exe", "Valid", "trusted"),
+                Signature(
+                    "candidate.exe",
+                    thumbprint: "B",
+                    subject: "CN=YesterdaysLemon Renewed, O=YesterdaysLemon",
+                    issuer: "CN=Microsoft Identity Verification Intermediate 2021",
+                    rootThumbprint: "R"),
+                Signature(
+                    "tray.exe",
+                    thumbprint: "C",
+                    subject: "CN=YesterdaysLemon Renewed Again, O=YesterdaysLemon",
+                    issuer: "CN=Microsoft Identity Verification Intermediate 2022",
+                    rootThumbprint: "R"),
             ]);
 
         var unsigned = Assert.Throws<InvalidDataException>(() =>
             AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
-                [trusted, new AuthenticodeSignature("candidate.exe", "NotSigned", null)]));
+                [trusted, Signature("candidate.exe", status: "NotSigned")]));
         Assert.Contains("does not have a valid Authenticode signature", unsigned.Message);
 
-        var differentPublisher = Assert.Throws<InvalidDataException>(() =>
+        var differentPublisherIdentity = Assert.Throws<InvalidDataException>(() =>
             AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
                 [
                     trusted,
-                    new AuthenticodeSignature("candidate.exe", "Valid", "trusted"),
-                    new AuthenticodeSignature("tray.exe", "Valid", "different"),
+                    Signature(
+                        "candidate.exe",
+                        thumbprint: "B",
+                        subject: "CN=YesterdaysLemon, O=YesterdaysLemon",
+                        issuer: "CN=Microsoft Identity Verification Root Certificate Authority 2020",
+                        rootThumbprint: "R",
+                        subscriberIdentityEku: DifferentSubscriberIdentityEku),
                 ]));
-        Assert.Contains("different publisher certificate", differentPublisher.Message);
+        Assert.Contains("different publisher identity or certificate chain", differentPublisherIdentity.Message);
+
+        var differentChain = Assert.Throws<InvalidDataException>(() =>
+            AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
+                [
+                    trusted,
+                    Signature(
+                        "candidate.exe",
+                        thumbprint: "B",
+                        subject: "CN=YesterdaysLemon, O=YesterdaysLemon",
+                        issuer: "CN=Microsoft Identity Verification Root Certificate Authority 2020",
+                        rootThumbprint: "S"),
+                ]));
+        Assert.Contains("different publisher identity or certificate chain", differentChain.Message);
+
+        var missingIdentity = Assert.Throws<InvalidDataException>(() =>
+            AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
+                [
+                    trusted,
+                    Signature(
+                        "candidate.exe",
+                        thumbprint: "B",
+                        subject: "CN=YesterdaysLemon, O=YesterdaysLemon",
+                        issuer: "CN=Microsoft Identity Verification Root Certificate Authority 2020",
+                        rootThumbprint: "R",
+                        subscriberIdentityEku: null),
+                ]));
+        Assert.Contains("complete publisher chain", missingIdentity.Message);
+
+        var invalidThumbprint = Assert.Throws<InvalidDataException>(() =>
+            AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
+                [
+                    trusted,
+                    Signature(
+                        "candidate.exe",
+                        thumbprint: "not-a-thumbprint",
+                        subject: "CN=YesterdaysLemon, O=YesterdaysLemon",
+                        issuer: "CN=Microsoft Identity Verification Root Certificate Authority 2020",
+                        rootThumbprint: "R"),
+                ]));
+        Assert.Contains("complete publisher chain", invalidThumbprint.Message);
+
+        var malformedIdentity = Assert.Throws<InvalidDataException>(() =>
+            AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
+                [
+                    trusted,
+                    Signature(
+                        "candidate.exe",
+                        thumbprint: "B",
+                        subscriberIdentityEku: "1.3.6.1.4.1.311.97.not-an-oid",
+                        rootThumbprint: "R"),
+                ]));
+        Assert.Contains("complete publisher chain", malformedIdentity.Message);
+
+        var ambiguousIdentity = Assert.Throws<InvalidDataException>(() =>
+            AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
+                [
+                    trusted,
+                    Signature(
+                        "candidate.exe",
+                        thumbprint: "B",
+                        subscriberIdentityEkuCount: 2,
+                        rootThumbprint: "R"),
+                ]));
+        Assert.Contains("complete publisher chain", ambiguousIdentity.Message);
+
+        var missingCodeSigningEku = Assert.Throws<InvalidDataException>(() =>
+            AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
+                [
+                    trusted,
+                    Signature(
+                        "candidate.exe",
+                        thumbprint: "B",
+                        hasCodeSigningEku: false,
+                        rootThumbprint: "R"),
+                ]));
+        Assert.Contains("complete publisher chain", missingCodeSigningEku.Message);
+
+        var missingPublicTrustMarker = Assert.Throws<InvalidDataException>(() =>
+            AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
+                [
+                    trusted,
+                    Signature(
+                        "candidate.exe",
+                        thumbprint: "B",
+                        hasPublicTrustMarker: false,
+                        rootThumbprint: "R"),
+                ]));
+        Assert.Contains("complete publisher chain", missingPublicTrustMarker.Message);
+
+        var missingCertificate = Assert.Throws<InvalidDataException>(() =>
+            AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
+                [
+                    trusted,
+                    Signature(
+                        "candidate.exe",
+                        thumbprint: null,
+                        subject: "CN=YesterdaysLemon, O=YesterdaysLemon",
+                        issuer: "CN=Microsoft Identity Verification Root Certificate Authority 2020",
+                        rootThumbprint: "R"),
+                ]));
+        Assert.Contains("complete publisher chain", missingCertificate.Message);
+
+        var legacyTrusted = Signature(
+            "legacy-installed.exe",
+            thumbprint: "D",
+            subscriberIdentityEku: null,
+            hasCodeSigningEku: true,
+            hasPublicTrustMarker: false);
+        AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
+            [
+                legacyTrusted,
+                Signature(
+                    "legacy-candidate.exe",
+                    thumbprint: "D",
+                    subscriberIdentityEku: null,
+                    hasCodeSigningEku: true,
+                    hasPublicTrustMarker: false),
+            ]);
+
+        var rotatedLegacyLeaf = Assert.Throws<InvalidDataException>(() =>
+            AuthenticodeReleaseVerifier.VerifyMatchingPublisher(
+                [
+                    legacyTrusted,
+                    Signature(
+                        "legacy-candidate.exe",
+                        thumbprint: "E",
+                        subscriberIdentityEku: null,
+                        hasCodeSigningEku: true,
+                        hasPublicTrustMarker: false),
+                ]));
+        Assert.Contains("different publisher identity or certificate chain", rotatedLegacyLeaf.Message);
+
+        var legacyToArtifactTransition = Assert.Throws<InvalidDataException>(() =>
+            AuthenticodeReleaseVerifier.VerifyMatchingPublisher([legacyTrusted, trusted]));
+        Assert.Contains("different publisher identity or certificate chain", legacyToArtifactTransition.Message);
+
+        var artifactToLegacyTransition = Assert.Throws<InvalidDataException>(() =>
+            AuthenticodeReleaseVerifier.VerifyMatchingPublisher([trusted, legacyTrusted]));
+        Assert.Contains("different publisher identity or certificate chain", artifactToLegacyTransition.Message);
     }
+
+    private static AuthenticodeSignature Signature(
+        string path,
+        string status = "Valid",
+        string? thumbprint = "A",
+        string? subject = "CN=YesterdaysLemon, O=YesterdaysLemon",
+        string? issuer = "CN=Microsoft Identity Verification Root Certificate Authority 2020",
+        string? rootThumbprint = "R",
+        string? subscriberIdentityEku = DefaultSubscriberIdentityEku,
+        int? subscriberIdentityEkuCount = null,
+        bool hasCodeSigningEku = true,
+        bool hasPublicTrustMarker = true) =>
+        new(
+            path,
+            status,
+            HexThumbprint(thumbprint),
+            subject,
+            issuer,
+            HexThumbprint(rootThumbprint),
+            subscriberIdentityEku,
+            subscriberIdentityEkuCount ?? (subscriberIdentityEku is null ? 0 : 1),
+            hasCodeSigningEku,
+            hasPublicTrustMarker);
+
+    private const string DefaultSubscriberIdentityEku =
+        "1.3.6.1.4.1.311.97.990309390.766961637.194916062.941502583";
+
+    private const string DifferentSubscriberIdentityEku =
+        "1.3.6.1.4.1.311.97.990309390.766961637.194916062.941502584";
+
+    private static string? HexThumbprint(string? value) =>
+        value is null
+            ? null
+            : value.Length == 40
+                ? value
+                : new string(
+                    value[0] switch
+                    {
+                        'R' => 'D',
+                        'S' => 'E',
+                        _ => value[0],
+                    },
+                    40);
 
     private static string CreateTemporaryDirectory()
     {

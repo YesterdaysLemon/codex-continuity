@@ -194,12 +194,39 @@ test("release workflow preserves both entry points and the delivery contract", a
   assert.match(workflow, /Verify release signing policy/);
   assert.match(
     workflow,
-    /SIGNING_REQUESTED: \$\{\{ secrets\.WINDOWS_SIGNING_CERTIFICATE_BASE64 != '' \|\| secrets\.WINDOWS_SIGNING_CERTIFICATE_PASSWORD != '' \|\| vars\.WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT != '' \}\}/,
+    /WINDOWS_SIGNING_MODE: \$\{\{ vars\.WINDOWS_SIGNING_MODE \}\}/,
+  );
+  assert.match(
+    workflow,
+    /PFX_SIGNING_CONFIGURATION_PRESENT: \$\{\{ secrets\.WINDOWS_SIGNING_CERTIFICATE_BASE64 != '' \|\| secrets\.WINDOWS_SIGNING_CERTIFICATE_PASSWORD != '' \|\| vars\.WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT != '' \}\}/,
+  );
+  assert.match(
+    workflow,
+    /ARTIFACT_SIGNING_CONFIGURATION_PRESENT: \$\{\{ secrets\.WINDOWS_SIGNING_AZURE_CLIENT_ID != '' [\s\S]* vars\.WINDOWS_SIGNING_EXPECTED_ROOT_THUMBPRINT != '' \}\}/,
+  );
+  assert.match(workflow, /PFX_SIGNING_REQUESTED: \$\{\{ vars\.WINDOWS_SIGNING_MODE == 'pfx' \}\}/);
+  assert.match(
+    workflow,
+    /ARTIFACT_SIGNING_REQUESTED: \$\{\{ vars\.WINDOWS_SIGNING_MODE == 'artifact-signing' \}\}/,
   );
   assert.match(
     workflow,
     /CONTINUITY_SIGNING_EXPECTED_THUMBPRINT: \$\{\{ vars\.WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT \}\}/,
   );
+  assert.match(
+    workflow,
+    /CONTINUITY_SIGNING_EXPECTED_ROOT_THUMBPRINT: \$\{\{ vars\.WINDOWS_SIGNING_EXPECTED_ROOT_THUMBPRINT \}\}/,
+  );
+  assert.match(
+    workflow,
+    /CONTINUITY_SIGNING_EXPECTED_SUBSCRIBER_IDENTITY_EKU: \$\{\{ vars\.WINDOWS_SIGNING_EXPECTED_SUBSCRIBER_IDENTITY_EKU \}\}/,
+  );
+  assert.match(workflow, /azure\/login@v3/);
+  assert.match(workflow, /azure\/artifact-signing-action@v2/);
+  assert.match(workflow, /enhanced-key-usage: 1\.3\.6\.1\.5\.5\.7\.3\.3/);
+  assert.match(workflow, /timestamp-rfc3161: http:\/\/timestamp\.acs\.microsoft\.com/);
+  assert.match(workflow, /exclude-environment-credential: true/);
+  assert.match(workflow, /exclude-azure-cli-credential: false/);
   assert.match(workflow, /-VerifyOnly -RequireUnsigned/);
   assert.match(workflow, /winget validate --manifest release\/winget/);
   assert.match(workflow, /uses: actions\/attest@v4/);
