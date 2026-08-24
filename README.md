@@ -221,6 +221,12 @@ the executable that currently owns active agents.
 | `rollback` | Select the previous known-good build for the next safe supervisor start. |
 | `self-test` | Prove reconnect behavior in an isolated temporary Codex home. |
 
+`probe` distinguishes a newer build advertised by OpenAI's update manifest from
+an update actually offered to this PC by Microsoft Store. The manifest cannot
+prove staged Store rollout or device eligibility, so `updateAvailable` remains
+`null`; inspect `codexDesktopUpdate.manifestNewerThanInstalled` and follow its
+`recommendedAction` instead.
+
 `handoff-plan` reports only aggregate lifecycle blockers. The desktop is a client;
 the supervised app-server owns running turns. A `handoff` result means the observed
 backend is quiescent and no verified staged build is selected. It does not stop a
