@@ -769,27 +769,21 @@ internal static class Program
         {
             return Fail("The running Continuity command has no verifiable executable path.");
         }
-        FirstAttachmentPlan? firstAttachmentPlan = null;
         try
         {
             await BootstrapInstaller.VerifySha256Async(commandExecutable, state.BinarySha256);
         }
         catch (InvalidDataException)
         {
-            firstAttachmentPlan = await PlanFirstAttachmentAsync();
-            if (firstAttachmentPlan.Action == FirstAttachmentAction.Arm)
-            {
-                return Fail(
-                    "The rollback-selected Continuity build cannot safely arm while Codex is open. Nothing was changed; after Codex closes naturally, run attach again.");
-            }
+            return Fail(
+                "The rollback-selected Continuity build cannot safely use this attach protocol. Nothing was changed; its configured startup selection remains intact.");
         }
 
         var activation = await StartInstalledSupervisorAsync(
             state.InstalledExecutable,
             state.Port,
             TimeSpan.FromSeconds(20),
-            CancellationToken.None,
-            firstAttachmentPlan);
+            CancellationToken.None);
         Console.WriteLine(activation.Detail);
         return activation.Kind is SupervisorActivationKind.Failed or
             SupervisorActivationKind.Deferred

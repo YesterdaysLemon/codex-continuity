@@ -22,6 +22,8 @@ public sealed class SupervisorRelayTests : IDisposable
         var fixtureStartedPath = Path.Combine(root, "armed-backend-started.txt");
         var releaseDesktop = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
+        var waitPlan = CodexDesktopProcesses.ParseWaitPlan(
+            CodexDesktopProcesses.BuildWaitArguments([]).ToArray());
         var backendStarts = 0;
         using var shutdown = new CancellationTokenSource();
 
@@ -35,10 +37,23 @@ public sealed class SupervisorRelayTests : IDisposable
                 return StartHarnessBackend(port, fixtureStartedPath);
             },
             waitBeforeFirstBackend: cancellationToken =>
-                releaseDesktop.Task.WaitAsync(cancellationToken));
+                CodexDesktopProcesses.WaitForNaturalClosureAsync(
+                    waitPlan.Processes,
+                    cancellationToken,
+                    observe: () => releaseDesktop.Task.IsCompleted
+                        ? new(
+                            CodexDesktopObservationKind.NotRunning,
+                            [],
+                            "The racing desktop closed naturally.")
+                        : new(
+                            CodexDesktopObservationKind.Running,
+                            [new CodexDesktopProcessIdentity(99, 9900)],
+                            "A desktop raced the initial empty snapshot."),
+                    pollInterval: TimeSpan.FromMilliseconds(10)));
         try
         {
             var waiting = await ReadStatusAsync("waitingForCodexExit");
+            Assert.True(waitPlan.WaitForNaturalClosure);
             Assert.Equal(0, Volatile.Read(ref backendStarts));
             Assert.Null(waiting.BackendProcessId);
             Assert.False(CanBind(publicPort));
