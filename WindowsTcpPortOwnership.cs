@@ -69,39 +69,6 @@ internal static class WindowsTcpPortOwnership
                 processId));
     }
 
-    internal static bool TryGetLoopbackConnectionInitiatorProcessId(
-        TcpClient connection,
-        out int processId)
-    {
-        ArgumentNullException.ThrowIfNull(connection);
-        processId = 0;
-        if (connection.Client.LocalEndPoint is not IPEndPoint relay ||
-            connection.Client.RemoteEndPoint is not IPEndPoint client)
-        {
-            return false;
-        }
-        relay = NormalizeIpv4MappedEndpoint(relay);
-        client = NormalizeIpv4MappedEndpoint(client);
-        if (!relay.Address.Equals(IPAddress.Loopback) ||
-            !client.Address.Equals(IPAddress.Loopback))
-        {
-            return false;
-        }
-
-        var foundProcessId = 0;
-        var found = ReadTable(
-            ReadNativeAllTable,
-            (buffer, length) => ContainsRow(
-                buffer,
-                length,
-                row => row.State == TcpStateEstablished &&
-                    DecodeEndpoint(row.LocalAddress, row.LocalPort).Equals(client) &&
-                    DecodeEndpoint(row.RemoteAddress, row.RemotePort).Equals(relay) &&
-                    (foundProcessId = row.OwningProcessId) > 0));
-        processId = foundProcessId;
-        return found;
-    }
-
     private static bool ReadTable(
         TcpTableReader readTable,
         Func<IntPtr, int, bool> containsOwnedEndpoint)

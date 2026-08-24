@@ -34,7 +34,7 @@ public sealed class SupervisorRelayTests : IDisposable
                 Interlocked.Increment(ref backendStarts);
                 return StartHarnessBackend(port, fixtureStartedPath);
             },
-            waitBeforeFirstBackend: (_, cancellationToken) =>
+            waitBeforeFirstBackend: cancellationToken =>
                 releaseDesktop.Task.WaitAsync(cancellationToken));
         try
         {
@@ -75,7 +75,7 @@ public sealed class SupervisorRelayTests : IDisposable
                 Interlocked.Increment(ref backendStarts);
                 throw new InvalidOperationException("Backend must remain stopped while armed.");
             },
-            waitBeforeFirstBackend: (_, cancellationToken) =>
+            waitBeforeFirstBackend: cancellationToken =>
                 Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
         await ReadStatusAsync("waitingForCodexExit");
 
@@ -102,7 +102,7 @@ public sealed class SupervisorRelayTests : IDisposable
                 Interlocked.Increment(ref backendStarts);
                 throw new InvalidOperationException("Backend must not start after cancellation.");
             },
-            waitBeforeFirstBackend: (_, _) =>
+            waitBeforeFirstBackend: _ =>
             {
                 shutdown.Cancel();
                 return Task.CompletedTask;
@@ -257,7 +257,7 @@ public sealed class SupervisorRelayTests : IDisposable
                     port,
                     Path.Combine(root, "unexpected-replacement.txt"));
             },
-            waitBeforeFirstBackend: (_, cancellationToken) =>
+            waitBeforeFirstBackend: cancellationToken =>
                 Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
         try
         {

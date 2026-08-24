@@ -79,10 +79,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
     private readonly LoopbackRelayOptions options;
     private readonly Action<Exception> reportError;
     private readonly Func<int, TcpClient?, bool> backendAdmission;
-    private readonly Func<TcpClient, bool> gatedClientAdmission;
     private readonly CancellationTokenSource shutdown = new();
-    private readonly TaskCompletionSource verifiedGatedClient = new(
-        TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly HashSet<RelayConnection> connections = [];
     private readonly Task acceptLoop;
     private readonly int publicPort;
@@ -100,8 +97,7 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         bool startGated,
         LoopbackRelayOptions options,
         Action<Exception> reportError,
-        Func<int, TcpClient?, bool> backendAdmission,
-        Func<TcpClient, bool> gatedClientAdmission)
+        Func<int, TcpClient?, bool> backendAdmission)
     {
         LoopbackEndpoint.ValidatePort(publicPort);
         LoopbackEndpoint.ValidatePort(backendPort);
@@ -116,7 +112,6 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         this.options = options;
         this.reportError = reportError;
         this.backendAdmission = backendAdmission;
-        this.gatedClientAdmission = gatedClientAdmission;
         gated = startGated;
         listener = new TcpListener(IPAddress.Loopback, publicPort);
         listener.Server.SetSocketOption(
@@ -133,16 +128,14 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         bool startGated = false,
         LoopbackRelayOptions? options = null,
         Action<Exception>? reportError = null,
-        Func<int, TcpClient?, bool>? backendAdmission = null,
-        Func<TcpClient, bool>? gatedClientAdmission = null) =>
+        Func<int, TcpClient?, bool>? backendAdmission = null) =>
         new(
             publicPort,
             backendPort,
             startGated,
             options ?? new LoopbackRelayOptions(),
             reportError ?? (_ => { }),
-            backendAdmission ?? ((_, _) => true),
-            gatedClientAdmission ?? (_ => false));
+            backendAdmission ?? ((_, _) => true));
 
     internal bool IsGated
     {
@@ -156,9 +149,6 @@ internal sealed class LoopbackRelay : IAsyncDisposable
     }
 
     internal int PublicPort => publicPort;
-
-    internal Task WaitForVerifiedGatedClientAsync(CancellationToken cancellationToken) =>
-        verifiedGatedClient.Task.WaitAsync(cancellationToken);
 
     internal int ActiveConnectionCount
     {
@@ -450,15 +440,9 @@ internal sealed class LoopbackRelay : IAsyncDisposable
             }
 
             int candidatePort;
-            bool gateIsClosed;
             lock (sync)
             {
                 candidatePort = backendPort;
-                gateIsClosed = gated;
-            }
-            if (gateIsClosed && IsGatedClientAllowed(client))
-            {
-                verifiedGatedClient.TrySetResult();
             }
             var admitted = IsBackendAdmissionAllowed(candidatePort, connectedBackend: null);
 
@@ -497,19 +481,6 @@ internal sealed class LoopbackRelay : IAsyncDisposable
         try
         {
             return backendAdmission(port, connectedBackend);
-        }
-        catch (Exception exception)
-        {
-            ReportError(exception);
-            return false;
-        }
-    }
-
-    private bool IsGatedClientAllowed(TcpClient client)
-    {
-        try
-        {
-            return gatedClientAdmission(client);
         }
         catch (Exception exception)
         {

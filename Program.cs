@@ -313,7 +313,7 @@ internal static class Program
     {
         var stateDirectory = ContinuityPaths.StateDirectory;
         var stateDirectories = LifecycleStateDirectories();
-        var desktopProcesses = CodexDesktopProcesses.ParseWaitArguments(args);
+        var desktopWaitPlan = CodexDesktopProcesses.ParseWaitPlan(args);
         return ServeAsync(
             port,
             stateDirectory,
@@ -321,18 +321,11 @@ internal static class Program
             CreateInstallCoordinator(stateDirectory),
             AutomaticUpdateRunner.RunAsync,
             Fail,
-            waitBeforeFirstBackend: desktopProcesses.Count == 0
+            waitBeforeFirstBackend: !desktopWaitPlan.WaitForNaturalClosure
                 ? null
-                : (verifiedRetargetConnection, cancellationToken) =>
-                    CodexDesktopProcesses.WaitForNaturalClosureAsync(
-                    desktopProcesses,
-                    cancellationToken,
-                    verifiedRetargetConnection),
-            gatedClientAdmission: desktopProcesses.Count == 0
-                ? null
-                : connection => CodexDesktopProcesses.IsVerifiedNewDesktopConnection(
-                    connection,
-                    desktopProcesses));
+                : cancellationToken => CodexDesktopProcesses.WaitForNaturalClosureAsync(
+                    desktopWaitPlan.Processes,
+                    cancellationToken));
     }
 
     internal static Task<int> ServeAsync(int port, string stateDirectory) =>
@@ -355,15 +348,13 @@ internal static class Program
         InstallCoordinator coordinator,
         Func<string, string, CancellationToken, Task> runUpdates,
         Func<string, int> reportFailure,
-        Func<Task, CancellationToken, Task>? waitBeforeFirstBackend = null,
-        Func<TcpClient, bool>? gatedClientAdmission = null) => ServeAsync(
+        Func<CancellationToken, Task>? waitBeforeFirstBackend = null) => ServeAsync(
             port,
             stateDirectory,
             ProductionSupervisorCompatibilityScope(lifecycleStateDirectories, coordinator),
             runUpdates,
             reportFailure,
-            waitBeforeFirstBackend: waitBeforeFirstBackend,
-            gatedClientAdmission: gatedClientAdmission);
+            waitBeforeFirstBackend: waitBeforeFirstBackend);
 
     internal static Task<int> ServeAsync(
         int port,
@@ -395,8 +386,7 @@ internal static class Program
             CancellationToken,
             Func<int, WindowsProcessGroup>,
             Task<int>>? runOwnedSupervisor = null,
-        Func<Task, CancellationToken, Task>? waitBeforeFirstBackend = null,
-        Func<TcpClient, bool>? gatedClientAdmission = null)
+        Func<CancellationToken, Task>? waitBeforeFirstBackend = null)
     {
         using var supervisorLock = TryAcquireSupervisorLock(stateDirectory);
         if (supervisorLock is null)
@@ -435,8 +425,7 @@ internal static class Program
                 backendPort => StartAppServer(
                     FindCodexExecutable(persistedEnvironmentOnly: true),
                     backendPort),
-                waitBeforeFirstBackend: waitBeforeFirstBackend,
-                gatedClientAdmission: gatedClientAdmission);
+                waitBeforeFirstBackend: waitBeforeFirstBackend);
         }
         if (waitBeforeFirstBackend is not null)
         {
@@ -692,7 +681,7 @@ internal static class Program
             configuredUrl,
             port => IsManagedEndpointReadyAsync(port),
             port => IsReadyAsync(port, TimeSpan.FromSeconds(1)),
-            IsManagedSupervisorArmed);
+            IsManagedSupervisorActive);
         var removed = coordinator.Uninstall(
             reconnectPolicy,
             LifecycleLockOwnership.AlreadyHeld);
@@ -717,7 +706,7 @@ internal static class Program
             ["ready"] = false,
             ["threadCount"] = null,
             ["activeThreadCount"] = null,
-            ["activeThreads"] = new JsonArray(),
+            ["activeThreads"] = null,
             ["supervisor"] = JsonSerializer.SerializeToNode(
                 SupervisorStatusForDiagnostics(supervisorStatus),
                 JsonOptions),
@@ -727,6 +716,8 @@ internal static class Program
 
     private static async Task<int> AttachAsync(int? requestedPort)
     {
+        using var lifecycleLock = ContinuityLifecycleLock.Acquire(
+            ContinuityPaths.StateDirectory);
         var state = LoadInstallState()
             ?? throw new InvalidOperationException("No installed Continuity state is available.");
         if (requestedPort is not null && requestedPort != state.Port)
@@ -1037,7 +1028,7 @@ internal static class Program
         string? configuredUrl,
         Func<int, Task<bool>> isManagedEndpointReadyAsync,
         Func<int, Task<bool>> isLegacyEndpointReadyAsync,
-        Func<int, bool>? isManagedSupervisorArmed = null)
+        Func<int, bool>? isManagedSupervisorActive = null)
     {
         var installedPort = managedInstalledPort ?? legacyInstalledPort;
         if (installedPort is not { } port || !string.Equals(
@@ -1050,7 +1041,7 @@ internal static class Program
 
         var endpointIsOwned = managedInstalledPort is not null
             ? await isManagedEndpointReadyAsync(port) ||
-                (isManagedSupervisorArmed?.Invoke(port) ?? false)
+                (isManagedSupervisorActive?.Invoke(port) ?? false)
             : await isLegacyEndpointReadyAsync(port);
         return endpointIsOwned
             ? UninstallReconnectPolicy.PreserveUntilNextSignIn
@@ -1147,12 +1138,11 @@ internal static class Program
             ContinuityPaths.SupervisorStatusFile(
                 ContinuityPaths.LegacyOpenAiStateDirectory)).Read();
 
-    private static bool IsManagedSupervisorArmed(int port)
+    private static bool IsManagedSupervisorActive(int port)
     {
         var status = LoadSupervisorStatus();
         return status is not null &&
             status.Port == port &&
-            status.State == "waitingForCodexExit" &&
             SupervisorCompatibilityGuard.Inspect(status) == RecordedSupervisorState.Active;
     }
 

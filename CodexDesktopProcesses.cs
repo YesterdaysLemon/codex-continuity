@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
-using System.Net.Sockets;
 
 namespace CodexContinuity;
 
@@ -24,6 +23,10 @@ internal sealed record CodexDesktopObservation(
     IReadOnlyList<CodexDesktopProcessIdentity> Processes,
     string Detail);
 
+internal sealed record CodexDesktopWaitPlan(
+    bool WaitForNaturalClosure,
+    IReadOnlyList<CodexDesktopProcessIdentity> Processes);
+
 internal enum ObservedProcessState
 {
     Exited,
@@ -34,6 +37,7 @@ internal enum ObservedProcessState
 internal static class CodexDesktopProcesses
 {
     internal const string WaitArgument = "--wait-for-codex-process";
+    internal const string NaturalClosureArgument = "--wait-for-codex-natural-closure";
 
     private const int MaximumWaitProcesses = 64;
     private const string DesktopProcessName = "ChatGPT";
@@ -82,11 +86,12 @@ internal static class CodexDesktopProcesses
         IReadOnlyList<CodexDesktopProcessIdentity> processes)
     {
         ValidateCount(processes.Count);
-        return processes.SelectMany(process => new[]
-        {
-            WaitArgument,
-            FormattableString.Invariant($"{process.ProcessId}:{process.StartedAtUtcTicks}"),
-        }).ToArray();
+        return new[] { NaturalClosureArgument }.Concat(
+            processes.Distinct().SelectMany(process => new[]
+            {
+                WaitArgument,
+                FormattableString.Invariant($"{process.ProcessId}:{process.StartedAtUtcTicks}"),
+            })).ToArray();
     }
 
     internal static IReadOnlyList<CodexDesktopProcessIdentity> ParseWaitArguments(string[] args)
@@ -125,6 +130,15 @@ internal static class CodexDesktopProcesses
         return processes.Distinct().ToArray();
     }
 
+    internal static CodexDesktopWaitPlan ParseWaitPlan(string[] args)
+    {
+        var processes = ParseWaitArguments(args);
+        return new(
+            args.Contains(NaturalClosureArgument, StringComparer.OrdinalIgnoreCase) ||
+                processes.Count > 0,
+            processes);
+    }
+
     internal static async Task WaitForExitAsync(
         IReadOnlyList<CodexDesktopProcessIdentity> processes,
         CancellationToken cancellationToken,
@@ -147,7 +161,6 @@ internal static class CodexDesktopProcesses
     internal static async Task WaitForNaturalClosureAsync(
         IReadOnlyList<CodexDesktopProcessIdentity> processes,
         CancellationToken cancellationToken,
-        Task? verifiedRetargetConnection = null,
         Func<CodexDesktopProcessIdentity, ObservedProcessState>? inspect = null,
         Func<CodexDesktopObservation>? observe = null,
         TimeSpan? pollInterval = null)
@@ -157,33 +170,8 @@ internal static class CodexDesktopProcesses
         observe ??= Capture;
         while (observe().Kind != CodexDesktopObservationKind.NotRunning)
         {
-            if (verifiedRetargetConnection?.IsCompletedSuccessfully == true)
-            {
-                return;
-            }
             await Task.Delay(interval, cancellationToken);
         }
-    }
-
-    internal static bool IsVerifiedNewDesktopConnection(
-        TcpClient connection,
-        IReadOnlyList<CodexDesktopProcessIdentity> initialProcesses)
-    {
-        if (!WindowsTcpPortOwnership.TryGetLoopbackConnectionInitiatorProcessId(
-                connection,
-                out var processId))
-        {
-            return false;
-        }
-
-        var observation = Capture();
-        if (observation.Kind != CodexDesktopObservationKind.Running)
-        {
-            return false;
-        }
-        var candidate = observation.Processes.FirstOrDefault(process =>
-            process.ProcessId == processId);
-        return candidate is not null && !initialProcesses.Contains(candidate);
     }
 
     private static bool IsStoreCodexDesktop(string executablePath) =>

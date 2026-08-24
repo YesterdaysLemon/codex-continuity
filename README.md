@@ -243,11 +243,10 @@ production desktop or user conversations.
 For first attachment, inspected desktop builds do not expose a supported
 in-process retarget command. Continuity therefore snapshots the identities of
 the already-running Store Codex processes, binds only its gated public relay,
-and keeps the private backend off until those identities disappear. It then
-starts only after either no Store Codex process remains or a later Store Codex
-process proves it inherited the configured endpoint by connecting to that
-reserved relay. This keeps a fast natural reopen from deadlocking without
-guessing that an unverified process is safe.
+and keeps the private backend off until those identities disappear and it
+observes a naturally empty desktop interval. If another desktop opens before
+that interval, Continuity stays armed rather than guess that the new process is
+safe; a later natural close lets activation continue.
 
 ## Build and prove the transport
 

@@ -60,11 +60,31 @@ public sealed class CodexDesktopProcessesTests
         ];
 
         var arguments = CodexDesktopProcesses.BuildWaitArguments(processes);
-        var parsed = CodexDesktopProcesses.ParseWaitArguments(arguments.ToArray());
+        var parsed = CodexDesktopProcesses.ParseWaitPlan(arguments.ToArray());
 
         Assert.Equal(
+            [
+                CodexDesktopProcesses.NaturalClosureArgument,
+                CodexDesktopProcesses.WaitArgument,
+                "12:1200",
+                CodexDesktopProcesses.WaitArgument,
+                "13:1300",
+            ],
+            arguments);
+        Assert.Equal(
             [new CodexDesktopProcessIdentity(12, 1200), new CodexDesktopProcessIdentity(13, 1300)],
-            parsed);
+            parsed.Processes);
+        Assert.True(parsed.WaitForNaturalClosure);
+    }
+
+    [Fact]
+    public void EmptySnapshotStillCarriesNaturalClosureRaceGate()
+    {
+        var arguments = CodexDesktopProcesses.BuildWaitArguments([]);
+        var parsed = CodexDesktopProcesses.ParseWaitPlan(arguments.ToArray());
+
+        Assert.Equal([CodexDesktopProcesses.NaturalClosureArgument], arguments);
+        Assert.Equal(new CodexDesktopWaitPlan(true, []), parsed);
     }
 
     [Fact]
@@ -93,29 +113,6 @@ public sealed class CodexDesktopProcessesTests
             pollInterval: TimeSpan.FromMilliseconds(1));
 
         Assert.Empty(observations);
-    }
-
-    [Fact]
-    public async Task VerifiedNewDesktopConnectionBreaksFastRelaunchWaitCycle()
-    {
-        var observations = 0;
-
-        await CodexDesktopProcesses.WaitForNaturalClosureAsync(
-            [new CodexDesktopProcessIdentity(12, 1200)],
-            CancellationToken.None,
-            verifiedRetargetConnection: Task.CompletedTask,
-            inspect: _ => ObservedProcessState.Exited,
-            observe: () =>
-            {
-                observations++;
-                return new(
-                    CodexDesktopObservationKind.Running,
-                    [new CodexDesktopProcessIdentity(13, 1300)],
-                    "A new desktop connected to the reserved Continuity endpoint.");
-            },
-            pollInterval: TimeSpan.FromMilliseconds(1));
-
-        Assert.Equal(1, observations);
     }
 
     [Theory]

@@ -46,9 +46,10 @@ public sealed class InstallPortSafetyTests : IDisposable
     }
 
     [Fact]
-    public async Task ManagedUninstallPreservesWhileVerifiedSupervisorIsArmed()
+    public async Task ManagedUninstallPreservesWhileVerifiedSupervisorIsActive()
     {
         var managedReadyProbeCount = 0;
+        var supervisorBecameActive = false;
 
         var policy = await Program.ResolveUninstallReconnectPolicyAsync(
             managedInstalledPort: 45123,
@@ -57,10 +58,11 @@ public sealed class InstallPortSafetyTests : IDisposable
             _ =>
             {
                 managedReadyProbeCount++;
+                supervisorBecameActive = true;
                 return Task.FromResult(false);
             },
             _ => Task.FromResult(false),
-            port => port == 45123);
+            port => port == 45123 && supervisorBecameActive);
 
         Assert.Equal(UninstallReconnectPolicy.PreserveUntilNextSignIn, policy);
         Assert.Equal(1, managedReadyProbeCount);

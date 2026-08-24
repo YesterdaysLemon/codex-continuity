@@ -85,9 +85,15 @@ public sealed class TrayStatusParserTests
             NextRetryAtUtc: null,
             Detail: "Continuity is armed.");
 
-        var status = TrayStatusParser.Parse(
-            CodexContinuity.Program.WaitingStatusJson(supervisor));
+        var json = CodexContinuity.Program.WaitingStatusJson(supervisor);
+        using var document = JsonDocument.Parse(json);
+        var status = TrayStatusParser.Parse(json);
 
+        Assert.Equal(JsonValueKind.Null, document.RootElement.GetProperty("threadCount").ValueKind);
+        Assert.Equal(
+            JsonValueKind.Null,
+            document.RootElement.GetProperty("activeThreadCount").ValueKind);
+        Assert.Equal(JsonValueKind.Null, document.RootElement.GetProperty("activeThreads").ValueKind);
         Assert.Equal(
             new TrayStatusSnapshot(
                 ContinuityHealth.Degraded,

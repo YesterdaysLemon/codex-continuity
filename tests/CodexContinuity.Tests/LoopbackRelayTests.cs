@@ -11,26 +11,6 @@ namespace CodexContinuity.Tests;
 public sealed class LoopbackRelayTests
 {
     [Fact]
-    public async Task ClosedGateCanVerifyAConnectingClientWithoutForwardingIt()
-    {
-        await using var backend = new TaggedBackend("backend:");
-        var publicPort = AvailablePort();
-        await using var relay = LoopbackRelay.Start(
-            publicPort,
-            backend.Port,
-            startGated: true,
-            gatedClientAdmission: _ => true);
-
-        using var client = await ConnectAsync(publicPort);
-        await relay.WaitForVerifiedGatedClientAsync(CancellationToken.None)
-            .WaitAsync(TimeSpan.FromSeconds(5));
-
-        Assert.True(relay.IsGated);
-        Assert.Equal(0, relay.ActiveConnectionCount);
-        await AssertConnectionClosedAsync(client);
-    }
-
-    [Fact]
     public async Task RelaysBidirectionalTrafficOnLoopback()
     {
         await using var backend = new TaggedBackend("backend:");
