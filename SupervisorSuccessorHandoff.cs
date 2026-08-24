@@ -259,6 +259,17 @@ internal sealed class SupervisorSuccessorHandoffStore(string path)
         }
     }
 
+    internal void Delete()
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (DirectoryNotFoundException)
+        {
+        }
+    }
+
     private static SupervisorSuccessorHandoffLoadResult Invalid() =>
         new(SupervisorSuccessorHandoffLoadKind.Invalid, Handoff: null);
 }

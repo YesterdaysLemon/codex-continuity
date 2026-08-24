@@ -34,7 +34,15 @@ internal static class OwnedSupervisorRuntime
         Func<TimeSpan, CancellationToken, Task<bool>>? waitForRestart = null,
         TimeSpan? readinessTimeout = null,
         BackendOwnershipChecks? ownershipChecks = null,
-        Func<CancellationToken, Task>? waitBeforeFirstBackend = null)
+        Func<CancellationToken, Task>? waitBeforeFirstBackend = null,
+        Func<
+            LoopbackRelay,
+            BackendLease,
+            int,
+            int,
+            CancellationToken,
+            Task<bool>>? tryApplyUpdate = null,
+        AdmittedSupervisorSuccessor? successor = null)
     {
         Directory.CreateDirectory(stateDirectory);
         var logPath = ContinuityPaths.AppServerLogFile(stateDirectory);
@@ -58,6 +66,7 @@ internal static class OwnedSupervisorRuntime
         }
         var codexHome = FutureProcessEnvironment.ResolveCodexHome();
         var consecutiveFailures = 0;
+        var pendingSuccessor = successor;
         Console.WriteLine(
             $"Supervising {LoopbackEndpoint.WebSocketUrl(publicPort)} with logs at {logPath}");
 
@@ -175,6 +184,8 @@ internal static class OwnedSupervisorRuntime
                 var preserveBackend = false;
                 var lifecycleCompleted = false;
                 var ownershipDefinitivelyLost = false;
+                var successorLaunched = false;
+                BackendLease? activeLease = null;
                 Volatile.Write(ref activeBackendProcessId, process.Id);
                 try
                 {
@@ -240,7 +251,7 @@ internal static class OwnedSupervisorRuntime
                         }
                         if (!process.HasExited && !shutdownToken.IsCancellationRequested)
                         {
-                            leaseStore.Write(new BackendLease(
+                            activeLease = new BackendLease(
                                 BackendLease.CurrentSchemaVersion,
                                 OwnerSupervisorProcessId: Environment.ProcessId,
                                 BackendProcessId: process.Id,
@@ -248,7 +259,8 @@ internal static class OwnedSupervisorRuntime
                                 BackendPort: backendPort,
                                 BackendExecutable: backendExecutable,
                                 CodexHome: codexHome,
-                                BackendStartedAtUtc: backendStartedAtUtc));
+                                BackendStartedAtUtc: backendStartedAtUtc);
+                            leaseStore.Write(activeLease);
                             leaseActive = true;
                             relay.OpenGate();
                             statusStore.Write(Program.NewSupervisorStatus(
@@ -264,44 +276,87 @@ internal static class OwnedSupervisorRuntime
                                     : $"Relaying {LoopbackEndpoint.WebSocketUrl(publicPort)} " +
                                         "to an owned private backend."));
                             Console.WriteLine($"Continuity backend ready (PID {process.Id}).");
-                            try
+                            if (pendingSuccessor is not null)
                             {
-                                var backendOutcome = await WaitForBackendOutcomeAsync(
-                                    backendPort,
-                                    process,
-                                    ownershipChecks,
-                                    shutdownToken);
-                                if (backendOutcome != BackendWaitOutcome.Exited)
+                                try
                                 {
-                                    var ownershipLost =
-                                        backendOutcome == BackendWaitOutcome.OwnershipLost;
-                                    ownershipDefinitivelyLost = ownershipLost;
-                                    preserveBackend = !ownershipLost;
-                                    publishStopped = false;
-                                    await relay.CloseGateAsync();
-                                    var detail = ownershipLost
-                                        ? "The private listener is no longer owned by the " +
-                                            "supervised backend."
-                                        : "Private listener ownership could not be inspected; " +
-                                            "preserving the verified backend lease.";
-                                    statusStore.Write(Program.NewSupervisorStatus(
-                                        ownershipLost
-                                            ? "backendOwnershipLost"
-                                            : "backendOwnershipUnknown",
-                                        publicPort,
-                                        codexHome,
+                                    var completion = await SupervisorSuccessorCompletion.CompleteAsync(
+                                        stateDirectory,
+                                        pendingSuccessor,
+                                        relay,
+                                        activeLease,
+                                        backendPort,
                                         process.Id,
-                                        consecutiveFailures,
-                                        lastExitCode: null,
-                                        nextRetryAtUtc: null,
-                                        detail));
-                                    Console.Error.WriteLine(detail);
-                                    return 1;
+                                        shutdownToken);
+                                    pendingSuccessor = null;
+                                    if (completion ==
+                                        SupervisorSuccessorCompletionKind.RollbackLaunched)
+                                    {
+                                        preserveBackend = true;
+                                        publishStopped = false;
+                                        successorLaunched = true;
+                                    }
+                                }
+                                catch (Exception exception) when (
+                                    SupervisorUpdateApplyMonitor.IsExpectedFailure(exception) &&
+                                    !relay.IsGated)
+                                {
+                                    pendingSuccessor = null;
+                                    Console.Error.WriteLine(
+                                        $"Successor verification failed safely: {exception.Message}");
                                 }
                             }
-                            catch (OperationCanceledException) when (
-                                shutdownToken.IsCancellationRequested)
+                            if (!successorLaunched)
                             {
+                                try
+                                {
+                                    var backendOutcome = await WaitForBackendOutcomeAsync(
+                                        backendPort,
+                                        process,
+                                        ownershipChecks,
+                                        relay,
+                                        activeLease,
+                                        tryApplyUpdate,
+                                        shutdownToken);
+                                    if (backendOutcome ==
+                                        BackendWaitOutcome.SuccessorLaunched)
+                                    {
+                                        preserveBackend = true;
+                                        publishStopped = false;
+                                        successorLaunched = true;
+                                    }
+                                    else if (backendOutcome != BackendWaitOutcome.Exited)
+                                    {
+                                        var ownershipLost =
+                                            backendOutcome == BackendWaitOutcome.OwnershipLost;
+                                        ownershipDefinitivelyLost = ownershipLost;
+                                        preserveBackend = !ownershipLost;
+                                        publishStopped = false;
+                                        await relay.CloseGateAsync();
+                                        var detail = ownershipLost
+                                            ? "The private listener is no longer owned by the " +
+                                                "supervised backend."
+                                            : "Private listener ownership could not be inspected; " +
+                                                "preserving the verified backend lease.";
+                                        statusStore.Write(Program.NewSupervisorStatus(
+                                            ownershipLost
+                                                ? "backendOwnershipLost"
+                                                : "backendOwnershipUnknown",
+                                            publicPort,
+                                            codexHome,
+                                            process.Id,
+                                            consecutiveFailures,
+                                            lastExitCode: null,
+                                            nextRetryAtUtc: null,
+                                            detail));
+                                        Console.Error.WriteLine(detail);
+                                        return 1;
+                                    }
+                                }
+                                catch (OperationCanceledException) when (
+                                    shutdownToken.IsCancellationRequested)
+                                {
+                                }
                             }
                         }
                     }
@@ -385,6 +440,10 @@ internal static class OwnedSupervisorRuntime
                     }
                 }
 
+                if (successorLaunched)
+                {
+                    break;
+                }
                 if (shutdownToken.IsCancellationRequested)
                 {
                     break;
@@ -486,6 +545,15 @@ internal static class OwnedSupervisorRuntime
         int port,
         WindowsProcessGroup process,
         BackendOwnershipChecks ownershipChecks,
+        LoopbackRelay relay,
+        BackendLease activeLease,
+        Func<
+            LoopbackRelay,
+            BackendLease,
+            int,
+            int,
+            CancellationToken,
+            Task<bool>>? tryApplyUpdate,
         CancellationToken cancellationToken)
     {
         while (!process.HasExited)
@@ -514,6 +582,28 @@ internal static class OwnedSupervisorRuntime
                     ? BackendWaitOutcome.Exited
                     : BackendWaitOutcome.OwnershipLost;
             }
+            if (tryApplyUpdate is not null)
+            {
+                try
+                {
+                    if (await tryApplyUpdate(
+                            relay,
+                            activeLease,
+                            port,
+                            process.Id,
+                            cancellationToken))
+                    {
+                        return BackendWaitOutcome.SuccessorLaunched;
+                    }
+                }
+                catch (Exception exception) when (
+                    SupervisorUpdateApplyMonitor.IsExpectedFailure(exception) &&
+                    !relay.IsGated)
+                {
+                    Console.Error.WriteLine(
+                        $"Idle update apply check failed safely: {exception.Message}");
+                }
+            }
             await Task.Delay(ownershipChecks.PollInterval, cancellationToken);
         }
         return BackendWaitOutcome.Exited;
@@ -531,5 +621,6 @@ internal static class OwnedSupervisorRuntime
         Exited,
         OwnershipLost,
         OwnershipUnknown,
+        SuccessorLaunched,
     }
 }
