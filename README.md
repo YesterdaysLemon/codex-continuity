@@ -369,10 +369,16 @@ desktop observations behind the bridge.
 
 Every release retains SHA-256 checksum files and publishes GitHub/Sigstore build
 provenance that can be checked with `gh attestation verify`. The release
-workflow also supports SHA-256 Authenticode signing with an RFC 3161 timestamp
-and fails verification if signing is partial, unpinned, or invalid. A
-production code-signing certificate is the remaining external publisher gate;
-until it is configured, Windows may identify the executable as coming from an
+workflow defaults to unsigned artifacts and supports Microsoft Azure Artifact
+Signing through GitHub OIDC plus a bounded legacy PFX mode. Signed releases use
+SHA-256 Authenticode and an RFC 3161 timestamp; partial, ambiguous, mixed, or
+unexpected signing configuration fails verification. Artifact Signing leaf
+certificates may rotate daily, so Continuity verifies the durable subscriber
+identity EKU, required Code Signing/Public Trust EKUs, and trusted chain root
+rather than one leaf thumbprint or mutable subject text. A legacy PFX-installed
+build remains leaf-thumbprint and root pinned, so its leaf rotation or
+transition to Artifact Signing requires a manual install. Until a production
+identity is configured, Windows may identify the executable as coming from an
 unknown publisher and Continuity will not automatically stage its own updates.
 See [the signing runbook](docs/release-signing.md) for the exact external setup
 and [SECURITY.md](SECURITY.md) before bypassing any warning.

@@ -39,13 +39,20 @@ Get-FileHash .\CodexContinuity-Setup.exe -Algorithm SHA256
 gh attestation verify .\CodexContinuity-Setup.exe --repo YesterdaysLemon/codex-continuity
 ```
 
-The Authenticode workflow is ready for an RFC 3161/SHA-256 timestamped code
-signing certificate, but publication remains unsigned until the repository
-secrets `WINDOWS_SIGNING_CERTIFICATE_BASE64` and
-`WINDOWS_SIGNING_CERTIFICATE_PASSWORD` and the repository variable
-`WINDOWS_SIGNING_CERTIFICATE_THUMBPRINT` are configured. Partial configuration,
-an unexpected signer, a missing timestamp, or a mixed signed/unsigned release
-fails publication. Until then, Windows may show an "Unknown publisher" or
-SmartScreen warning. Do not bypass a warning unless the download URL, SHA-256,
-and GitHub attestation match the official release. See
-[the signing runbook](docs/release-signing.md) for the external identity gate.
+The release workflow defaults to unsigned artifacts and has two opt-in signing
+modes: Microsoft Azure Artifact Signing through GitHub OIDC, or the bounded
+legacy PFX path. The selected mode, complete publisher identity/chain policy,
+RFC 3161/SHA-256 timestamp, and every executable must agree; partial
+configuration, an unexpected signer, a missing timestamp, certificate-chain
+ambiguity, or a mixed signed/unsigned release fails publication. Artifact
+Signing leaf certificates may rotate daily, so the updater checks the durable
+subscriber-identity EKU, required Code Signing/Public Trust EKUs, and trusted
+chain root rather than one leaf thumbprint or mutable subject text. A legacy
+PFX-installed build remains leaf-thumbprint and root pinned; its leaf rotation
+or transition to Artifact Signing requires a manual install.
+
+Until a production identity is configured, Windows may show an "Unknown
+publisher" or SmartScreen warning. Do not bypass a warning unless the download
+URL, SHA-256, and GitHub attestation match the official release. See [the
+signing runbook](docs/release-signing.md) for the external identity gate and
+the exact owner-supplied Azure/GitHub settings.
