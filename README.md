@@ -313,6 +313,22 @@ control or run `update-policy --disable`. Run `rollback` to select the previous
 known-good build for a future safe start. The tray reports the running version,
 staged target, and activation proof separately.
 
+Safe activation can also be paused or limited to a local-time window without
+weakening the idle and handoff checks:
+
+```powershell
+CodexContinuity update-policy --snooze-minutes 480
+CodexContinuity update-policy --clear-snooze
+CodexContinuity update-policy --activation-window 23:00-07:00
+CodexContinuity update-policy --activation-window 23:00-07:00 --time-zone "Pacific Standard Time"
+CodexContinuity update-policy --clear-activation-window
+```
+
+The window is an additional gate: entering it starts a fresh stable-idle proof;
+time spent idle before a snooze expires or outside the configured window never
+counts toward activation. Policy schema 2 also makes older supervisors fail
+closed rather than silently ignoring these restrictions.
+
 ## What appears in Windows
 
 - **Task Manager:** `Codex Continuity Supervisor` owns the resilient backend;

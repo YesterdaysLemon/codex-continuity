@@ -127,6 +127,13 @@ internal static class Program
               --skip-self-test  With setup, omit the isolated reconnect proof.
               --uninstall   With setup, uninstall without stopping agents; files leave next sign-in.
 
+            Update-policy options:
+              --enable / --disable  Apply verified updates at safe idle, or keep them staged.
+              --snooze-minutes N / --clear-snooze  Pause or resume idle activation (maximum 7 days).
+              --activation-window HH:mm-HH:mm  Restrict activation to local clock hours.
+              --time-zone ID  Bind that window to an explicit system time-zone identifier.
+              --clear-activation-window  Allow safe idle activation at any local time.
+
             Installation never closes or restarts the running Codex desktop app.
             """);
         return 0;
@@ -609,39 +616,12 @@ internal static class Program
         string[] args,
         string stateDirectory,
         Func<DateTimeOffset> utcNow,
-        TextWriter output)
-    {
-        var enable = args.Contains("--enable", StringComparer.OrdinalIgnoreCase);
-        var disable = args.Contains("--disable", StringComparer.OrdinalIgnoreCase);
-        if (enable && disable)
-        {
-            throw new ArgumentException("Choose either --enable or --disable, not both.");
-        }
-        var store = new ContinuityUpdateApplyPolicyStore(
-            ContinuityPaths.UpdateApplyPolicyFile(stateDirectory));
-        ContinuityUpdateApplyPolicy Policy()
-        {
-            var loaded = store.Load();
-            return loaded.Kind switch
-            {
-                ContinuityUpdateApplyLoadKind.Missing =>
-                    ContinuityUpdateApplyPolicy.Default(utcNow()),
-                ContinuityUpdateApplyLoadKind.Loaded => loaded.Policy!,
-                _ => throw new InvalidDataException(
-                    $"The persisted update apply policy is {loaded.Kind.ToString().ToLowerInvariant()}.")
-            };
-        }
-
-        var policy = Policy();
-        if (enable || disable)
-        {
-            using var lifecycleLock = ContinuityLifecycleLock.Acquire(stateDirectory);
-            policy = Policy().WithAutomaticApply(enable, utcNow());
-            store.Save(policy);
-        }
-        output.WriteLine(JsonSerializer.Serialize(policy, JsonOptions));
-        return 0;
-    }
+        TextWriter output) => UpdatePolicyCommand.Run(
+            args,
+            stateDirectory,
+            utcNow,
+            output,
+            JsonOptions);
 
     internal static SupervisorStatus NewSupervisorStatus(
         string state,
