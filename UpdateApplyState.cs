@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodexContinuity.Contracts;
 
 namespace CodexContinuity;
 
@@ -258,15 +259,14 @@ internal sealed class ContinuityUpdateApplyPolicyStore(string path)
 
 internal static class ContinuityUpdateApplyStates
 {
-    internal const string StagedOnly = "stagedOnly";
-    internal const string Waiting = "waiting";
-    internal const string Applying = "applying";
-    internal const string Active = "active";
-    internal const string RolledBack = "rolledBack";
-    internal const string Failed = "failed";
+    internal const string StagedOnly = ContinuityUpdateApplyStateNames.StagedOnly;
+    internal const string Waiting = ContinuityUpdateApplyStateNames.Waiting;
+    internal const string Applying = ContinuityUpdateApplyStateNames.Applying;
+    internal const string Active = ContinuityUpdateApplyStateNames.Active;
+    internal const string RolledBack = ContinuityUpdateApplyStateNames.RolledBack;
+    internal const string Failed = ContinuityUpdateApplyStateNames.Failed;
 
-    internal static bool IsKnown(string state) => state is
-        StagedOnly or Waiting or Applying or Active or RolledBack or Failed;
+    internal static bool IsKnown(string state) => ContinuityUpdateApplyStateNames.IsKnown(state);
 }
 
 internal sealed record ContinuityUpdateApplyStatus(

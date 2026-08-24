@@ -298,7 +298,7 @@ internal static class OwnedSupervisorRuntime
                                     }
                                 }
                                 catch (Exception exception) when (
-                                    SupervisorUpdateApplyMonitor.IsExpectedFailure(exception) &&
+                                    SupervisorActivationSupport.IsExpectedFailure(exception) &&
                                     !relay.IsGated)
                                 {
                                     pendingSuccessor = null;
@@ -597,7 +597,7 @@ internal static class OwnedSupervisorRuntime
                     }
                 }
                 catch (Exception exception) when (
-                    SupervisorUpdateApplyMonitor.IsExpectedFailure(exception) &&
+                    SupervisorActivationSupport.IsExpectedFailure(exception) &&
                     !relay.IsGated)
                 {
                     Console.Error.WriteLine(

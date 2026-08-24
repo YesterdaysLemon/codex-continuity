@@ -149,7 +149,8 @@ internal static class SupervisorSuccessorAdmission
         {
             throw new InvalidDataException("The supervisor successor handoff ID does not match.");
         }
-        if (handoff.PublicPort != publicPort || !SameOptionalPath(handoff.CodexHome, codexHome))
+        if (handoff.PublicPort != publicPort ||
+            !SupervisorActivationSupport.SameOptionalPath(handoff.CodexHome, codexHome))
         {
             throw new InvalidDataException(
                 "The successor endpoint or CODEX_HOME does not match the handoff.");
@@ -233,10 +234,6 @@ internal static class SupervisorSuccessorAdmission
         SupervisorSuccessorHandoffLoadKind.Unreadable => "unreadable",
         _ => throw new InvalidOperationException("Unknown supervisor handoff load result."),
     };
-
-    private static bool SameOptionalPath(string? left, string? right) =>
-        left is null && right is null ||
-        left is not null && right is not null && SamePath(left, right);
 
     private static bool SamePath(string left, string right) => Path.GetFullPath(left).Equals(
         Path.GetFullPath(right),

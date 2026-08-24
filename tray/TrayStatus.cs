@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Text.Json;
+using CodexContinuity.Contracts;
 
 namespace CodexContinuity.Tray;
 
@@ -61,7 +62,7 @@ internal sealed record ContinuityUpdateSnapshot(
     string? LastError)
 {
     internal static ContinuityUpdateSnapshot Unavailable(string? error = null) =>
-        new(null, false, null, 0, 0, 0, "unknown", error);
+        new(null, false, null, 0, 0, 0, ContinuityUpdateCheckStateNames.Unknown, error);
 }
 
 internal sealed record ContinuityApplySnapshot(
@@ -77,7 +78,7 @@ internal sealed record ContinuityApplySnapshot(
     internal static ContinuityApplySnapshot Default => new(
         AutomaticApplyWhenIdle: false,
         PolicyGeneration: 0,
-        State: "stagedOnly",
+        State: ContinuityUpdateApplyStateNames.StagedOnly,
         TargetVersion: null,
         IdleSinceUtc: null,
         LastError: null,
@@ -135,14 +136,14 @@ internal static class TrayStatusPresentation
         }
         return update.LatestState switch
         {
-            "active" => $"{currentVersion}; latest is active",
-            "staged" => $"{currentVersion}; v{update.LatestVersion} staged",
-            "deferred" => $"{currentVersion}; v{update.LatestVersion} deferred by rollback",
-            "inactive" => $"{currentVersion}; latest v{update.LatestVersion} is not active",
-            "ahead" => $"{currentVersion}; ahead of stable v{update.LatestVersion}",
-            "failed" => $"{currentVersion}; v{update.LatestVersion} could not be staged",
-            "observed" => $"{currentVersion}; v{update.LatestVersion} observed; staging pending",
-            "unknown" => $"{currentVersion}; update state unknown",
+            ContinuityUpdateCheckStateNames.Active => $"{currentVersion}; latest is active",
+            ContinuityUpdateCheckStateNames.Staged => $"{currentVersion}; v{update.LatestVersion} staged",
+            ContinuityUpdateCheckStateNames.Deferred => $"{currentVersion}; v{update.LatestVersion} deferred by rollback",
+            ContinuityUpdateCheckStateNames.Inactive => $"{currentVersion}; latest v{update.LatestVersion} is not active",
+            ContinuityUpdateCheckStateNames.Ahead => $"{currentVersion}; ahead of stable v{update.LatestVersion}",
+            ContinuityUpdateCheckStateNames.Failed => $"{currentVersion}; v{update.LatestVersion} could not be staged",
+            ContinuityUpdateCheckStateNames.Observed => $"{currentVersion}; v{update.LatestVersion} observed; staging pending",
+            ContinuityUpdateCheckStateNames.Unknown => $"{currentVersion}; update state unknown",
             _ => $"{currentVersion}; update state {update.LatestState}",
         };
     }
@@ -157,28 +158,28 @@ internal static class TrayStatusPresentation
         var target = apply.TargetVersion is null ? "the staged update" : $"v{apply.TargetVersion}";
         return apply.State switch
         {
-            "stagedOnly" when apply.AutomaticApplyWhenIdle =>
+            ContinuityUpdateApplyStateNames.StagedOnly when apply.AutomaticApplyWhenIdle =>
                 "Activation: automatic apply enabled; awaiting supervisor status",
-            "stagedOnly" => "Activation: staged only; automatic apply is off",
-            "waiting" when apply.TargetVersion is null =>
+            ContinuityUpdateApplyStateNames.StagedOnly => "Activation: staged only; automatic apply is off",
+            ContinuityUpdateApplyStateNames.Waiting when apply.TargetVersion is null =>
                 "Activation: waiting for a verified staged update",
-            "waiting" when apply.IdleSinceUtc is null =>
+            ContinuityUpdateApplyStateNames.Waiting when apply.IdleSinceUtc is null =>
                 $"Activation: {target} waiting for a safe idle window",
-            "waiting" => $"Activation: {target} proving a stable idle window",
-            "applying" => $"Activation: handing off to {target}; Codex stays open",
-            "active" => $"Activation: {target} verified active",
-            "rolledBack" => $"Activation: {target} rolled back safely{ErrorSuffix(apply)}",
-            "failed" => $"Activation failed for {target}{ErrorSuffix(apply)}",
+            ContinuityUpdateApplyStateNames.Waiting => $"Activation: {target} proving a stable idle window",
+            ContinuityUpdateApplyStateNames.Applying => $"Activation: handing off to {target}; Codex stays open",
+            ContinuityUpdateApplyStateNames.Active => $"Activation: {target} verified active",
+            ContinuityUpdateApplyStateNames.RolledBack => $"Activation: {target} rolled back safely{ErrorSuffix(apply)}",
+            ContinuityUpdateApplyStateNames.Failed => $"Activation failed for {target}{ErrorSuffix(apply)}",
             _ => $"Activation state: {apply.State}",
         };
     }
 
     internal static bool ShowApplyRetry(ContinuityApplySnapshot apply) =>
         apply.ControlsAvailable && apply.AutomaticApplyWhenIdle &&
-        apply.State is "failed" or "rolledBack";
+        apply.State is ContinuityUpdateApplyStateNames.Failed or ContinuityUpdateApplyStateNames.RolledBack;
 
     internal static bool CanChangeApplyPolicy(ContinuityApplySnapshot apply) =>
-        apply.ControlsAvailable && apply.State != "applying";
+        apply.ControlsAvailable && apply.State != ContinuityUpdateApplyStateNames.Applying;
 
     internal static string CommandFailure(string action, TrayCommandResult result)
     {
@@ -253,7 +254,7 @@ internal static class TrayStatusParser
                 ReadInt(root, "observedCount"),
                 ReadInt(root, "stagedCount"),
                 ReadInt(root, "appliedCount"),
-                ReadString(root, "latestState") ?? "unknown",
+                ReadString(root, "latestState") ?? ContinuityUpdateCheckStateNames.Unknown,
                 ReadString(root, "lastError"));
         }
         catch (InvalidOperationException)
@@ -298,7 +299,9 @@ internal static class TrayStatusParser
             {
                 AutomaticApplyWhenIdle = automaticApply,
                 PolicyGeneration = generation,
-                State = automaticApply ? "waiting" : "stagedOnly",
+                State = automaticApply
+                    ? ContinuityUpdateApplyStateNames.Waiting
+                    : ContinuityUpdateApplyStateNames.StagedOnly,
             };
         }
 
@@ -315,8 +318,7 @@ internal static class TrayStatusParser
                 !status.TryGetProperty("policyGeneration", out var statusGenerationElement) ||
                 !statusGenerationElement.TryGetInt64(out var statusGeneration) ||
                 statusGeneration < 0 ||
-                state is not ("stagedOnly" or "waiting" or "applying" or "active" or
-                    "rolledBack" or "failed"))
+                !ContinuityUpdateApplyStateNames.IsKnown(state))
             {
                 return ContinuityApplySnapshot.Unavailable(
                     "Activation status is invalid or from a newer version.") with
@@ -331,7 +333,9 @@ internal static class TrayStatusParser
                 {
                     AutomaticApplyWhenIdle = automaticApply,
                     PolicyGeneration = generation,
-                    State = automaticApply ? "waiting" : "stagedOnly",
+                    State = automaticApply
+                        ? ContinuityUpdateApplyStateNames.Waiting
+                        : ContinuityUpdateApplyStateNames.StagedOnly,
                     TargetVersion = ReadString(status, "targetVersion"),
                 };
             }

@@ -23,6 +23,24 @@ public sealed class UpdateStateTests : IDisposable
     }
 
     [Theory]
+    [InlineData(ContinuityUpdateStates.Active)]
+    [InlineData(ContinuityUpdateStates.Inactive)]
+    [InlineData(ContinuityUpdateStates.Staged)]
+    [InlineData(ContinuityUpdateStates.Deferred)]
+    [InlineData(ContinuityUpdateStates.Failed)]
+    [InlineData(ContinuityUpdateStates.Unknown)]
+    [InlineData(ContinuityUpdateStates.Ahead)]
+    [InlineData(ContinuityUpdateStates.Observed)]
+    public void UpdateStateContractRecognizesEveryPersistedState(string state) =>
+        Assert.True(ContinuityUpdateStates.IsKnown(state));
+
+    [Theory]
+    [InlineData("future")]
+    [InlineData("")]
+    public void UpdateStateContractRejectsUnknownState(string state) =>
+        Assert.False(ContinuityUpdateStates.IsKnown(state));
+
+    [Theory]
     [InlineData("0.3.0", "0.3.0", true, true, "active")]
     [InlineData("0.3.0", "0.3.0", false, false, "inactive")]
     [InlineData("0.2.0", "0.3.0", true, true, "staged")]

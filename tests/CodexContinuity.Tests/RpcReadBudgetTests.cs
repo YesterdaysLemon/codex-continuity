@@ -13,35 +13,35 @@ public sealed class RpcReadBudgetTests
     [Fact]
     public void ThreadPageParserRejectsMissingOrDisappearingEntries()
     {
-        Assert.Throws<InvalidOperationException>(() => Program.RpcClient.ParseThreadData(null));
-        Assert.Throws<InvalidOperationException>(() => Program.RpcClient.ParseThreadData(
+        Assert.Throws<InvalidOperationException>(() => RpcClient.ParseThreadData(null));
+        Assert.Throws<InvalidOperationException>(() => RpcClient.ParseThreadData(
             JsonNode.Parse("""[null]""")));
 
-        var malformedStatus = Assert.Single(Program.RpcClient.ParseThreadData(JsonNode.Parse(
+        var malformedStatus = Assert.Single(RpcClient.ParseThreadData(JsonNode.Parse(
             """[{"id":"thread-1","status":{"type":12}}]""")));
         Assert.Equal("unknown", malformedStatus.Status);
         Assert.True(malformedStatus.Activity.Malformed);
 
         Assert.Equal(
-            [new Program.ThreadSummary(
+            [new ThreadSummary(
                 "thread-2",
                 "Fixture",
                 "idle",
                 new ThreadLifecycleStatus("idle", [], Malformed: false))],
-            Program.RpcClient.ParseThreadData(JsonNode.Parse(
+            RpcClient.ParseThreadData(JsonNode.Parse(
                 """[{"id":"thread-2","name":"Fixture","status":{"type":"idle"}}]""")));
 
         Assert.Equal(
             [new ThreadLifecycleStatus("idle", [], Malformed: false)],
-            Program.RpcClient.ParseThreadLifecycleData(JsonNode.Parse(
+            RpcClient.ParseThreadLifecycleData(JsonNode.Parse(
                 """[{"id":{"ignored":true},"name":["ignored"],"status":{"type":"idle"}}]""")));
         Assert.Equal(
             ["thread-1", "thread-2"],
-            Program.RpcClient.ParseThreadIdData(JsonNode.Parse(
+            RpcClient.ParseThreadIdData(JsonNode.Parse(
                 """[{"id":"thread-1","name":"ignored"},{"id":"thread-2"}]""")));
-        Assert.Throws<InvalidOperationException>(() => Program.RpcClient.ParseThreadIdData(
+        Assert.Throws<InvalidOperationException>(() => RpcClient.ParseThreadIdData(
             JsonNode.Parse("""[{"id":"thread-1"},{"id":"thread-1"}]""")));
-        Assert.Throws<InvalidOperationException>(() => Program.RpcClient.ParseThreadIdData(
+        Assert.Throws<InvalidOperationException>(() => RpcClient.ParseThreadIdData(
             JsonNode.Parse("""[{"id":""}]""")));
     }
 
@@ -98,7 +98,7 @@ public sealed class RpcReadBudgetTests
             });
         });
 
-        await using var client = await Program.RpcClient.ConnectAsync(url);
+        await using var client = await RpcClient.ConnectAsync(url);
         var threads = await client.ListThreadsAsync();
         Assert.Equal(
             [("thread-1", "First", "active"), ("thread-2", "Second", "idle")],
@@ -128,7 +128,7 @@ public sealed class RpcReadBudgetTests
             });
         });
         var connectionChecks = 0;
-        await using var lifecycleClient = await Program.RpcClient.ConnectOwnedAsync(
+        await using var lifecycleClient = await RpcClient.ConnectOwnedAsync(
             lifecycleUrl,
             expectedBackendProcessId: 42,
             CancellationToken.None,
@@ -157,7 +157,7 @@ public sealed class RpcReadBudgetTests
         var (url, server) = StartServer(_ => Task.Delay(250));
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            Program.RpcClient.ConnectOwnedAsync(
+            RpcClient.ConnectOwnedAsync(
                 url,
                 expectedBackendProcessId: 42,
                 CancellationToken.None,
@@ -190,7 +190,7 @@ public sealed class RpcReadBudgetTests
             });
         });
         var connectionChecks = 0;
-        await using var client = await Program.RpcClient.ConnectOwnedAsync(
+        await using var client = await RpcClient.ConnectOwnedAsync(
             url,
             expectedBackendProcessId: 42,
             CancellationToken.None,
@@ -221,7 +221,7 @@ public sealed class RpcReadBudgetTests
             });
         });
         var connectionChecks = 0;
-        await using var client = await Program.RpcClient.ConnectOwnedAsync(
+        await using var client = await RpcClient.ConnectOwnedAsync(
             url,
             expectedBackendProcessId: 42,
             CancellationToken.None,
@@ -247,7 +247,7 @@ public sealed class RpcReadBudgetTests
             });
         });
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            Program.RpcClient.ConnectAsync(oversizedUrl, maximumResponseBytes: 128));
+            RpcClient.ConnectAsync(oversizedUrl, maximumResponseBytes: 128));
         await oversizedServer;
 
         var (delayedUrl, delayedServer) = StartServer(async socket =>
@@ -256,7 +256,7 @@ public sealed class RpcReadBudgetTests
             _ = await ReceiveAsync(socket);
             await Task.Delay(250);
         });
-        await using var client = await Program.RpcClient.ConnectAsync(delayedUrl);
+        await using var client = await RpcClient.ConnectAsync(delayedUrl);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.ListThreadsAsync(
             operationTimeout: TimeSpan.FromMilliseconds(50)));
         await delayedServer;
@@ -285,7 +285,7 @@ public sealed class RpcReadBudgetTests
             listener.Start();
             using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-                Program.RpcClient.ConnectAsync(
+                RpcClient.ConnectAsync(
                     $"ws://127.0.0.1:{connectPort}",
                     cancellationToken: cancellation.Token).WaitAsync(TimeSpan.FromSeconds(5)));
         }
@@ -296,7 +296,7 @@ public sealed class RpcReadBudgetTests
             _ = await ReceiveAsync(socket);
             await Task.Delay(250);
         });
-        await using var client = await Program.RpcClient.ConnectAsync(url);
+        await using var client = await RpcClient.ConnectAsync(url);
         using (var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(50)))
         {
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>

@@ -135,7 +135,9 @@ internal static class SupervisorInterruptedHandoffRecovery
             return None();
         }
         if (captureDesktop is not null &&
-            !DesktopAnchorStillRunning(handoff.DesktopProcesses, captureDesktop()))
+            !SupervisorActivationSupport.DesktopAnchorStillRunning(
+                handoff.DesktopProcesses,
+                captureDesktop()))
         {
             MarkInterrupted(
                 stateDirectory,
@@ -219,7 +221,7 @@ internal static class SupervisorInterruptedHandoffRecovery
             UpdatedAtUtc = nowUtc,
             IdleSinceUtc = null,
             HandoffId = null,
-            LastError = SupervisorUpdateApplyMonitor.BoundError(error),
+            LastError = SupervisorActivationSupport.BoundError(error),
         });
     }
 
@@ -251,7 +253,9 @@ internal static class SupervisorInterruptedHandoffRecovery
             supervisor.Status!.SupervisorProcessId != lease.OwnerSupervisorProcessId ||
             supervisor.Status.BackendProcessId != lease.BackendProcessId ||
             supervisor.Status.Port != lease.PublicPort ||
-            !SameOptionalPath(supervisor.Status.CodexHome, lease.CodexHome) ||
+            !SupervisorActivationSupport.SameOptionalPath(
+                supervisor.Status.CodexHome,
+                lease.CodexHome) ||
             !Path.GetFullPath(supervisorExecutable).Equals(
                 Path.GetFullPath(handoff.SelectedBuild.Executable),
                 StringComparison.OrdinalIgnoreCase) ||
@@ -328,20 +332,9 @@ internal static class SupervisorInterruptedHandoffRecovery
         Path.GetFullPath(left.BackendExecutable).Equals(
             Path.GetFullPath(right.BackendExecutable),
             StringComparison.OrdinalIgnoreCase) &&
-        SameOptionalPath(left.CodexHome, right.CodexHome) &&
+        SupervisorActivationSupport.SameOptionalPath(left.CodexHome, right.CodexHome) &&
         left.BackendStartedAtUtc == right.BackendStartedAtUtc;
 
-    private static bool SameOptionalPath(string? left, string? right) =>
-        left is null && right is null ||
-        left is not null && right is not null && Path.GetFullPath(left).Equals(
-            Path.GetFullPath(right),
-            StringComparison.OrdinalIgnoreCase);
-
-    private static bool DesktopAnchorStillRunning(
-        IReadOnlyList<CodexDesktopProcessIdentity> expected,
-        CodexDesktopObservation current) =>
-        current.Kind == CodexDesktopObservationKind.Running &&
-        expected.All(current.Processes.Contains);
 }
 
 internal sealed class SupervisorUpdateApplyMonitor
@@ -388,7 +381,7 @@ internal sealed class SupervisorUpdateApplyMonitor
                 port,
                 processId,
                 token));
-        this.readThreadIds = readThreadIds ?? ReadThreadIdsAsync;
+        this.readThreadIds = readThreadIds ?? SupervisorActivationSupport.ReadOwnedThreadIdsAsync;
         this.captureDesktop = captureDesktop ?? CodexDesktopProcesses.Capture;
         this.createHandoff = createHandoff ?? ((backend, threadIds, desktopProcesses, now) =>
             SupervisorUpdateHandoffFactory.CreateFromInstalledState(
@@ -448,7 +441,8 @@ internal sealed class SupervisorUpdateApplyMonitor
             {
                 throw;
             }
-            catch (Exception exception) when (IsExpectedFailure(exception))
+            catch (Exception exception) when (
+                SupervisorActivationSupport.IsExpectedFailure(exception))
             {
                 plan = UnavailablePlan($"observationFailed:{exception.GetType().Name}");
             }
@@ -575,7 +569,8 @@ internal sealed class SupervisorUpdateApplyMonitor
         {
             throw;
         }
-        catch (Exception exception) when (IsExpectedFailure(exception))
+        catch (Exception exception) when (
+            SupervisorActivationSupport.IsExpectedFailure(exception))
         {
             statusStore.Save(waitingStatus with
             {
@@ -583,7 +578,7 @@ internal sealed class SupervisorUpdateApplyMonitor
                 UpdatedAtUtc = utcNow(),
                 IdleSinceUtc = null,
                 HandoffId = null,
-                LastError = BoundError(exception.Message),
+                LastError = SupervisorActivationSupport.BoundError(exception.Message),
             });
             return false;
         }
@@ -602,18 +597,6 @@ internal sealed class SupervisorUpdateApplyMonitor
                 }
             }
         }
-    }
-
-    private static async Task<IReadOnlyList<string>> ReadThreadIdsAsync(
-        int backendPort,
-        int backendProcessId,
-        CancellationToken cancellationToken)
-    {
-        await using var client = await Program.RpcClient.ConnectOwnedAsync(
-            LoopbackEndpoint.WebSocketUrl(backendPort),
-            backendProcessId,
-            cancellationToken);
-        return await client.ListOwnedThreadIdsAsync(cancellationToken);
     }
 
     private static void LaunchSuccessor(SupervisorSuccessorHandoff handoff)
@@ -656,21 +639,6 @@ internal sealed class SupervisorUpdateApplyMonitor
         new(0, 0, 0, 0, 0),
         [reason]);
 
-    internal static bool IsExpectedFailure(Exception exception) => exception is
-        ArgumentException or IOException or InvalidDataException or InvalidOperationException or
-        NotSupportedException or System.Text.Json.JsonException or TimeoutException or
-        UnauthorizedAccessException or System.ComponentModel.Win32Exception or
-        System.Net.Http.HttpRequestException or
-        System.Net.WebSockets.WebSocketException;
-
-    internal static string BoundError(string error)
-    {
-        const int maximumLength = 2048;
-        var singleLine = error.Replace('\r', ' ').Replace('\n', ' ').Trim();
-        return singleLine.Length <= maximumLength
-            ? singleLine
-            : $"{singleLine[..(maximumLength - 1)]}…";
-    }
 }
 
 internal enum SupervisorSuccessorCompletionKind
@@ -704,7 +672,7 @@ internal static class SupervisorSuccessorCompletion
             SupervisorSuccessorHandoff>? createRollback = null,
         Action<SupervisorSuccessorHandoff>? launchRollback = null)
     {
-        readThreadIds ??= ReadThreadIdsAsync;
+        readThreadIds ??= SupervisorActivationSupport.ReadOwnedThreadIdsAsync;
         captureDesktop ??= CodexDesktopProcesses.Capture;
         activeConnections ??= () => relay.ActiveConnectionCount;
         utcNow ??= () => DateTimeOffset.UtcNow;
@@ -761,7 +729,7 @@ internal static class SupervisorSuccessorCompletion
         {
             throw;
         }
-        catch (Exception exception) when (SupervisorUpdateApplyMonitor.IsExpectedFailure(exception))
+        catch (Exception exception) when (SupervisorActivationSupport.IsExpectedFailure(exception))
         {
             if (successor.Role == SupervisorSuccessorRole.Rollback)
             {
@@ -802,7 +770,9 @@ internal static class SupervisorSuccessorCompletion
             throw new InvalidDataException(
                 "Persisted thread IDs were not all readable after the supervisor handoff.");
         }
-        if (!DesktopAnchorStillRunning(handoff.DesktopProcesses, captureDesktop()))
+        if (!SupervisorActivationSupport.DesktopAnchorStillRunning(
+                handoff.DesktopProcesses,
+                captureDesktop()))
         {
             throw new InvalidOperationException(
                 "The original Codex desktop process did not remain running through the handoff.");
@@ -812,7 +782,9 @@ internal static class SupervisorSuccessorCompletion
         while (activeConnections() <= 0)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!DesktopAnchorStillRunning(handoff.DesktopProcesses, captureDesktop()))
+            if (!SupervisorActivationSupport.DesktopAnchorStillRunning(
+                    handoff.DesktopProcesses,
+                    captureDesktop()))
             {
                 throw new InvalidOperationException(
                     "The original Codex desktop process exited before reconnecting.");
@@ -862,12 +834,12 @@ internal static class SupervisorSuccessorCompletion
                 utcNow(),
                 IdleSinceUtc: null,
                 rollback.HandoffId,
-                SupervisorUpdateApplyMonitor.BoundError(verificationError)));
+                SupervisorActivationSupport.BoundError(verificationError)));
             launchRollback(rollback);
             launched = true;
             return SupervisorSuccessorCompletionKind.RollbackLaunched;
         }
-        catch (Exception exception) when (SupervisorUpdateApplyMonitor.IsExpectedFailure(exception))
+        catch (Exception exception) when (SupervisorActivationSupport.IsExpectedFailure(exception))
         {
             handoffStore.Delete();
             SaveFailure(
@@ -906,25 +878,7 @@ internal static class SupervisorSuccessorCompletion
             now,
             IdleSinceUtc: null,
             HandoffId: null,
-            SupervisorUpdateApplyMonitor.BoundError(error)));
-    }
-
-    private static bool DesktopAnchorStillRunning(
-        IReadOnlyList<CodexDesktopProcessIdentity> expected,
-        CodexDesktopObservation current) =>
-        current.Kind == CodexDesktopObservationKind.Running &&
-        expected.All(current.Processes.Contains);
-
-    private static async Task<IReadOnlyList<string>> ReadThreadIdsAsync(
-        int backendPort,
-        int backendProcessId,
-        CancellationToken cancellationToken)
-    {
-        await using var client = await Program.RpcClient.ConnectOwnedAsync(
-            LoopbackEndpoint.WebSocketUrl(backendPort),
-            backendProcessId,
-            cancellationToken);
-        return await client.ListOwnedThreadIdsAsync(cancellationToken);
+            SupervisorActivationSupport.BoundError(error)));
     }
 
     private static void LaunchRollback(SupervisorSuccessorHandoff handoff)
@@ -1006,7 +960,7 @@ internal static class SupervisorRollbackHelper
         {
             throw;
         }
-        catch (Exception exception) when (SupervisorUpdateApplyMonitor.IsExpectedFailure(exception))
+        catch (Exception exception) when (SupervisorActivationSupport.IsExpectedFailure(exception))
         {
             var previous = statusStore.Load();
             var generation = previous.Kind == ContinuityUpdateApplyLoadKind.Loaded
@@ -1021,7 +975,7 @@ internal static class SupervisorRollbackHelper
                 utcNow(),
                 IdleSinceUtc: null,
                 HandoffId: null,
-                SupervisorUpdateApplyMonitor.BoundError(exception.Message)));
+                SupervisorActivationSupport.BoundError(exception.Message)));
             return 1;
         }
     }
@@ -1055,7 +1009,9 @@ internal static class SupervisorRollbackHandoffFactory
                 StringComparison.OrdinalIgnoreCase) ||
             backend.OwnerSupervisorProcessId != supervisorProcessId ||
             backend.PublicPort != original.PublicPort ||
-            !SameOptionalPath(backend.CodexHome, original.CodexHome))
+            !SupervisorActivationSupport.SameOptionalPath(
+                backend.CodexHome,
+                original.CodexHome))
         {
             throw new InvalidDataException(
                 "The selected successor cannot prove the rollback handoff identity.");
@@ -1079,9 +1035,4 @@ internal static class SupervisorRollbackHandoffFactory
         return rollback;
     }
 
-    private static bool SameOptionalPath(string? left, string? right) =>
-        left is null && right is null ||
-        left is not null && right is not null && Path.GetFullPath(left).Equals(
-            Path.GetFullPath(right),
-            StringComparison.OrdinalIgnoreCase);
 }
