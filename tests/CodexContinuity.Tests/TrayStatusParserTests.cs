@@ -195,6 +195,127 @@ public sealed class TrayStatusParserTests
             TrayStatusPresentation.UpdateCounts(update));
     }
 
+    [Fact]
+    public void MissingApplyStateDefaultsToExplicitStagedOnlyOptOut()
+    {
+        var apply = TrayStatusParser.ParseApply(policyJson: null, statusJson: null);
+
+        Assert.Equal(ContinuityApplySnapshot.Default, apply);
+        Assert.Equal(
+            "Activation: staged only; automatic apply is off",
+            TrayStatusPresentation.ApplyDetail(apply));
+        Assert.False(TrayStatusPresentation.ShowApplyRetry(apply));
+    }
+
+    [Theory]
+    [MemberData(nameof(ApplyDetails))]
+    public void PresentsEveryApplyState(
+        string state,
+        string? targetVersion,
+        string? idleSince,
+        string? error,
+        string expected,
+        bool retry)
+    {
+        var policy = """
+            {
+              "schemaVersion": 1,
+              "automaticApplyWhenIdle": true,
+              "generation": 7,
+              "updatedAtUtc": "2026-08-24T20:00:00Z"
+            }
+            """;
+        var status = JsonSerializer.Serialize(new
+        {
+            schemaVersion = 1,
+            state,
+            policyGeneration = 7,
+            targetVersion,
+            updatedAtUtc = "2026-08-24T20:00:00Z",
+            idleSinceUtc = idleSince,
+            lastError = error,
+        });
+
+        var apply = TrayStatusParser.ParseApply(policy, status);
+
+        Assert.True(apply.AutomaticApplyWhenIdle);
+        Assert.Equal(7, apply.PolicyGeneration);
+        Assert.Equal(expected, TrayStatusPresentation.ApplyDetail(apply));
+        Assert.Equal(retry, TrayStatusPresentation.ShowApplyRetry(apply));
+        Assert.Equal(state != "applying", TrayStatusPresentation.CanChangeApplyPolicy(apply));
+    }
+
+    public static TheoryData<string, string?, string?, string?, string, bool> ApplyDetails => new()
+    {
+        { "stagedOnly", null, null, null,
+            "Activation: automatic apply enabled; awaiting supervisor status", false },
+        { "waiting", null, null, null,
+            "Activation: waiting for a verified staged update", false },
+        { "waiting", "0.5.0", null, null,
+            "Activation: v0.5.0 waiting for a safe idle window", false },
+        { "waiting", "0.5.0", "2026-08-24T19:59:50Z", null,
+            "Activation: v0.5.0 proving a stable idle window", false },
+        { "applying", "0.5.0", null, null,
+            "Activation: handing off to v0.5.0; Codex stays open", false },
+        { "active", "0.5.0", null, null,
+            "Activation: v0.5.0 verified active", false },
+        { "rolledBack", "0.5.0", null, "proof failed",
+            "Activation: v0.5.0 rolled back safely: proof failed", true },
+        { "failed", "0.5.0", null, "launch failed",
+            "Activation failed for v0.5.0: launch failed", true },
+    };
+
+    [Theory]
+    [InlineData("{}", null, "Automatic-apply policy")]
+    [InlineData("{\"schemaVersion\":99}", null, "Automatic-apply policy")]
+    [InlineData(null, "{}", "Activation status")]
+    [InlineData(null, "{\"schemaVersion\":99}", "Activation status")]
+    [InlineData(null, "{\"schemaVersion\":1,\"state\":\"future\"}", "Activation status")]
+    public void InvalidApplyStateDisablesControls(
+        string? policy,
+        string? status,
+        string expectedError)
+    {
+        var apply = TrayStatusParser.ParseApply(policy, status);
+
+        Assert.False(apply.ControlsAvailable);
+        Assert.Contains(expectedError, apply.AvailabilityError);
+        Assert.False(TrayStatusPresentation.CanChangeApplyPolicy(apply));
+        Assert.StartsWith(
+            "Activation controls unavailable:",
+            TrayStatusPresentation.ApplyDetail(apply));
+    }
+
+    [Fact]
+    public void NewPolicyGenerationDoesNotResurfacePriorFailureAsRetryable()
+    {
+        const string policy =
+            """{"schemaVersion":1,"automaticApplyWhenIdle":true,"generation":8}""";
+        const string priorFailure =
+            """{"schemaVersion":1,"state":"failed","policyGeneration":7,"targetVersion":"0.5.0","lastError":"old failure"}""";
+
+        var apply = TrayStatusParser.ParseApply(policy, priorFailure);
+
+        Assert.True(apply.AutomaticApplyWhenIdle);
+        Assert.Equal(8, apply.PolicyGeneration);
+        Assert.Equal("waiting", apply.State);
+        Assert.Null(apply.LastError);
+        Assert.False(TrayStatusPresentation.ShowApplyRetry(apply));
+    }
+
+    [Fact]
+    public void InvalidStatusPreservesKnownEnabledPolicyWhileDisablingMutation()
+    {
+        const string policy =
+            """{"schemaVersion":1,"automaticApplyWhenIdle":true,"generation":8}""";
+
+        var apply = TrayStatusParser.ParseApply(policy, "{}");
+
+        Assert.True(apply.AutomaticApplyWhenIdle);
+        Assert.False(apply.ControlsAvailable);
+        Assert.False(TrayStatusPresentation.CanChangeApplyPolicy(apply));
+    }
+
     [Theory]
     [MemberData(nameof(UpdateDetails))]
     public void PresentsEveryUpdateState(string state, bool running, bool live, string? error, string expected)
@@ -294,6 +415,57 @@ public sealed class TrayStatusParserTests
             File.WriteAllText(statusPath, SupervisorStatus(Environment.ProcessId, DateTimeOffset.UtcNow));
             File.WriteAllText(Path.Combine(stateDirectory, "supervisor-status.json"), "{}");
             Assert.Equal(legacyDirectory, TrayStatusClient.ResolveDiagnosticsDirectory(stateDirectory, legacyDirectory));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ApplyStatusReadsFromInjectedOwningStateDirectory()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"continuity-tray-apply-{Guid.NewGuid():N}");
+        var applicationDirectory = Path.Combine(root, "tray");
+        var stateDirectory = Path.Combine(root, "state");
+        var legacyDirectory = Path.Combine(root, "legacy");
+        Directory.CreateDirectory(applicationDirectory);
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(stateDirectory, "update-apply-policy.json"),
+                JsonSerializer.Serialize(new
+                {
+                    schemaVersion = 1,
+                    automaticApplyWhenIdle = true,
+                    generation = 4,
+                    updatedAtUtc = DateTimeOffset.UtcNow,
+                }));
+            File.WriteAllText(
+                Path.Combine(stateDirectory, "update-apply-status.json"),
+                JsonSerializer.Serialize(new
+                {
+                    schemaVersion = 1,
+                    state = "applying",
+                    policyGeneration = 4,
+                    targetVersion = "0.5.0",
+                    updatedAtUtc = DateTimeOffset.UtcNow,
+                }));
+            var client = new TrayStatusClient(
+                "status.exe",
+                applicationDirectory,
+                stateDirectory,
+                legacyDirectory);
+
+            var apply = await client.ReadApplyAsync(CancellationToken.None);
+
+            Assert.True(apply.AutomaticApplyWhenIdle);
+            Assert.Equal("applying", apply.State);
+            Assert.Equal("0.5.0", apply.TargetVersion);
         }
         finally
         {
@@ -415,7 +587,7 @@ public sealed class TrayStatusParserTests
             }
             else
             {
-                secondEntered.SetResult(true);
+                secondEntered.TrySetResult(true);
             }
             return new(0, string.Empty, string.Empty);
         }
@@ -435,12 +607,16 @@ public sealed class TrayStatusParserTests
             Assert.False(secondEntered.Task.IsCompleted);
             releaseFirst.SetResult(true);
             await Task.WhenAll(update, recovery);
+            await client.SetAutomaticApplyAsync(enabled: true, CancellationToken.None);
+            await client.SetAutomaticApplyAsync(enabled: false, CancellationToken.None);
             Assert.Equal(
                 [
                     $"{Path.GetFullPath(installedExecutable)}|update",
                     $"{Path.GetFullPath(installedExecutable)}|repair|--start-now|" +
                         $"--expected-installed-executable|{Path.GetFullPath(installedExecutable)}|" +
                         "--expected-installed-sha256|ABC123",
+                    $"{Path.GetFullPath(installedExecutable)}|update-policy|--enable",
+                    $"{Path.GetFullPath(installedExecutable)}|update-policy|--disable",
                 ],
                 calls);
         }

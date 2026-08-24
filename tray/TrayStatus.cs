@@ -64,6 +64,37 @@ internal sealed record ContinuityUpdateSnapshot(
         new(null, false, null, 0, 0, 0, "unknown", error);
 }
 
+internal sealed record ContinuityApplySnapshot(
+    bool AutomaticApplyWhenIdle,
+    long PolicyGeneration,
+    string State,
+    string? TargetVersion,
+    DateTimeOffset? IdleSinceUtc,
+    string? LastError,
+    bool ControlsAvailable,
+    string? AvailabilityError)
+{
+    internal static ContinuityApplySnapshot Default => new(
+        AutomaticApplyWhenIdle: false,
+        PolicyGeneration: 0,
+        State: "stagedOnly",
+        TargetVersion: null,
+        IdleSinceUtc: null,
+        LastError: null,
+        ControlsAvailable: true,
+        AvailabilityError: null);
+
+    internal static ContinuityApplySnapshot Unavailable(string error) => new(
+        AutomaticApplyWhenIdle: false,
+        PolicyGeneration: 0,
+        State: "unavailable",
+        TargetVersion: null,
+        IdleSinceUtc: null,
+        LastError: null,
+        ControlsAvailable: false,
+        AvailabilityError: error);
+}
+
 internal static class TrayStatusPresentation
 {
     internal static Icon IconForHealth(ContinuityHealth health, Icon applicationIcon)
@@ -116,12 +147,48 @@ internal static class TrayStatusPresentation
         };
     }
 
+    internal static string ApplyDetail(ContinuityApplySnapshot apply)
+    {
+        if (!apply.ControlsAvailable)
+        {
+            return $"Activation controls unavailable: {Compact(
+                apply.AvailabilityError ?? "state could not be read")}";
+        }
+        var target = apply.TargetVersion is null ? "the staged update" : $"v{apply.TargetVersion}";
+        return apply.State switch
+        {
+            "stagedOnly" when apply.AutomaticApplyWhenIdle =>
+                "Activation: automatic apply enabled; awaiting supervisor status",
+            "stagedOnly" => "Activation: staged only; automatic apply is off",
+            "waiting" when apply.TargetVersion is null =>
+                "Activation: waiting for a verified staged update",
+            "waiting" when apply.IdleSinceUtc is null =>
+                $"Activation: {target} waiting for a safe idle window",
+            "waiting" => $"Activation: {target} proving a stable idle window",
+            "applying" => $"Activation: handing off to {target}; Codex stays open",
+            "active" => $"Activation: {target} verified active",
+            "rolledBack" => $"Activation: {target} rolled back safely{ErrorSuffix(apply)}",
+            "failed" => $"Activation failed for {target}{ErrorSuffix(apply)}",
+            _ => $"Activation state: {apply.State}",
+        };
+    }
+
+    internal static bool ShowApplyRetry(ContinuityApplySnapshot apply) =>
+        apply.ControlsAvailable && apply.AutomaticApplyWhenIdle &&
+        apply.State is "failed" or "rolledBack";
+
+    internal static bool CanChangeApplyPolicy(ContinuityApplySnapshot apply) =>
+        apply.ControlsAvailable && apply.State != "applying";
+
     internal static string CommandFailure(string action, TrayCommandResult result)
     {
         var detail = string.IsNullOrWhiteSpace(result.Error) ? result.Output : result.Error;
         detail = string.IsNullOrWhiteSpace(detail) ? $"exit code {result.ExitCode}" : detail;
         return $"{action} failed: {Compact(detail)}";
     }
+
+    private static string ErrorSuffix(ContinuityApplySnapshot apply) =>
+        string.IsNullOrWhiteSpace(apply.LastError) ? string.Empty : $": {Compact(apply.LastError)}";
 
     private static string Compact(string text)
     {
@@ -195,6 +262,100 @@ internal static class TrayStatusParser
         }
     }
 
+    internal static ContinuityApplySnapshot ParseApply(string? policyJson, string? statusJson)
+    {
+        var automaticApply = false;
+        var generation = 0L;
+        if (policyJson is not null)
+        {
+            try
+            {
+                using var policyDocument = JsonDocument.Parse(policyJson);
+                var policy = policyDocument.RootElement;
+                if (policy.ValueKind != JsonValueKind.Object ||
+                    !policy.TryGetProperty("schemaVersion", out var schema) ||
+                    !schema.TryGetInt32(out var schemaVersion) || schemaVersion != 1 ||
+                    !policy.TryGetProperty("automaticApplyWhenIdle", out var enabled) ||
+                    enabled.ValueKind is not (JsonValueKind.True or JsonValueKind.False) ||
+                    !policy.TryGetProperty("generation", out var generationElement) ||
+                    !generationElement.TryGetInt64(out generation) || generation < 0)
+                {
+                    return ContinuityApplySnapshot.Unavailable(
+                        "Automatic-apply policy is invalid or from a newer version.");
+                }
+                automaticApply = enabled.GetBoolean();
+            }
+            catch (JsonException)
+            {
+                return ContinuityApplySnapshot.Unavailable(
+                    "Automatic-apply policy is invalid.");
+            }
+        }
+
+        if (statusJson is null)
+        {
+            return ContinuityApplySnapshot.Default with
+            {
+                AutomaticApplyWhenIdle = automaticApply,
+                PolicyGeneration = generation,
+                State = automaticApply ? "waiting" : "stagedOnly",
+            };
+        }
+
+        try
+        {
+            using var statusDocument = JsonDocument.Parse(statusJson);
+            var status = statusDocument.RootElement;
+            if (status.ValueKind != JsonValueKind.Object ||
+                !status.TryGetProperty("schemaVersion", out var schema) ||
+                !schema.TryGetInt32(out var schemaVersion) || schemaVersion != 1 ||
+                !status.TryGetProperty("state", out var stateElement) ||
+                stateElement.ValueKind != JsonValueKind.String ||
+                stateElement.GetString() is not { } state ||
+                !status.TryGetProperty("policyGeneration", out var statusGenerationElement) ||
+                !statusGenerationElement.TryGetInt64(out var statusGeneration) ||
+                statusGeneration < 0 ||
+                state is not ("stagedOnly" or "waiting" or "applying" or "active" or
+                    "rolledBack" or "failed"))
+            {
+                return ContinuityApplySnapshot.Unavailable(
+                    "Activation status is invalid or from a newer version.") with
+                {
+                    AutomaticApplyWhenIdle = automaticApply,
+                    PolicyGeneration = generation,
+                };
+            }
+            if (statusGeneration != generation)
+            {
+                return ContinuityApplySnapshot.Default with
+                {
+                    AutomaticApplyWhenIdle = automaticApply,
+                    PolicyGeneration = generation,
+                    State = automaticApply ? "waiting" : "stagedOnly",
+                    TargetVersion = ReadString(status, "targetVersion"),
+                };
+            }
+            return new(
+                automaticApply,
+                generation,
+                state,
+                ReadString(status, "targetVersion"),
+                ReadDateTimeOffset(status, "idleSinceUtc"),
+                ReadString(status, "lastError"),
+                ControlsAvailable: true,
+                AvailabilityError: null);
+        }
+        catch (Exception exception) when (
+            exception is JsonException or InvalidOperationException or FormatException)
+        {
+            return ContinuityApplySnapshot.Unavailable("Activation status is invalid.") with
+            {
+                AutomaticApplyWhenIdle = automaticApply,
+                PolicyGeneration = generation,
+            };
+        }
+    }
+
     private static string? ReadString(JsonElement root, string name) =>
         root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
@@ -207,6 +368,11 @@ internal static class TrayStatusParser
 
     private static bool ReadBool(JsonElement root, string name) =>
         root.TryGetProperty(name, out var value) && value.GetBoolean();
+
+    private static DateTimeOffset? ReadDateTimeOffset(JsonElement root, string name) =>
+        root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetDateTimeOffset()
+            : null;
 }
 
 internal sealed class TrayStatusClient(
@@ -293,8 +459,32 @@ internal sealed class TrayStatusClient(
         }
     }
 
+    internal Task<ContinuityApplySnapshot> ReadApplyAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            var policyPath = ExistingStateFile("update-apply-policy.json");
+            var statusPath = ExistingStateFile("update-apply-status.json");
+            return Task.FromResult(TrayStatusParser.ParseApply(
+                policyPath is null ? null : File.ReadAllText(policyPath),
+                statusPath is null ? null : File.ReadAllText(statusPath)));
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return Task.FromResult(ContinuityApplySnapshot.Unavailable(exception.Message));
+        }
+    }
+
     internal Task<TrayCommandResult> CheckForUpdatesAsync(CancellationToken cancellationToken) =>
         RunMutationAsync(_ => ["update"], cancellationToken);
+
+    internal Task<TrayCommandResult> SetAutomaticApplyAsync(
+        bool enabled,
+        CancellationToken cancellationToken) => RunMutationAsync(
+            _ => ["update-policy", enabled ? "--enable" : "--disable"],
+            cancellationToken);
 
     internal Task<TrayCommandResult> RestartSupervisorAsync(CancellationToken cancellationToken) =>
         RunMutationAsync(target => target.SelectedExecutable is null
@@ -435,6 +625,9 @@ internal sealed class TrayStatusClient(
         {
             "install-state.json",
             "update-status.json",
+            "update-apply-policy.json",
+            "update-apply-status.json",
+            "supervisor-handoff.json",
             "supervisor-status.json",
             "app-server.log",
         }.Any(fileName => File.Exists(Path.Combine(directory, fileName)));
@@ -450,7 +643,7 @@ internal sealed class TrayStatusClient(
         StateDirectory,
         LegacyStateDirectory);
 
-    private static int ReadInstalledPort()
+    private int ReadInstalledPort()
     {
         try
         {
@@ -481,14 +674,14 @@ internal sealed class TrayStatusClient(
         return port;
     }
 
-    private static string? ExistingStateFile(string fileName)
+    private string? ExistingStateFile(string fileName)
     {
-        var current = Path.Combine(StateDirectory, fileName);
+        var current = Path.Combine(actionStateDirectory, fileName);
         if (File.Exists(current))
         {
             return current;
         }
-        var legacy = Path.Combine(LegacyStateDirectory, fileName);
+        var legacy = Path.Combine(actionLegacyStateDirectory, fileName);
         return File.Exists(legacy) ? legacy : null;
     }
 

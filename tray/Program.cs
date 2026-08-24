@@ -31,12 +31,17 @@ internal sealed class ContinuityTrayContext : ApplicationContext
     private readonly ToolStripMenuItem agentsItem;
     private readonly ToolStripMenuItem updateItem;
     private readonly ToolStripMenuItem updateDetailItem;
+    private readonly ToolStripMenuItem applyDetailItem;
+    private readonly ToolStripMenuItem automaticApplyItem;
+    private readonly ToolStripMenuItem retryApplyItem;
     private readonly ToolStripMenuItem checkForUpdatesItem;
     private readonly ToolStripMenuItem recoveryItem;
     private readonly System.Windows.Forms.Timer refreshTimer;
     private readonly TrayStatusClient statusClient;
     private readonly Icon applicationIcon;
     private bool refreshInProgress;
+    private bool applyPolicyMutable;
+    private bool applyRetryAvailable;
     private readonly TrayMutationPresenter mutationPresenter = new();
 
     internal ContinuityTrayContext()
@@ -52,6 +57,17 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         updateItem = new ToolStripMenuItem("Updates: checking…") { Enabled = false };
         updateDetailItem = new ToolStripMenuItem("Update state: checking…") { Enabled = false };
 
+        applyDetailItem = new ToolStripMenuItem("Activation: checking...") { Enabled = false };
+        automaticApplyItem = MenuItem(
+            "Apply Continuity updates when idle (Codex stays open)",
+            async () => await ToggleAutomaticApplyAsync());
+        automaticApplyItem.CheckOnClick = false;
+        automaticApplyItem.Enabled = false;
+        retryApplyItem = MenuItem(
+            "Retry safe update activation",
+            async () => await RetryAutomaticApplyAsync());
+        retryApplyItem.Visible = false;
+
         checkForUpdatesItem = MenuItem(
             "Check for updates now",
             async () => await CheckForUpdatesAsync());
@@ -66,6 +82,9 @@ internal sealed class ContinuityTrayContext : ApplicationContext
             agentsItem,
             updateItem,
             updateDetailItem,
+            applyDetailItem,
+            automaticApplyItem,
+            retryApplyItem,
             recoveryItem,
             new ToolStripSeparator(),
             MenuItem("Refresh now", async () => await RefreshAsync()),
@@ -135,6 +154,14 @@ internal sealed class ContinuityTrayContext : ApplicationContext
                 updateItem.Click += OpenLatestRelease;
             }
             updateDetailItem.Text = TrayStatusPresentation.UpdateDetail(update, status.Health);
+            var apply = await statusClient.ReadApplyAsync(shutdown.Token);
+            applyDetailItem.Text = TrayStatusPresentation.ApplyDetail(apply);
+            automaticApplyItem.Checked = apply.AutomaticApplyWhenIdle;
+            applyPolicyMutable = TrayStatusPresentation.CanChangeApplyPolicy(apply);
+            applyRetryAvailable = TrayStatusPresentation.ShowApplyRetry(apply);
+            automaticApplyItem.Enabled = applyPolicyMutable;
+            retryApplyItem.Visible = applyRetryAvailable;
+            retryApplyItem.Enabled = applyRetryAvailable;
         }
         catch (OperationCanceledException)
         {
@@ -150,6 +177,24 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         "Checking for verified releases…",
         "Update check",
         statusClient.CheckForUpdatesAsync);
+
+    private Task ToggleAutomaticApplyAsync()
+    {
+        var enable = !automaticApplyItem.Checked;
+        return RunMutationAsync(
+            applyDetailItem,
+            enable
+                ? "Enabling safe idle activation..."
+                : "Keeping updates staged until you apply them...",
+            enable ? "Enable automatic activation" : "Disable automatic activation",
+            token => statusClient.SetAutomaticApplyAsync(enable, token));
+    }
+
+    private Task RetryAutomaticApplyAsync() => RunMutationAsync(
+        applyDetailItem,
+        "Rearming safe idle activation...",
+        "Retry automatic activation",
+        token => statusClient.SetAutomaticApplyAsync(enabled: true, token));
 
     private Task RestartSupervisorAsync() => RunMutationAsync(
         healthItem,
@@ -172,6 +217,8 @@ internal sealed class ContinuityTrayContext : ApplicationContext
             {
                 checkForUpdatesItem.Enabled = enabled;
                 recoveryItem.Enabled = enabled;
+                automaticApplyItem.Enabled = enabled && applyPolicyMutable;
+                retryApplyItem.Enabled = enabled && applyRetryAvailable;
             },
             text => feedbackItem.Text = text,
             RefreshAsync,
