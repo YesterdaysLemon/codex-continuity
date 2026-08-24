@@ -167,8 +167,9 @@ export default function Home() {
           <h2>One command.<br />No forced restart.</h2>
           <p>
             The bootstrapper verifies the release checksum, runs an isolated
-            reconnect check, installs per-user, and starts the supervisor. It
-            never restarts the desktop app.
+            reconnect check, and installs per-user. If Codex is open, Continuity
+            arms itself and waits for a natural close. It never asks for a
+            restart or starts a competing backend.
           </p>
           <a
             className="text-link"

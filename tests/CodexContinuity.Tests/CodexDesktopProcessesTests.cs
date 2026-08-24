@@ -49,4 +49,58 @@ public sealed class CodexDesktopProcessesTests
 
         Assert.Empty(states);
     }
+
+    [Fact]
+    public void WaitArgumentsRoundTripDistinctProcessIdentities()
+    {
+        CodexDesktopProcessIdentity[] processes = [
+            new(12, 1200),
+            new(13, 1300),
+            new(12, 1200),
+        ];
+
+        var arguments = CodexDesktopProcesses.BuildWaitArguments(processes);
+        var parsed = CodexDesktopProcesses.ParseWaitArguments(arguments.ToArray());
+
+        Assert.Equal(
+            [new CodexDesktopProcessIdentity(12, 1200), new CodexDesktopProcessIdentity(13, 1300)],
+            parsed);
+    }
+
+    [Fact]
+    public async Task NaturalClosureRequiresAnEmptyDesktopIntervalAfterOldIdentitiesExit()
+    {
+        var observations = new Queue<CodexDesktopObservation>([
+            new(
+                CodexDesktopObservationKind.Running,
+                [new CodexDesktopProcessIdentity(13, 1300)],
+                "A newly observed desktop is still running."),
+            new(
+                CodexDesktopObservationKind.Unsafe,
+                [],
+                "Desktop inspection is temporarily unavailable."),
+            new(
+                CodexDesktopObservationKind.NotRunning,
+                [],
+                "No desktop remains."),
+        ]);
+
+        await CodexDesktopProcesses.WaitForNaturalClosureAsync(
+            [new CodexDesktopProcessIdentity(12, 1200)],
+            CancellationToken.None,
+            _ => ObservedProcessState.Exited,
+            () => observations.Dequeue(),
+            TimeSpan.FromMilliseconds(1));
+
+        Assert.Empty(observations);
+    }
+
+    [Theory]
+    [InlineData("0:1200")]
+    [InlineData("12:0")]
+    [InlineData("12")]
+    [InlineData("process:time")]
+    public void WaitArgumentsRejectInvalidIdentity(string identity) =>
+        Assert.Throws<ArgumentException>(() => CodexDesktopProcesses.ParseWaitArguments(
+            [CodexDesktopProcesses.WaitArgument, identity]));
 }

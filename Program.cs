@@ -25,7 +25,8 @@ internal static class Program
                     "Setup",
                     StringComparison.OrdinalIgnoreCase);
             var command = ResolveCommand(setupExecutable, args);
-            var port = ParsePort(args) ?? DefaultPort;
+            var requestedPort = ParsePort(args);
+            var port = requestedPort ?? DefaultPort;
             return command switch
             {
                 "help" or "--help" or "-h" => PrintHelp(),
@@ -33,7 +34,7 @@ internal static class Program
                 "status" => await PrintStatusAsync(port),
                 "handoff-plan" => await PrintHandoffPlanAsync(port),
                 "update" => await UpdateAsync(),
-                "serve" => await ServeAsync(port),
+                "serve" => await ServeAsync(port, args),
                 "install" => await InstallAsync(
                     port,
                     args.Contains("--start-now", StringComparer.OrdinalIgnoreCase),
@@ -42,6 +43,7 @@ internal static class Program
                         : TrayInstallMode.Enabled,
                     ResolveInstallIntent(args),
                     ResolveAutomaticUpdateSha256(args)),
+                "attach" => await AttachAsync(requestedPort),
                 "repair" => await RepairAsync(args),
                 "uninstall" => await UninstallAsync(),
                 "rollback" => Rollback(),
@@ -104,6 +106,7 @@ internal static class Program
               update      Check for and safely stage a verified Continuity release.
               serve       Supervise a loopback WebSocket app-server.
               install     Configure future desktop launches and start at user logon.
+              attach      Arm or start the installed supervisor without touching Codex.
               repair      Reapply the persisted port and tray choices without restarting agents.
               uninstall   Remove owned configuration and schedule installed files for cleanup.
               rollback    Stage the previous known-good build for the next safe start.
@@ -215,11 +218,32 @@ internal static class Program
 
     private static async Task<int> PrintStatusAsync(int port)
     {
+        var supervisorStatus = LoadSupervisorStatus();
         if (!await IsReadyAsync(port, TimeSpan.FromSeconds(2)))
         {
+            if (supervisorStatus is not null &&
+                supervisorStatus.Port == port &&
+                supervisorStatus.State == "waitingForCodexExit" &&
+                SupervisorCompatibilityGuard.Inspect(supervisorStatus) ==
+                    RecordedSupervisorState.Active)
+            {
+                var waiting = new JsonObject
+                {
+                    ["ready"] = false,
+                    ["threadCount"] = 0,
+                    ["activeThreadCount"] = 0,
+                    ["activeThreads"] = new JsonArray(),
+                    ["supervisor"] = JsonSerializer.SerializeToNode(
+                        SupervisorStatusForDiagnostics(supervisorStatus),
+                        JsonOptions),
+                };
+                Console.WriteLine(waiting.ToJsonString(JsonOptions));
+                return 0;
+            }
             return Fail($"No ready continuity backend at {LoopbackEndpoint.WebSocketUrl(port)}.");
         }
 
+        supervisorStatus = LoadSupervisorStatus();
         await using var client = await RpcClient.ConnectAsync(LoopbackEndpoint.WebSocketUrl(port));
         var threads = await client.ListThreadsAsync();
         var active = threads.Where(thread =>
@@ -236,7 +260,7 @@ internal static class Program
                 ["status"] = thread.Status,
             }).ToArray()),
             ["supervisor"] = JsonSerializer.SerializeToNode(
-                SupervisorStatusForDiagnostics(LoadSupervisorStatus()),
+                SupervisorStatusForDiagnostics(supervisorStatus),
                 JsonOptions),
         };
         Console.WriteLine(result.ToJsonString(JsonOptions));
@@ -294,17 +318,23 @@ internal static class Program
         }
     }
 
-    private static Task<int> ServeAsync(int port)
+    private static Task<int> ServeAsync(int port, string[] args)
     {
         var stateDirectory = ContinuityPaths.StateDirectory;
         var stateDirectories = LifecycleStateDirectories();
+        var desktopProcesses = CodexDesktopProcesses.ParseWaitArguments(args);
         return ServeAsync(
             port,
             stateDirectory,
             stateDirectories,
             CreateInstallCoordinator(stateDirectory),
             AutomaticUpdateRunner.RunAsync,
-            Fail);
+            Fail,
+            waitBeforeFirstBackend: desktopProcesses.Count == 0
+                ? null
+                : cancellationToken => CodexDesktopProcesses.WaitForNaturalClosureAsync(
+                    desktopProcesses,
+                    cancellationToken));
     }
 
     internal static Task<int> ServeAsync(int port, string stateDirectory) =>
@@ -326,12 +356,14 @@ internal static class Program
         IReadOnlyList<string> lifecycleStateDirectories,
         InstallCoordinator coordinator,
         Func<string, string, CancellationToken, Task> runUpdates,
-        Func<string, int> reportFailure) => ServeAsync(
+        Func<string, int> reportFailure,
+        Func<CancellationToken, Task>? waitBeforeFirstBackend = null) => ServeAsync(
             port,
             stateDirectory,
             ProductionSupervisorCompatibilityScope(lifecycleStateDirectories, coordinator),
             runUpdates,
-            reportFailure);
+            reportFailure,
+            waitBeforeFirstBackend: waitBeforeFirstBackend);
 
     internal static Task<int> ServeAsync(
         int port,
@@ -362,7 +394,8 @@ internal static class Program
             string,
             CancellationToken,
             Func<int, WindowsProcessGroup>,
-            Task<int>>? runOwnedSupervisor = null)
+            Task<int>>? runOwnedSupervisor = null,
+        Func<CancellationToken, Task>? waitBeforeFirstBackend = null)
     {
         using var supervisorLock = TryAcquireSupervisorLock(stateDirectory);
         if (supervisorLock is null)
@@ -392,12 +425,22 @@ internal static class Program
             stateDirectory,
             ProductVersion(),
             runUpdates);
-        runOwnedSupervisor ??= static (publicPort, directory, shutdownToken, startBackend) =>
-            OwnedSupervisorRuntime.RunAsync(
-                publicPort,
-                directory,
-                shutdownToken,
-                startBackend);
+        if (runOwnedSupervisor is null)
+        {
+            return await OwnedSupervisorRuntime.RunAsync(
+                port,
+                stateDirectory,
+                updateLifetime.Token,
+                backendPort => StartAppServer(
+                    FindCodexExecutable(persistedEnvironmentOnly: true),
+                    backendPort),
+                waitBeforeFirstBackend: waitBeforeFirstBackend);
+        }
+        if (waitBeforeFirstBackend is not null)
+        {
+            throw new InvalidOperationException(
+                "An injected supervisor runtime cannot use the production desktop wait gate.");
+        }
         return await runOwnedSupervisor(
             port,
             stateDirectory,
@@ -507,6 +550,16 @@ internal static class Program
             port,
             installedPort => IsReadyAsync(installedPort, TimeSpan.FromSeconds(1)));
         var legacyInstalledPort = portSelection.LegacyInstalledPort;
+        if (existingState is null && legacyInstalledPort is null)
+        {
+            var package = await ReadInstalledPackageAsync();
+            var installedDesktopVersion = package?["version"]?.GetValue<string>();
+            if (!DesktopRetargetCapability.IsFirstAttachmentVerified(installedDesktopVersion))
+            {
+                throw new InvalidOperationException(
+                    $"Codex desktop build {installedDesktopVersion ?? "unknown"} has not been verified for safe first attachment. No installation settings were changed.");
+            }
+        }
         var endpointOwnership = ExistingEndpointOwnership.NotReady;
         if (startNow && await IsReadyAsync(port, TimeSpan.FromSeconds(1)))
         {
@@ -560,20 +613,16 @@ internal static class Program
             }
             else
             {
-                using var process = StartSupervisor(state.InstalledExecutable, state.Port);
-                if (!await WaitUntilManagedSupervisorReadyAsync(
-                        state.Port,
-                        process,
-                        TimeSpan.FromSeconds(20),
-                        CancellationToken.None))
+                var activation = await StartInstalledSupervisorAsync(
+                    state.InstalledExecutable,
+                    state.Port,
+                    TimeSpan.FromSeconds(20),
+                    CancellationToken.None);
+                if (activation.Kind == SupervisorActivationKind.Failed)
                 {
-                    throw new InvalidOperationException(
-                        process.HasExited
-                            ? $"Continuity supervisor exited with code {process.ExitCode}."
-                            : "Continuity supervisor did not become ready within 20 seconds.");
+                    throw new InvalidOperationException(activation.Detail);
                 }
-                Console.WriteLine(
-                    $"Started the continuity supervisor in the background (PID {process.Id}).");
+                Console.WriteLine(activation.Detail);
             }
 
             if (state.InstalledTrayExecutable is not null)
@@ -654,6 +703,56 @@ internal static class Program
                 ? "Removed future startup configuration. Codex reopenings in this Windows session will keep reconnecting to the running backend; the owned reconnect setting and installed files will be removed at the next sign-in. No running process was stopped."
                 : "Removed owned future-launch configuration. Installed files will be removed at the next sign-in; no running process was stopped.");
         return 0;
+    }
+
+    private static async Task<int> AttachAsync(int? requestedPort)
+    {
+        var state = LoadInstallState()
+            ?? throw new InvalidOperationException("No installed Continuity state is available.");
+        if (requestedPort is not null && requestedPort != state.Port)
+        {
+            return Fail(
+                $"Continuity is installed on port {state.Port}; refusing to attach on port {requestedPort}.");
+        }
+        if (Environment.ProcessPath is not { } commandExecutable)
+        {
+            return Fail("The running Continuity command has no verifiable executable path.");
+        }
+        try
+        {
+            await BootstrapInstaller.VerifySha256Async(
+                commandExecutable,
+                state.BinarySha256);
+            await BootstrapInstaller.VerifySha256Async(
+                state.InstalledExecutable,
+                state.BinarySha256);
+        }
+        catch (InvalidDataException)
+        {
+            return Fail(
+                "The running command does not match the selected installed build. Run repair before attach.");
+        }
+        if (await IsReadyAsync(state.Port, TimeSpan.FromSeconds(1)))
+        {
+            if (!await IsManagedEndpointReadyAsync(state.Port))
+            {
+                return Fail(
+                    $"A ready endpoint on port {state.Port} is not owned by this Continuity installation.");
+            }
+            Console.WriteLine("Codex is already attached to the running Continuity backend.");
+            return 0;
+        }
+
+        var activation = await StartInstalledSupervisorAsync(
+            state.InstalledExecutable,
+            state.Port,
+            TimeSpan.FromSeconds(20),
+            CancellationToken.None);
+        Console.WriteLine(activation.Detail);
+        return activation.Kind is SupervisorActivationKind.Failed or
+            SupervisorActivationKind.Deferred
+                ? 1
+                : 0;
     }
 
     internal static T RunInstallMutation<T>(
@@ -1012,11 +1111,92 @@ internal static class Program
             ? value
             : $"{value[..(maximumCharacters - 1)]}…";
 
-    private static Process StartSupervisor(string executable, int port)
-        => DetachedProcessLauncher.Start(
+    private static Process StartSupervisor(
+        string executable,
+        int port,
+        IReadOnlyList<CodexDesktopProcessIdentity>? waitForProcesses = null)
+    {
+        var arguments = new List<string> { "serve", "--port", port.ToString() };
+        if (waitForProcesses is not null)
+        {
+            arguments.AddRange(CodexDesktopProcesses.BuildWaitArguments(waitForProcesses));
+        }
+        return DetachedProcessLauncher.Start(
             executable,
-            ["serve", "--port", port.ToString()],
+            arguments,
             Path.GetDirectoryName(executable) ?? ContinuityPaths.StateDirectory);
+    }
+
+    private static async Task<SupervisorActivation> StartInstalledSupervisorAsync(
+        string executable,
+        int port,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var existingStatus = LoadSupervisorStatus();
+        if (existingStatus is not null)
+        {
+            var existingState = SupervisorCompatibilityGuard.Inspect(existingStatus);
+            if (existingState == RecordedSupervisorState.Unsafe)
+            {
+                return new(
+                    SupervisorActivationKind.Failed,
+                    "The recorded Continuity supervisor identity could not be verified. Refusing to start another backend.");
+            }
+            if (existingState == RecordedSupervisorState.Active)
+            {
+                if (existingStatus.Port != port)
+                {
+                    return new(
+                        SupervisorActivationKind.Failed,
+                        $"A Continuity supervisor is already active on port {existingStatus.Port}; refusing to start another on port {port}.");
+                }
+                return existingStatus.State == "waitingForCodexExit"
+                    ? new(
+                        SupervisorActivationKind.Armed,
+                        "Continuity is already armed and waiting for the previously running Codex desktop to close naturally.")
+                    : new(
+                        SupervisorActivationKind.Existing,
+                        $"A Continuity supervisor is already active on port {existingStatus.Port}; it was left untouched.");
+            }
+        }
+
+        var package = await ReadInstalledPackageAsync();
+        var installedDesktopVersion = package?["version"]?.GetValue<string>();
+        var attachmentPlan = DesktopRetargetCapability.PlanFirstAttachment(
+            installedDesktopVersion,
+            CodexDesktopProcesses.Capture());
+        if (attachmentPlan.Action == FirstAttachmentAction.Defer)
+        {
+            return new(
+                SupervisorActivationKind.Deferred,
+                $"Live attachment is unavailable: {attachmentPlan.Detail}");
+        }
+
+        using var process = StartSupervisor(
+            executable,
+            port,
+            attachmentPlan.WaitForProcesses);
+        var kind = await WaitUntilManagedSupervisorActivatedAsync(
+            port,
+            process,
+            timeout,
+            cancellationToken);
+        return kind switch
+        {
+            SupervisorActivationKind.Running => new(
+                kind,
+                $"Started the continuity supervisor in the background (PID {process.Id})."),
+            SupervisorActivationKind.Armed => new(
+                kind,
+                "Live retarget is unavailable in the running Codex build. Continuity is armed and will start its backend only after the current Codex desktop closes naturally; no restart was requested."),
+            _ => new(
+                SupervisorActivationKind.Failed,
+                process.HasExited
+                    ? $"Continuity supervisor exited with code {process.ExitCode}."
+                    : $"Continuity supervisor did not become ready or armed within {timeout.TotalSeconds:F0} seconds."),
+        };
+    }
 
     private static Process StartTray(string executable)
         => DetachedProcessLauncher.Start(
@@ -1275,7 +1455,7 @@ internal static class Program
         return false;
     }
 
-    private static async Task<bool> WaitUntilManagedSupervisorReadyAsync(
+    private static async Task<SupervisorActivationKind> WaitUntilManagedSupervisorActivatedAsync(
         int port,
         Process supervisor,
         TimeSpan timeout,
@@ -1286,13 +1466,24 @@ internal static class Program
                !supervisor.HasExited &&
                !cancellationToken.IsCancellationRequested)
         {
-            if (await IsManagedEndpointReadyAsync(port, supervisor.Id))
+            var status = LoadSupervisorStatus();
+            if (status is not null &&
+                status.Port == port &&
+                status.SupervisorProcessId == supervisor.Id &&
+                SupervisorCompatibilityGuard.Inspect(status) == RecordedSupervisorState.Active)
             {
-                return true;
+                if (status.State == "waitingForCodexExit")
+                {
+                    return SupervisorActivationKind.Armed;
+                }
+                if (await IsManagedEndpointReadyAsync(port, supervisor.Id))
+                {
+                    return SupervisorActivationKind.Running;
+                }
             }
             await Task.Delay(100, cancellationToken);
         }
-        return false;
+        return SupervisorActivationKind.Failed;
     }
 
     private static async Task<bool> IsManagedEndpointReadyAsync(
@@ -1568,6 +1759,17 @@ internal static class Program
     };
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
+    private sealed record SupervisorActivation(SupervisorActivationKind Kind, string Detail);
+
+    private enum SupervisorActivationKind
+    {
+        Running,
+        Armed,
+        Existing,
+        Deferred,
+        Failed,
+    }
+
     internal enum AppServerStopDisposition
     {
         CleanExit,

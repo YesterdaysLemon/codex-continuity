@@ -54,6 +54,23 @@ public sealed class TrayStatusParserTests
     }
 
     [Fact]
+    public void PresentsArmedSupervisorWithoutOfferingRecovery()
+    {
+        const string json =
+            """{"ready":false,"activeThreadCount":0,"supervisor":{"state":"waitingForCodexExit"}}""";
+
+        var status = TrayStatusParser.Parse(json);
+
+        Assert.Equal(
+            new TrayStatusSnapshot(
+                ContinuityHealth.Degraded,
+                0,
+                "Armed; waiting for the current Codex desktop to close naturally"),
+            status);
+        Assert.False(TrayStatusPresentation.ShowRecovery(status.Health));
+    }
+
+    [Fact]
     public void TreatsPreviouslyAttachedForeignBackendAsDegraded()
     {
         const string json =

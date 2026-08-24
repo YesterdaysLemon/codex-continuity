@@ -135,14 +135,18 @@ internal static class TrayStatusParser
             supervisor.TryGetProperty("state", out var stateElement)
                 ? stateElement.GetString()
                 : null;
-        var health = ready && supervisorState == "running"
-            ? ContinuityHealth.Healthy
-            : ready
-                ? ContinuityHealth.Degraded
-                : ContinuityHealth.Unavailable;
+        var health = supervisorState == "waitingForCodexExit"
+            ? ContinuityHealth.Degraded
+            : ready && supervisorState == "running"
+                ? ContinuityHealth.Healthy
+                : ready
+                    ? ContinuityHealth.Degraded
+                    : ContinuityHealth.Unavailable;
         var detail = health switch
         {
             ContinuityHealth.Healthy => "Backend ready",
+            ContinuityHealth.Degraded when supervisorState == "waitingForCodexExit" =>
+                "Armed; waiting for the current Codex desktop to close naturally",
             ContinuityHealth.Degraded => $"Backend ready; supervisor {supervisorState ?? "state unknown"}",
             ContinuityHealth.Unavailable => "Backend unavailable",
             _ => throw new ArgumentOutOfRangeException(nameof(health), health, null),

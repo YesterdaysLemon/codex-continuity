@@ -33,7 +33,8 @@ internal static class OwnedSupervisorRuntime
         Func<int, TimeSpan>? delayForFailure = null,
         Func<TimeSpan, CancellationToken, Task<bool>>? waitForRestart = null,
         TimeSpan? readinessTimeout = null,
-        BackendOwnershipChecks? ownershipChecks = null)
+        BackendOwnershipChecks? ownershipChecks = null,
+        Func<CancellationToken, Task>? waitBeforeFirstBackend = null)
     {
         Directory.CreateDirectory(stateDirectory);
         var logPath = ContinuityPaths.AppServerLogFile(stateDirectory);
@@ -134,6 +135,33 @@ internal static class OwnedSupervisorRuntime
         var publishStopped = true;
         try
         {
+            if (waitBeforeFirstBackend is not null)
+            {
+                statusStore.Write(Program.NewSupervisorStatus(
+                    "waitingForCodexExit",
+                    publicPort,
+                    codexHome,
+                    backendProcessId: null,
+                    consecutiveFailures,
+                    lastExitCode: null,
+                    nextRetryAtUtc: null,
+                    "Continuity is armed and waiting for the previously running Codex desktop processes to close naturally and leave a clear desktop interval."));
+                Console.WriteLine(
+                    "Continuity is armed; the supervised backend will start after the previously running Codex desktop closes naturally and no Store Codex process remains.");
+                try
+                {
+                    await waitBeforeFirstBackend(shutdownToken);
+                }
+                catch (OperationCanceledException) when (shutdownToken.IsCancellationRequested)
+                {
+                    return 0;
+                }
+                if (shutdownToken.IsCancellationRequested)
+                {
+                    return 0;
+                }
+            }
+
             while (!shutdownToken.IsCancellationRequested)
             {
                 relay.SetBackendPort(backendPort);
