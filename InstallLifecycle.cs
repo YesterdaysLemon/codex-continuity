@@ -126,6 +126,12 @@ internal static class ContinuityPaths
     internal static string UpdateLockFile(string stateDirectory) =>
         Path.Combine(stateDirectory, "update.lock");
 
+    internal static string UpdateApplyPolicyFile(string stateDirectory) =>
+        Path.Combine(stateDirectory, "update-apply-policy.json");
+
+    internal static string UpdateApplyStatusFile(string stateDirectory) =>
+        Path.Combine(stateDirectory, "update-apply-status.json");
+
     internal static string LifecycleLockFile(string stateDirectory) =>
         Path.Combine(stateDirectory, "lifecycle.lock");
 
