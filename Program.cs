@@ -177,6 +177,9 @@ internal static class Program
             EnvironmentVariableTarget.User);
         var healthy = await IsReadyAsync(port, TimeSpan.FromSeconds(1));
         var installState = LoadInstallState();
+        var desktopProcesses = CodexDesktopProcesses.Capture();
+        var retarget = DesktopRetargetCapability.Assess(
+            package?["version"]?.GetValue<string>());
 
         var result = new JsonObject
         {
@@ -190,6 +193,18 @@ internal static class Program
             ["inAppUpdaterDisabledForFutureLaunches"] = updaterDisabled == "false",
             ["continuityBackendReady"] = healthy,
             ["continuityBackendUrl"] = LoopbackEndpoint.WebSocketUrl(port),
+            ["desktopProcessObservation"] = new JsonObject
+            {
+                ["state"] = desktopProcesses.Kind.ToString(),
+                ["processCount"] = desktopProcesses.Processes.Count,
+                ["detail"] = desktopProcesses.Detail,
+            },
+            ["liveRetarget"] = new JsonObject
+            {
+                ["support"] = retarget.Support.ToString(),
+                ["activation"] = retarget.Activation,
+                ["evidence"] = retarget.Evidence,
+            },
             ["continuityInstallState"] = installState is null
                 ? null
                 : JsonSerializer.SerializeToNode(installState, JsonOptions),

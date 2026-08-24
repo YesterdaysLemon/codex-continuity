@@ -1,15 +1,23 @@
 # Reverse-engineering notes
 
-These observations were made read-only on 2026-08-20 against the Microsoft
-Store package `OpenAI.Codex_26.818.2872.0_x64__2p2nqsd0c76g0`. The Electron
-ASAR's JavaScript and package metadata were extracted to a temporary directory;
-no installed file, signature, or running process was modified.
+These observations were made read-only on 2026-08-20 and 2026-08-23 against the
+Microsoft Store packages `OpenAI.Codex_26.818.2872.0_x64__2p2nqsd0c76g0` and
+`OpenAI.Codex_26.818.4152.0_x64__2p2nqsd0c76g0`. The Electron ASAR's JavaScript
+and package metadata were extracted to a temporary directory; no installed
+file, signature, or running process was modified.
 
 ## Continuity seam
 
 - The desktop chooses its app-server WebSocket endpoint from
   `CODEX_APP_SERVER_WS_URL`, falling back to the host configuration's
   `websocket_url`. `CODEX_APP_SERVER_FORCE_CLI=1` bypasses that branch.
+- In build `26.818.4152.0`, the local connection is constructed once. Its
+  reconnect path reuses the URL captured in that transport object. No public
+  command, desktop IPC method, or deep link for replacing the local connection
+  was found. Remote-host registration can add another host, but it does not
+  retarget the existing local host.
+- Developer-console mutation or process-memory injection would be unsupported
+  in-process surgery and is outside Continuity's safety boundary.
 - The desktop's WebSocket transport advertises reconnect support. The public
   `codex app-server` command accepts `--listen ws://IP:PORT`, exposes `/readyz`
   and `/healthz`, and keeps thread state in the server rather than the client
