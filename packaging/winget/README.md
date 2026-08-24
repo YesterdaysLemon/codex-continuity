@@ -15,10 +15,10 @@ To reproduce a manifest set:
 
 ```powershell
 .\scripts\write-winget-manifests.ps1 `
-  -Version 0.3.0 `
-  -InstallerUrl https://github.com/YesterdaysLemon/codex-continuity/releases/download/v0.3.0/CodexContinuity-v0.3.0-Setup.exe `
+  -Version 0.4.0 `
+  -InstallerUrl https://github.com/YesterdaysLemon/codex-continuity/releases/download/v0.4.0/CodexContinuity-v0.4.0-Setup.exe `
   -InstallerSha256 <64-character-release-sha256> `
-  -ReleaseDate 2026-08-22 `
+  -ReleaseDate 2026-08-24 `
   -OutputDirectory .\artifacts\winget
 winget validate --manifest .\artifacts\winget --disable-interactivity
 ```

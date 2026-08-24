@@ -12,15 +12,15 @@ import {
 const workflowDirectory = new URL("../../.github/workflows/", import.meta.url);
 const sha = "a".repeat(40);
 const expectedAssetNames = [
-  "CodexContinuity-v0.3.0-win-x64.zip",
-  "CodexContinuity-v0.3.0-win-x64.zip.sha256",
+  "CodexContinuity-v0.4.0-win-x64.zip",
+  "CodexContinuity-v0.4.0-win-x64.zip.sha256",
   "CodexContinuity-win-x64.zip",
   "CodexContinuity-win-x64.zip.sha256",
-  "CodexContinuity-v0.3.0-Setup.exe",
-  "CodexContinuity-v0.3.0-Setup.exe.sha256",
+  "CodexContinuity-v0.4.0-Setup.exe",
+  "CodexContinuity-v0.4.0-Setup.exe.sha256",
   "CodexContinuity-Setup.exe",
   "CodexContinuity-Setup.exe.sha256",
-  "CodexContinuity-v0.3.0-winget-manifests.zip",
+  "CodexContinuity-v0.4.0-winget-manifests.zip",
   "install.ps1",
 ];
 
@@ -33,9 +33,9 @@ function input(overrides = {}) {
     repository: "YesterdaysLemon/codex-continuity",
     expectedSha: sha,
     remoteMain: sha,
-    supervisorVersion: "0.3.0",
-    trayVersion: "0.3.0",
-    siteVersion: "0.3.0",
+    supervisorVersion: "0.4.0",
+    trayVersion: "0.4.0",
+    siteVersion: "0.4.0",
     stableTags: ["v0.2.1"],
     tagSha: null,
     release: null,
@@ -80,11 +80,11 @@ test("planner creates only a new stable version at the exact green SHA", () => {
   assert.deepEqual(planContinuousRelease(input()), {
     action: "release",
     createTag: true,
-    reason: "v0.3.0 is a new stable version at the exact green revision.",
-    tag: "v0.3.0",
+    reason: "v0.4.0 is a new stable version at the exact green revision.",
+    tag: "v0.4.0",
   });
   assert.equal(
-    planContinuousRelease(input({ stableTags: ["v0.3.0"] })).action,
+    planContinuousRelease(input({ stableTags: ["v0.4.0"] })).action,
     "fail",
   );
   assert.equal(
@@ -105,7 +105,7 @@ test("planner CLI emits the same machine-readable release decision", () => {
 });
 
 test("planner skips a complete release and resumes every incomplete state", () => {
-  assert.deepEqual(expectedReleaseAssetNames("v0.3.0"), expectedAssetNames);
+  assert.deepEqual(expectedReleaseAssetNames("v0.4.0"), expectedAssetNames);
   const completeRelease = {
     isDraft: false,
     isPrerelease: false,
@@ -117,7 +117,7 @@ test("planner skips a complete release and resumes every incomplete state", () =
   );
   assert.equal(
     planContinuousRelease(input({
-      stableTags: ["v0.3.0", "v1.0.0"],
+      stableTags: ["v0.4.0", "v1.0.0"],
       tagSha: "b".repeat(40),
       release: completeRelease,
     })).action,
@@ -134,8 +134,8 @@ test("planner skips a complete release and resumes every incomplete state", () =
     assert.deepEqual(planContinuousRelease(input({ tagSha: sha, release })), {
       action: "release",
       createTag: false,
-      reason: "v0.3.0 is incomplete; resume the release pipeline.",
-      tag: "v0.3.0",
+      reason: "v0.4.0 is incomplete; resume the release pipeline.",
+      tag: "v0.4.0",
     });
   }
 
@@ -166,7 +166,8 @@ test("workflow binds the reusable release to the tested SHA", async () => {
 });
 
 test("release workflow preserves both entry points and the delivery contract", async () => {
-  const workflow = await readFile(new URL("release.yml", workflowDirectory), "utf8");
+  const workflow = (await readFile(new URL("release.yml", workflowDirectory), "utf8"))
+    .replaceAll("\r\n", "\n");
   const assetBlock = workflow.match(/\$assets = @\(([\s\S]*?)\n\s*\)/)?.[1] ?? "";
   const attestationBlock = workflow.match(
     /uses: actions\/attest@v4[\s\S]*?subject-path: \|\n([\s\S]*?)\n\s+- name:/,
