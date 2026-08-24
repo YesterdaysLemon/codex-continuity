@@ -59,11 +59,8 @@ internal sealed record BackendLeaseLoadResult(
 internal sealed class BackendLeaseStore(string path)
 {
     private const int MaximumBytes = 64 * 1024;
-    private static readonly JsonSerializerOptions SerializerOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = true,
-    };
+    private static readonly JsonSerializerOptions SerializerOptions =
+        ContinuityJsonSerializerPresets.CamelCaseIndented();
 
     internal BackendLeaseLoadResult Load()
     {

@@ -150,11 +150,8 @@ internal sealed record ContinuityUpdateApplyPolicyLoadResult(
 internal sealed class ContinuityUpdateApplyPolicyStore(string path)
 {
     private const int MaximumBytes = 16 * 1024;
-    private static readonly JsonSerializerOptions SerializerOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = true,
-    };
+    private static readonly JsonSerializerOptions SerializerOptions =
+        ContinuityJsonSerializerPresets.CamelCaseIndented();
 
     internal ContinuityUpdateApplyPolicyLoadResult Load()
     {
@@ -291,11 +288,8 @@ internal sealed class ContinuityUpdateApplyStatusStore(string path)
 {
     private const int MaximumBytes = 32 * 1024;
     private const int MaximumErrorCharacters = 2048;
-    private static readonly JsonSerializerOptions SerializerOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = true,
-    };
+    private static readonly JsonSerializerOptions SerializerOptions =
+        ContinuityJsonSerializerPresets.CamelCaseIndented();
 
     internal ContinuityUpdateApplyStatusLoadResult Load()
     {

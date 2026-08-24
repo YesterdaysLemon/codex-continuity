@@ -252,11 +252,8 @@ internal sealed class SupervisorStatusStore(string path)
     private const int MaximumStateCharacters = 64;
     private const int MaximumPathCharacters = 32767;
     private const int MaximumDetailCharacters = 4096;
-    private static readonly JsonSerializerOptions SerializerOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = true,
-    };
+    private static readonly JsonSerializerOptions SerializerOptions =
+        ContinuityJsonSerializerPresets.CamelCaseIndented();
 
     internal SupervisorStatusLoadResult Load()
     {

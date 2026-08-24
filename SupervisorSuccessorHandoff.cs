@@ -137,11 +137,8 @@ internal sealed record SupervisorSuccessorHandoffLoadResult(
 internal sealed class SupervisorSuccessorHandoffStore(string path)
 {
     private const int MaximumBytes = 64 * 1024;
-    private static readonly JsonSerializerOptions SerializerOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = true,
-    };
+    private static readonly JsonSerializerOptions SerializerOptions =
+        ContinuityJsonSerializerPresets.CamelCaseIndented();
 
     internal SupervisorSuccessorHandoffLoadResult Load(DateTimeOffset nowUtc)
     {
