@@ -16,6 +16,119 @@ public sealed class SupervisorRelayTests : IDisposable
     private readonly ConcurrentQueue<HarnessIdentity> harnesses = new();
 
     [Fact]
+    public async Task InitialDesktopGateReservesEndpointBeforeStartingBackend()
+    {
+        var publicPort = FindAvailablePort();
+        var fixtureStartedPath = Path.Combine(root, "armed-backend-started.txt");
+        var releaseDesktop = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var waitPlan = CodexDesktopProcesses.ParseWaitPlan(
+            CodexDesktopProcesses.BuildWaitArguments([]).ToArray());
+        var backendStarts = 0;
+        using var shutdown = new CancellationTokenSource();
+
+        var supervisor = OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            shutdown.Token,
+            port =>
+            {
+                Interlocked.Increment(ref backendStarts);
+                return StartHarnessBackend(port, fixtureStartedPath);
+            },
+            waitBeforeFirstBackend: cancellationToken =>
+                CodexDesktopProcesses.WaitForNaturalClosureAsync(
+                    waitPlan.Processes,
+                    cancellationToken,
+                    observe: () => releaseDesktop.Task.IsCompleted
+                        ? new(
+                            CodexDesktopObservationKind.NotRunning,
+                            [],
+                            "The racing desktop closed naturally.")
+                        : new(
+                            CodexDesktopObservationKind.Running,
+                            [new CodexDesktopProcessIdentity(99, 9900)],
+                            "A desktop raced the initial empty snapshot."),
+                    pollInterval: TimeSpan.FromMilliseconds(10)));
+        try
+        {
+            var waiting = await ReadStatusAsync("waitingForCodexExit");
+            Assert.True(waitPlan.WaitForNaturalClosure);
+            Assert.Equal(0, Volatile.Read(ref backendStarts));
+            Assert.Null(waiting.BackendProcessId);
+            Assert.False(CanBind(publicPort));
+            Assert.Equal(
+                BackendLeaseLoadKind.Missing,
+                new BackendLeaseStore(ContinuityPaths.BackendLeaseFile(root)).Load().Kind);
+
+            releaseDesktop.SetResult();
+            await WaitForFileAsync(fixtureStartedPath);
+            await ReadStatusAsync("running");
+            Assert.Equal(1, Volatile.Read(ref backendStarts));
+            Assert.StartsWith("backend:", await ReadWhenReadyAsync(publicPort));
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await supervisor.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+    }
+
+    [Fact]
+    public async Task CancellationWhileArmedNeverStartsBackend()
+    {
+        var publicPort = FindAvailablePort();
+        var backendStarts = 0;
+        using var shutdown = new CancellationTokenSource();
+
+        var supervisor = OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            shutdown.Token,
+            _ =>
+            {
+                Interlocked.Increment(ref backendStarts);
+                throw new InvalidOperationException("Backend must remain stopped while armed.");
+            },
+            waitBeforeFirstBackend: cancellationToken =>
+                Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
+        await ReadStatusAsync("waitingForCodexExit");
+
+        shutdown.Cancel();
+
+        Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal(0, Volatile.Read(ref backendStarts));
+        Assert.True(CanBind(publicPort));
+    }
+
+    [Fact]
+    public async Task CancellationReturnedByArmedWaitNeverStartsBackend()
+    {
+        var publicPort = FindAvailablePort();
+        var backendStarts = 0;
+        using var shutdown = new CancellationTokenSource();
+
+        var supervisor = OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            shutdown.Token,
+            _ =>
+            {
+                Interlocked.Increment(ref backendStarts);
+                throw new InvalidOperationException("Backend must not start after cancellation.");
+            },
+            waitBeforeFirstBackend: _ =>
+            {
+                shutdown.Cancel();
+                return Task.CompletedTask;
+            });
+
+        Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal(0, Volatile.Read(ref backendStarts));
+        Assert.True(CanBind(publicPort));
+    }
+
+    [Fact]
     public async Task GatesPublicEndpointUntilPrivateBackendIsReady()
     {
         var publicPort = FindAvailablePort();
@@ -158,7 +271,9 @@ public sealed class SupervisorRelayTests : IDisposable
                 return StartHarnessBackend(
                     port,
                     Path.Combine(root, "unexpected-replacement.txt"));
-            });
+            },
+            waitBeforeFirstBackend: cancellationToken =>
+                Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
         try
         {
             Assert.Equal($"backend:{backendPort}", await ReadWhenReadyAsync(publicPort));

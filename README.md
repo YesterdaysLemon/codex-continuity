@@ -26,6 +26,11 @@ self-test, and installs it without restarting Codex:
 $i="$env:TEMP\codex-continuity-install.ps1"; curl.exe -fsSL https://github.com/YesterdaysLemon/codex-continuity/releases/latest/download/install.ps1 -o $i; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $i -StartNow
 ```
 
+If Codex is already open, Continuity reserves its endpoint but leaves the
+second app-server off. It waits for those exact desktop processes to close in
+their own time, then starts the supervised backend for the next natural launch.
+It never asks you to restart Codex.
+
 Agents and automation can inspect the exact plan without downloading or
 changing anything:
 
@@ -56,6 +61,7 @@ without finding a versioned executable:
 ```powershell
 CodexContinuity status
 CodexContinuity probe
+CodexContinuity attach
 CodexContinuity repair
 CodexContinuity uninstall
 ```
@@ -82,6 +88,8 @@ Codex desktop UI  ── reconnectable WebSocket ──  supervised app-server
 ## What it does
 
 - Keeps the app-server in a user-level background supervisor.
+- Arms safely during first install when Codex is already open, without starting
+  a competing app-server or asking for a relaunch.
 - Shows optional health, active-agent count, and update status in the Windows
   notification area; the tray is a separate process and can safely exit.
 - Checks for stable Continuity releases at supervisor start and every four
@@ -163,9 +171,10 @@ For the advanced portable path:
 .\CodexContinuity.exe install --start-now
 ```
 
-3. Let work owned by the old bundled backend finish, then restart the Codex
-   desktop once. That is the one-time migration boundary.
-4. Start a small task and verify:
+3. Keep using Codex normally. If it was already open, `status` reports that
+   Continuity is armed. The supervised backend starts only after those existing
+   desktop processes close naturally; Continuity never requests a relaunch.
+4. On a later natural launch, start a small task and verify:
 
 ```powershell
 .\CodexContinuity.exe status
@@ -204,8 +213,9 @@ the executable that currently owns active agents.
 | `probe` | Inspect desktop version, update manifest, and configuration. |
 | `update` | Check stable releases now and safely stage a verified newer build. |
 | `serve` | Run the background supervisor. |
-| `install --start-now` | Configure future launches and start the supervisor. |
+| `install --start-now` | Configure future launches; start immediately or arm until the currently open desktop closes naturally. |
 | `install --no-tray` | Install headlessly without the notification-area controller. |
+| `attach` | Start or safely arm the installed supervisor without closing, signaling, or relaunching Codex. |
 | `repair` | Reapply the persisted custom port and tray choice without stopping work. |
 | `uninstall` | Restore owned configuration now and remove installed files at next sign-in, without killing work. |
 | `rollback` | Select the previous known-good build for the next safe supervisor start. |
@@ -229,6 +239,14 @@ then built from inside that surviving thread.
 The self-test separately creates a thread on a temporary backend, disconnects,
 reconnects, and verifies the server still owns the thread. It never touches the
 production desktop or user conversations.
+
+For first attachment, inspected desktop builds do not expose a supported
+in-process retarget command. Continuity therefore snapshots the identities of
+the already-running Store Codex processes, binds only its gated public relay,
+and keeps the private backend off until those identities disappear and it
+observes a naturally empty desktop interval. If another desktop opens before
+that interval, Continuity stays armed rather than guess that the new process is
+safe; a later natural close lets activation continue.
 
 ## Build and prove the transport
 

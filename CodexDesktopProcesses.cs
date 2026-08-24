@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 
 namespace CodexContinuity;
 
@@ -22,6 +23,10 @@ internal sealed record CodexDesktopObservation(
     IReadOnlyList<CodexDesktopProcessIdentity> Processes,
     string Detail);
 
+internal sealed record CodexDesktopWaitPlan(
+    bool WaitForNaturalClosure,
+    IReadOnlyList<CodexDesktopProcessIdentity> Processes);
+
 internal enum ObservedProcessState
 {
     Exited,
@@ -31,6 +36,10 @@ internal enum ObservedProcessState
 
 internal static class CodexDesktopProcesses
 {
+    internal const string WaitArgument = "--wait-for-codex-process";
+    internal const string NaturalClosureArgument = "--wait-for-codex-natural-closure";
+
+    private const int MaximumWaitProcesses = 64;
     private const string DesktopProcessName = "ChatGPT";
     private const string StorePackagePathMarker = @"\WindowsApps\OpenAI.Codex_";
 
@@ -40,6 +49,13 @@ internal static class CodexDesktopProcesses
     internal static CodexDesktopObservation Evaluate(
         IReadOnlyList<CodexDesktopProcessSnapshot> snapshots)
     {
+        if (snapshots.Count > MaximumWaitProcesses)
+        {
+            return new(
+                CodexDesktopObservationKind.Unsafe,
+                [],
+                "Too many ChatGPT processes were observed to identify first attachment safely.");
+        }
         if (snapshots.Any(snapshot =>
                 snapshot.ExecutablePath is null || snapshot.StartedAtUtcTicks is null))
         {
@@ -66,6 +82,63 @@ internal static class CodexDesktopProcesses
                 $"Observed {processes.Length} process(es) from the running Microsoft Store Codex desktop.");
     }
 
+    internal static IReadOnlyList<string> BuildWaitArguments(
+        IReadOnlyList<CodexDesktopProcessIdentity> processes)
+    {
+        ValidateCount(processes.Count);
+        return new[] { NaturalClosureArgument }.Concat(
+            processes.Distinct().SelectMany(process => new[]
+            {
+                WaitArgument,
+                FormattableString.Invariant($"{process.ProcessId}:{process.StartedAtUtcTicks}"),
+            })).ToArray();
+    }
+
+    internal static IReadOnlyList<CodexDesktopProcessIdentity> ParseWaitArguments(string[] args)
+    {
+        var processes = new List<CodexDesktopProcessIdentity>();
+        for (var index = 0; index < args.Length; index++)
+        {
+            if (!args[index].Equals(WaitArgument, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            if (++index >= args.Length)
+            {
+                throw new ArgumentException($"{WaitArgument} requires a process identity.");
+            }
+
+            var parts = args[index].Split(':', 2, StringSplitOptions.None);
+            if (parts.Length != 2 ||
+                !int.TryParse(
+                    parts[0],
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out var processId) ||
+                !long.TryParse(
+                    parts[1],
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out var startedAtUtcTicks) ||
+                processId <= 0 || startedAtUtcTicks <= 0)
+            {
+                throw new ArgumentException($"{WaitArgument} has an invalid process identity.");
+            }
+            processes.Add(new(processId, startedAtUtcTicks));
+            ValidateCount(processes.Count);
+        }
+        return processes.Distinct().ToArray();
+    }
+
+    internal static CodexDesktopWaitPlan ParseWaitPlan(string[] args)
+    {
+        var processes = ParseWaitArguments(args);
+        return new(
+            args.Contains(NaturalClosureArgument, StringComparer.OrdinalIgnoreCase) ||
+                processes.Count > 0,
+            processes);
+    }
+
     internal static async Task WaitForExitAsync(
         IReadOnlyList<CodexDesktopProcessIdentity> processes,
         CancellationToken cancellationToken,
@@ -85,9 +158,34 @@ internal static class CodexDesktopProcesses
         }
     }
 
+    internal static async Task WaitForNaturalClosureAsync(
+        IReadOnlyList<CodexDesktopProcessIdentity> processes,
+        CancellationToken cancellationToken,
+        Func<CodexDesktopProcessIdentity, ObservedProcessState>? inspect = null,
+        Func<CodexDesktopObservation>? observe = null,
+        TimeSpan? pollInterval = null)
+    {
+        var interval = pollInterval ?? TimeSpan.FromMilliseconds(500);
+        await WaitForExitAsync(processes, cancellationToken, inspect, interval);
+        observe ??= Capture;
+        while (observe().Kind != CodexDesktopObservationKind.NotRunning)
+        {
+            await Task.Delay(interval, cancellationToken);
+        }
+    }
+
     private static bool IsStoreCodexDesktop(string executablePath) =>
         Path.GetFileName(executablePath).Equals("ChatGPT.exe", StringComparison.OrdinalIgnoreCase) &&
         executablePath.Contains(StorePackagePathMarker, StringComparison.OrdinalIgnoreCase);
+
+    private static void ValidateCount(int count)
+    {
+        if (count > MaximumWaitProcesses)
+        {
+            throw new ArgumentException(
+                $"At most {MaximumWaitProcesses} Codex desktop processes may be observed.");
+        }
+    }
 
     private static ObservedProcessState Inspect(CodexDesktopProcessIdentity identity)
     {

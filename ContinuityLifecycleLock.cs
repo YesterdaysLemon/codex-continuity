@@ -33,7 +33,7 @@ internal static class ContinuityLifecycleLock
             catch (IOException exception)
             {
                 throw new InvalidOperationException(
-                    "Another Continuity install, uninstall, rollback, or automatic update is already in progress.",
+                    "Another Continuity lifecycle change is already in progress.",
                     exception);
             }
         }

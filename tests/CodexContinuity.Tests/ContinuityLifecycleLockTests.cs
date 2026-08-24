@@ -18,7 +18,7 @@ public sealed class ContinuityLifecycleLockTests
             var exception = Assert.Throws<InvalidOperationException>(() =>
                 ContinuityLifecycleLock.Acquire(root, TimeSpan.Zero));
 
-            Assert.Contains("already in progress", exception.Message);
+            Assert.Contains("lifecycle change is already in progress", exception.Message);
         }
         finally
         {

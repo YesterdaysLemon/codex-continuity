@@ -67,6 +67,8 @@ test("server-renders the Codex Continuity launch page", async () => {
   assert.match(html, /WIN11 VERIFIED/);
   assert.match(html, /One command\./);
   assert.match(html, /No forced restart\./);
+  assert.match(html, /waits for a natural close/i);
+  assert.match(html, /never asks for a\s+restart/i);
   assert.match(html, /CodexContinuity status/);
   assert.match(html, /Files leave at next sign-in/);
   assert.match(html, /there is no macOS\s+or Linux build today/i);

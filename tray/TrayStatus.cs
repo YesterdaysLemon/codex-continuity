@@ -13,11 +13,11 @@ internal enum ContinuityHealth
 
 internal sealed record TrayStatusSnapshot(
     ContinuityHealth Health,
-    int ActiveAgentCount,
+    int? ActiveAgentCount,
     string Detail)
 {
     internal static TrayStatusSnapshot Unavailable(string detail) =>
-        new(ContinuityHealth.Unavailable, 0, detail);
+        new(ContinuityHealth.Unavailable, null, detail);
 }
 
 internal sealed record TrayCommandResult(int ExitCode, string Output, string Error);
@@ -127,22 +127,28 @@ internal static class TrayStatusParser
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
         var ready = root.TryGetProperty("ready", out var readyElement) && readyElement.GetBoolean();
-        var activeAgentCount = root.TryGetProperty("activeThreadCount", out var countElement)
+        var activeAgentCount = root.TryGetProperty("activeThreadCount", out var countElement) &&
+            countElement.ValueKind == JsonValueKind.Number
             ? countElement.GetInt32()
-            : 0;
+            : (int?)null;
         var supervisorState = root.TryGetProperty("supervisor", out var supervisor) &&
-            supervisor.ValueKind == JsonValueKind.Object &&
-            supervisor.TryGetProperty("state", out var stateElement)
+            supervisor.ValueKind == JsonValueKind.Object && (
+                supervisor.TryGetProperty("state", out var stateElement) ||
+                supervisor.TryGetProperty("State", out stateElement))
                 ? stateElement.GetString()
                 : null;
-        var health = ready && supervisorState == "running"
-            ? ContinuityHealth.Healthy
-            : ready
-                ? ContinuityHealth.Degraded
-                : ContinuityHealth.Unavailable;
+        var health = supervisorState == "waitingForCodexExit"
+            ? ContinuityHealth.Degraded
+            : ready && supervisorState == "running"
+                ? ContinuityHealth.Healthy
+                : ready
+                    ? ContinuityHealth.Degraded
+                    : ContinuityHealth.Unavailable;
         var detail = health switch
         {
             ContinuityHealth.Healthy => "Backend ready",
+            ContinuityHealth.Degraded when supervisorState == "waitingForCodexExit" =>
+                "Armed; waiting for the current Codex desktop to close naturally",
             ContinuityHealth.Degraded => $"Backend ready; supervisor {supervisorState ?? "state unknown"}",
             ContinuityHealth.Unavailable => "Backend unavailable",
             _ => throw new ArgumentOutOfRangeException(nameof(health), health, null),
@@ -232,16 +238,23 @@ internal sealed class TrayStatusClient(
         var port = ReadInstalledPort();
         try
         {
-            var result = await RunProcessAsync(
+            var result = await processRunner(
                 supervisorExecutable,
                 ["status", "--port", port.ToString()],
                 cancellationToken);
-            return result.ExitCode == 0
-                ? TrayStatusParser.Parse(result.Output)
-                : TrayStatusSnapshot.Unavailable(
-                    string.IsNullOrWhiteSpace(result.Error)
-                        ? "Backend unavailable"
-                        : result.Error.Trim());
+            if (!string.IsNullOrWhiteSpace(result.Output))
+            {
+                var parsed = TrayStatusParser.Parse(result.Output);
+                if (result.ExitCode == 0 ||
+                    parsed.Detail.StartsWith("Armed;", StringComparison.Ordinal))
+                {
+                    return parsed;
+                }
+            }
+            return TrayStatusSnapshot.Unavailable(
+                string.IsNullOrWhiteSpace(result.Error)
+                    ? "Backend unavailable"
+                    : result.Error.Trim());
         }
         catch (Exception exception) when (
             exception is IOException or InvalidOperationException or Win32Exception or JsonException)

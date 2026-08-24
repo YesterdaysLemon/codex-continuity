@@ -118,7 +118,8 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         {
             var status = await statusClient.ReadAsync(shutdown.Token);
             healthItem.Text = status.Detail;
-            agentsItem.Text = $"Active agents: {status.ActiveAgentCount}";
+            var activeAgents = status.ActiveAgentCount?.ToString() ?? "unknown";
+            agentsItem.Text = $"Active agents: {activeAgents}";
             notifyIcon.Icon = status.Health switch
             {
                 ContinuityHealth.Healthy => healthyIcon,
@@ -127,7 +128,7 @@ internal sealed class ContinuityTrayContext : ApplicationContext
                 _ => throw new ArgumentOutOfRangeException(nameof(status), status.Health, null),
             };
             var state = status.Health.ToString().ToLowerInvariant();
-            notifyIcon.Text = $"Codex Continuity — {state} — {status.ActiveAgentCount} active agents";
+            notifyIcon.Text = $"Codex Continuity — {state} — {activeAgents} active agents";
             recoveryItem.Visible = TrayStatusPresentation.ShowRecovery(status.Health);
             var update = await statusClient.ReadUpdateAsync(shutdown.Token);
             updateItem.Text = TrayStatusPresentation.UpdateCounts(update);

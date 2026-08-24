@@ -46,6 +46,29 @@ public sealed class InstallPortSafetyTests : IDisposable
     }
 
     [Fact]
+    public async Task ManagedUninstallPreservesWhileVerifiedSupervisorIsActive()
+    {
+        var managedReadyProbeCount = 0;
+        var supervisorBecameActive = false;
+
+        var policy = await Program.ResolveUninstallReconnectPolicyAsync(
+            managedInstalledPort: 45123,
+            legacyInstalledPort: null,
+            configuredUrl: LoopbackEndpoint.WebSocketUrl(45123),
+            _ =>
+            {
+                managedReadyProbeCount++;
+                supervisorBecameActive = true;
+                return Task.FromResult(false);
+            },
+            _ => Task.FromResult(false),
+            port => port == 45123 && supervisorBecameActive);
+
+        Assert.Equal(UninstallReconnectPolicy.PreserveUntilNextSignIn, policy);
+        Assert.Equal(1, managedReadyProbeCount);
+    }
+
+    [Fact]
     public async Task LegacyUninstallUsesTheLegacyReadinessProbe()
     {
         var policy = await Program.ResolveUninstallReconnectPolicyAsync(

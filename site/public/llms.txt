@@ -22,7 +22,7 @@ After reviewing the plan:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $i -StartNow
 ```
 
-Use `-NoTray` for a headless install. The bootstrapper verifies the release SHA-256 before execution and never restarts the Codex desktop app.
+Use `-NoTray` for a headless install. The bootstrapper verifies the release SHA-256 before execution and never restarts the Codex desktop app. If Codex is already open, Continuity reserves its gated endpoint, keeps the second app-server off, and waits for the observed desktop processes to close naturally.
 
 ## Installed CLI, verification, and removal
 
@@ -31,6 +31,7 @@ Installation adds `CodexContinuity` to the user PATH. Open a new PowerShell wind
 ```powershell
 CodexContinuity status
 CodexContinuity probe
+CodexContinuity attach
 CodexContinuity repair
 CodexContinuity uninstall
 ```
