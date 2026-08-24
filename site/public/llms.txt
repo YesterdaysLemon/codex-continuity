@@ -32,11 +32,14 @@ Installation adds `CodexContinuity` to the user PATH. Open a new PowerShell wind
 CodexContinuity status
 CodexContinuity probe
 CodexContinuity attach
+CodexContinuity update-policy --enable
 CodexContinuity repair
 CodexContinuity uninstall
 ```
 
-Uninstall restores only configuration still owned by Continuity and never stops a running backend. Installed files and logs are removed at the next Windows sign-in. The supported v0.4.0 release target is Windows 11 x64 only; no macOS or Linux build is available. See the repository README and SECURITY.md before production use.
+Automatic activation remains off by default. `update-policy --enable` opts into applying an already verified staged Continuity build only after a 30-second stable idle proof. The supervisor changes while the private backend and Codex desktop remain running; exact thread IDs, desktop identity, and reconnection must verify or Continuity rolls back. Re-run the command to retry a failed generation, or use `update-policy --disable` to keep updates staged.
+
+Uninstall restores only configuration still owned by Continuity and never stops a running backend. Installed files and logs are removed at the next Windows sign-in. The supported v0.5.0 release target is Windows 11 x64 only; no macOS or Linux build is available. See the repository README and SECURITY.md before production use.
 
 ## Canonical links
 
