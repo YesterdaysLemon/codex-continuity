@@ -71,6 +71,69 @@ public sealed class TrayStatusParserTests
     }
 
     [Fact]
+    public void ParsesActualArmedCommandPayloadWithUnknownCounts()
+    {
+        var supervisor = new SupervisorStatus(
+            State: "waitingForCodexExit",
+            SupervisorProcessId: Environment.ProcessId,
+            BackendProcessId: null,
+            Port: 45123,
+            CodexHome: "bounded-home",
+            ConsecutiveFailures: 0,
+            LastExitCode: null,
+            UpdatedAtUtc: DateTimeOffset.UtcNow,
+            NextRetryAtUtc: null,
+            Detail: "Continuity is armed.");
+
+        var status = TrayStatusParser.Parse(
+            CodexContinuity.Program.WaitingStatusJson(supervisor));
+
+        Assert.Equal(
+            new TrayStatusSnapshot(
+                ContinuityHealth.Degraded,
+                null,
+                "Armed; waiting for the current Codex desktop to close naturally"),
+            status);
+        Assert.False(TrayStatusPresentation.ShowRecovery(status.Health));
+    }
+
+    [Fact]
+    public async Task TrayAcceptsArmedPayloadWithNonReadyExitCode()
+    {
+        var executable = Path.GetTempFileName();
+        var supervisor = new SupervisorStatus(
+            State: "waitingForCodexExit",
+            SupervisorProcessId: Environment.ProcessId,
+            BackendProcessId: null,
+            Port: TrayStatusClient.DefaultPort,
+            CodexHome: "bounded-home",
+            ConsecutiveFailures: 0,
+            LastExitCode: null,
+            UpdatedAtUtc: DateTimeOffset.UtcNow,
+            NextRetryAtUtc: null,
+            Detail: "Continuity is armed.");
+        try
+        {
+            var client = new TrayStatusClient(
+                executable,
+                mutationProcessRunner: (_, _, _) => Task.FromResult(new TrayCommandResult(
+                    2,
+                    CodexContinuity.Program.WaitingStatusJson(supervisor),
+                    string.Empty)));
+
+            var status = await client.ReadAsync(CancellationToken.None);
+
+            Assert.Equal(ContinuityHealth.Degraded, status.Health);
+            Assert.Null(status.ActiveAgentCount);
+            Assert.False(TrayStatusPresentation.ShowRecovery(status.Health));
+        }
+        finally
+        {
+            File.Delete(executable);
+        }
+    }
+
+    [Fact]
     public void TreatsPreviouslyAttachedForeignBackendAsDegraded()
     {
         const string json =

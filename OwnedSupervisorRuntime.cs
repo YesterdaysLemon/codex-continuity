@@ -34,7 +34,8 @@ internal static class OwnedSupervisorRuntime
         Func<TimeSpan, CancellationToken, Task<bool>>? waitForRestart = null,
         TimeSpan? readinessTimeout = null,
         BackendOwnershipChecks? ownershipChecks = null,
-        Func<CancellationToken, Task>? waitBeforeFirstBackend = null)
+        Func<Task, CancellationToken, Task>? waitBeforeFirstBackend = null,
+        Func<TcpClient, bool>? gatedClientAdmission = null)
     {
         Directory.CreateDirectory(stateDirectory);
         var logPath = ContinuityPaths.AppServerLogFile(stateDirectory);
@@ -105,7 +106,8 @@ internal static class OwnedSupervisorRuntime
                     return processId > 0 && (connectedBackend is null
                         ? ownershipChecks.IsListenerOwnedBy(candidatePort, processId)
                         : ownershipChecks.IsConnectionAcceptedBy(connectedBackend, processId));
-                });
+                },
+                gatedClientAdmission: gatedClientAdmission);
         }
         catch (System.Net.Sockets.SocketException exception) when (
             exception.SocketErrorCode == System.Net.Sockets.SocketError.AddressAlreadyInUse)
@@ -135,7 +137,7 @@ internal static class OwnedSupervisorRuntime
         var publishStopped = true;
         try
         {
-            if (waitBeforeFirstBackend is not null)
+            if (waitBeforeFirstBackend is not null && recoveredBackend is null)
             {
                 statusStore.Write(Program.NewSupervisorStatus(
                     "waitingForCodexExit",
@@ -145,12 +147,14 @@ internal static class OwnedSupervisorRuntime
                     consecutiveFailures,
                     lastExitCode: null,
                     nextRetryAtUtc: null,
-                    "Continuity is armed and waiting for the previously running Codex desktop processes to close naturally and leave a clear desktop interval."));
+                    "Continuity is armed and waiting for the previously running Codex desktop processes to close naturally. A later desktop may prove safe inheritance by connecting to the reserved endpoint."));
                 Console.WriteLine(
-                    "Continuity is armed; the supervised backend will start after the previously running Codex desktop closes naturally and no Store Codex process remains.");
+                    "Continuity is armed; the supervised backend will start after the previously running Codex desktop closes naturally and either no Store Codex process remains or a later desktop proves it inherited the reserved endpoint.");
                 try
                 {
-                    await waitBeforeFirstBackend(shutdownToken);
+                    await waitBeforeFirstBackend(
+                        relay.WaitForVerifiedGatedClientAsync(shutdownToken),
+                        shutdownToken);
                 }
                 catch (OperationCanceledException) when (shutdownToken.IsCancellationRequested)
                 {

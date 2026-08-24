@@ -198,6 +198,29 @@ public sealed class WindowsProcessGroupTests
             int.MaxValue));
     }
 
+    [Fact]
+    public async Task IdentifiesTheProcessThatInitiatedALoopbackConnection()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var client = new TcpClient();
+        var accept = listener.AcceptTcpClientAsync();
+
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        using var accepted = await accept;
+
+        Assert.True(SpinWait.SpinUntil(
+            () => WindowsTcpPortOwnership.TryGetLoopbackConnectionInitiatorProcessId(
+                accepted,
+                out _),
+            TimeSpan.FromSeconds(1)));
+        Assert.True(WindowsTcpPortOwnership.TryGetLoopbackConnectionInitiatorProcessId(
+            accepted,
+            out var processId));
+        Assert.Equal(Environment.ProcessId, processId);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

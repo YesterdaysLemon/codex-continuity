@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Net.Sockets;
 
 namespace CodexContinuity;
 
@@ -146,6 +147,7 @@ internal static class CodexDesktopProcesses
     internal static async Task WaitForNaturalClosureAsync(
         IReadOnlyList<CodexDesktopProcessIdentity> processes,
         CancellationToken cancellationToken,
+        Task? verifiedRetargetConnection = null,
         Func<CodexDesktopProcessIdentity, ObservedProcessState>? inspect = null,
         Func<CodexDesktopObservation>? observe = null,
         TimeSpan? pollInterval = null)
@@ -155,8 +157,33 @@ internal static class CodexDesktopProcesses
         observe ??= Capture;
         while (observe().Kind != CodexDesktopObservationKind.NotRunning)
         {
+            if (verifiedRetargetConnection?.IsCompletedSuccessfully == true)
+            {
+                return;
+            }
             await Task.Delay(interval, cancellationToken);
         }
+    }
+
+    internal static bool IsVerifiedNewDesktopConnection(
+        TcpClient connection,
+        IReadOnlyList<CodexDesktopProcessIdentity> initialProcesses)
+    {
+        if (!WindowsTcpPortOwnership.TryGetLoopbackConnectionInitiatorProcessId(
+                connection,
+                out var processId))
+        {
+            return false;
+        }
+
+        var observation = Capture();
+        if (observation.Kind != CodexDesktopObservationKind.Running)
+        {
+            return false;
+        }
+        var candidate = observation.Processes.FirstOrDefault(process =>
+            process.ProcessId == processId);
+        return candidate is not null && !initialProcesses.Contains(candidate);
     }
 
     private static bool IsStoreCodexDesktop(string executablePath) =>

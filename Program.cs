@@ -11,6 +11,7 @@ namespace CodexContinuity;
 internal static class Program
 {
     private const int DefaultPort = LoopbackEndpoint.DefaultPort;
+    private const int StatusArmedExit = 2;
     private const int StatusControlCExit = unchecked((int)0xC000013A);
     private const string UpdateManifestUrl =
         "https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json";
@@ -227,18 +228,8 @@ internal static class Program
                 SupervisorCompatibilityGuard.Inspect(supervisorStatus) ==
                     RecordedSupervisorState.Active)
             {
-                var waiting = new JsonObject
-                {
-                    ["ready"] = false,
-                    ["threadCount"] = 0,
-                    ["activeThreadCount"] = 0,
-                    ["activeThreads"] = new JsonArray(),
-                    ["supervisor"] = JsonSerializer.SerializeToNode(
-                        SupervisorStatusForDiagnostics(supervisorStatus),
-                        JsonOptions),
-                };
-                Console.WriteLine(waiting.ToJsonString(JsonOptions));
-                return 0;
+                Console.WriteLine(WaitingStatusJson(supervisorStatus));
+                return StatusArmedExit;
             }
             return Fail($"No ready continuity backend at {LoopbackEndpoint.WebSocketUrl(port)}.");
         }
@@ -332,9 +323,16 @@ internal static class Program
             Fail,
             waitBeforeFirstBackend: desktopProcesses.Count == 0
                 ? null
-                : cancellationToken => CodexDesktopProcesses.WaitForNaturalClosureAsync(
+                : (verifiedRetargetConnection, cancellationToken) =>
+                    CodexDesktopProcesses.WaitForNaturalClosureAsync(
                     desktopProcesses,
-                    cancellationToken));
+                    cancellationToken,
+                    verifiedRetargetConnection),
+            gatedClientAdmission: desktopProcesses.Count == 0
+                ? null
+                : connection => CodexDesktopProcesses.IsVerifiedNewDesktopConnection(
+                    connection,
+                    desktopProcesses));
     }
 
     internal static Task<int> ServeAsync(int port, string stateDirectory) =>
@@ -357,13 +355,15 @@ internal static class Program
         InstallCoordinator coordinator,
         Func<string, string, CancellationToken, Task> runUpdates,
         Func<string, int> reportFailure,
-        Func<CancellationToken, Task>? waitBeforeFirstBackend = null) => ServeAsync(
+        Func<Task, CancellationToken, Task>? waitBeforeFirstBackend = null,
+        Func<TcpClient, bool>? gatedClientAdmission = null) => ServeAsync(
             port,
             stateDirectory,
             ProductionSupervisorCompatibilityScope(lifecycleStateDirectories, coordinator),
             runUpdates,
             reportFailure,
-            waitBeforeFirstBackend: waitBeforeFirstBackend);
+            waitBeforeFirstBackend: waitBeforeFirstBackend,
+            gatedClientAdmission: gatedClientAdmission);
 
     internal static Task<int> ServeAsync(
         int port,
@@ -395,7 +395,8 @@ internal static class Program
             CancellationToken,
             Func<int, WindowsProcessGroup>,
             Task<int>>? runOwnedSupervisor = null,
-        Func<CancellationToken, Task>? waitBeforeFirstBackend = null)
+        Func<Task, CancellationToken, Task>? waitBeforeFirstBackend = null,
+        Func<TcpClient, bool>? gatedClientAdmission = null)
     {
         using var supervisorLock = TryAcquireSupervisorLock(stateDirectory);
         if (supervisorLock is null)
@@ -434,7 +435,8 @@ internal static class Program
                 backendPort => StartAppServer(
                     FindCodexExecutable(persistedEnvironmentOnly: true),
                     backendPort),
-                waitBeforeFirstBackend: waitBeforeFirstBackend);
+                waitBeforeFirstBackend: waitBeforeFirstBackend,
+                gatedClientAdmission: gatedClientAdmission);
         }
         if (waitBeforeFirstBackend is not null)
         {
@@ -550,16 +552,6 @@ internal static class Program
             port,
             installedPort => IsReadyAsync(installedPort, TimeSpan.FromSeconds(1)));
         var legacyInstalledPort = portSelection.LegacyInstalledPort;
-        if (existingState is null && legacyInstalledPort is null)
-        {
-            var package = await ReadInstalledPackageAsync();
-            var installedDesktopVersion = package?["version"]?.GetValue<string>();
-            if (!DesktopRetargetCapability.IsFirstAttachmentVerified(installedDesktopVersion))
-            {
-                throw new InvalidOperationException(
-                    $"Codex desktop build {installedDesktopVersion ?? "unknown"} has not been verified for safe first attachment. No installation settings were changed.");
-            }
-        }
         var endpointOwnership = ExistingEndpointOwnership.NotReady;
         if (startNow && await IsReadyAsync(port, TimeSpan.FromSeconds(1)))
         {
@@ -569,6 +561,17 @@ internal static class Program
                     coordinator.DetectLegacyInstalledPort() == port
                     ? ExistingEndpointOwnership.Legacy
                     : ExistingEndpointOwnership.Foreign;
+        }
+        FirstAttachmentPlan? firstAttachmentPlan = null;
+        if (startNow && endpointOwnership is not (
+                ExistingEndpointOwnership.Managed or ExistingEndpointOwnership.Legacy))
+        {
+            firstAttachmentPlan = await PlanFirstAttachmentAsync();
+            if (firstAttachmentPlan.Action == FirstAttachmentAction.Defer)
+            {
+                throw new InvalidOperationException(
+                    $"Live attachment is unavailable: {firstAttachmentPlan.Detail} No installation settings were changed.");
+            }
         }
         InstallOutcome Install() => coordinator.Install(
             executable,
@@ -617,7 +620,8 @@ internal static class Program
                     state.InstalledExecutable,
                     state.Port,
                     TimeSpan.FromSeconds(20),
-                    CancellationToken.None);
+                    CancellationToken.None,
+                    firstAttachmentPlan);
                 if (activation.Kind == SupervisorActivationKind.Failed)
                 {
                     throw new InvalidOperationException(activation.Detail);
@@ -687,7 +691,8 @@ internal static class Program
             legacyInstalledPort,
             configuredUrl,
             port => IsManagedEndpointReadyAsync(port),
-            port => IsReadyAsync(port, TimeSpan.FromSeconds(1)));
+            port => IsReadyAsync(port, TimeSpan.FromSeconds(1)),
+            IsManagedSupervisorArmed);
         var removed = coordinator.Uninstall(
             reconnectPolicy,
             LifecycleLockOwnership.AlreadyHeld);
@@ -705,6 +710,21 @@ internal static class Program
         return 0;
     }
 
+    internal static string WaitingStatusJson(SupervisorStatus supervisorStatus)
+    {
+        var waiting = new JsonObject
+        {
+            ["ready"] = false,
+            ["threadCount"] = null,
+            ["activeThreadCount"] = null,
+            ["activeThreads"] = new JsonArray(),
+            ["supervisor"] = JsonSerializer.SerializeToNode(
+                SupervisorStatusForDiagnostics(supervisorStatus),
+                JsonOptions),
+        };
+        return waiting.ToJsonString(JsonOptions);
+    }
+
     private static async Task<int> AttachAsync(int? requestedPort)
     {
         var state = LoadInstallState()
@@ -713,24 +733,6 @@ internal static class Program
         {
             return Fail(
                 $"Continuity is installed on port {state.Port}; refusing to attach on port {requestedPort}.");
-        }
-        if (Environment.ProcessPath is not { } commandExecutable)
-        {
-            return Fail("The running Continuity command has no verifiable executable path.");
-        }
-        try
-        {
-            await BootstrapInstaller.VerifySha256Async(
-                commandExecutable,
-                state.BinarySha256);
-            await BootstrapInstaller.VerifySha256Async(
-                state.InstalledExecutable,
-                state.BinarySha256);
-        }
-        catch (InvalidDataException)
-        {
-            return Fail(
-                "The running command does not match the selected installed build. Run repair before attach.");
         }
         if (await IsReadyAsync(state.Port, TimeSpan.FromSeconds(1)))
         {
@@ -743,11 +745,60 @@ internal static class Program
             return 0;
         }
 
+        var existingStatus = LoadSupervisorStatus();
+        if (existingStatus is not null &&
+            SupervisorCompatibilityGuard.Inspect(existingStatus) == RecordedSupervisorState.Active)
+        {
+            var existingActivation = await StartInstalledSupervisorAsync(
+                state.InstalledExecutable,
+                state.Port,
+                TimeSpan.FromSeconds(20),
+                CancellationToken.None,
+                new(
+                    FirstAttachmentAction.Defer,
+                    [],
+                    "The recorded supervisor changed while attach was checking it."));
+            Console.WriteLine(existingActivation.Detail);
+            return existingActivation.Kind == SupervisorActivationKind.Failed ? 1 : 0;
+        }
+
+        try
+        {
+            await BootstrapInstaller.VerifySha256Async(
+                state.InstalledExecutable,
+                state.BinarySha256);
+        }
+        catch (InvalidDataException)
+        {
+            return Fail(
+                "The selected Continuity build failed its installed hash check. Run repair before attach.");
+        }
+
+        if (Environment.ProcessPath is not { } commandExecutable)
+        {
+            return Fail("The running Continuity command has no verifiable executable path.");
+        }
+        FirstAttachmentPlan? firstAttachmentPlan = null;
+        try
+        {
+            await BootstrapInstaller.VerifySha256Async(commandExecutable, state.BinarySha256);
+        }
+        catch (InvalidDataException)
+        {
+            firstAttachmentPlan = await PlanFirstAttachmentAsync();
+            if (firstAttachmentPlan.Action == FirstAttachmentAction.Arm)
+            {
+                return Fail(
+                    "The rollback-selected Continuity build cannot safely arm while Codex is open. Nothing was changed; after Codex closes naturally, run attach again.");
+            }
+        }
+
         var activation = await StartInstalledSupervisorAsync(
             state.InstalledExecutable,
             state.Port,
             TimeSpan.FromSeconds(20),
-            CancellationToken.None);
+            CancellationToken.None,
+            firstAttachmentPlan);
         Console.WriteLine(activation.Detail);
         return activation.Kind is SupervisorActivationKind.Failed or
             SupervisorActivationKind.Deferred
@@ -985,7 +1036,8 @@ internal static class Program
         int? legacyInstalledPort,
         string? configuredUrl,
         Func<int, Task<bool>> isManagedEndpointReadyAsync,
-        Func<int, Task<bool>> isLegacyEndpointReadyAsync)
+        Func<int, Task<bool>> isLegacyEndpointReadyAsync,
+        Func<int, bool>? isManagedSupervisorArmed = null)
     {
         var installedPort = managedInstalledPort ?? legacyInstalledPort;
         if (installedPort is not { } port || !string.Equals(
@@ -997,7 +1049,8 @@ internal static class Program
         }
 
         var endpointIsOwned = managedInstalledPort is not null
-            ? await isManagedEndpointReadyAsync(port)
+            ? await isManagedEndpointReadyAsync(port) ||
+                (isManagedSupervisorArmed?.Invoke(port) ?? false)
             : await isLegacyEndpointReadyAsync(port);
         return endpointIsOwned
             ? UninstallReconnectPolicy.PreserveUntilNextSignIn
@@ -1094,6 +1147,15 @@ internal static class Program
             ContinuityPaths.SupervisorStatusFile(
                 ContinuityPaths.LegacyOpenAiStateDirectory)).Read();
 
+    private static bool IsManagedSupervisorArmed(int port)
+    {
+        var status = LoadSupervisorStatus();
+        return status is not null &&
+            status.Port == port &&
+            status.State == "waitingForCodexExit" &&
+            SupervisorCompatibilityGuard.Inspect(status) == RecordedSupervisorState.Active;
+    }
+
     internal static SupervisorStatus? SupervisorStatusForDiagnostics(SupervisorStatus? status) =>
         status is null
             ? null
@@ -1131,7 +1193,8 @@ internal static class Program
         string executable,
         int port,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        FirstAttachmentPlan? firstAttachmentPlan = null)
     {
         var existingStatus = LoadSupervisorStatus();
         if (existingStatus is not null)
@@ -1161,11 +1224,7 @@ internal static class Program
             }
         }
 
-        var package = await ReadInstalledPackageAsync();
-        var installedDesktopVersion = package?["version"]?.GetValue<string>();
-        var attachmentPlan = DesktopRetargetCapability.PlanFirstAttachment(
-            installedDesktopVersion,
-            CodexDesktopProcesses.Capture());
+        var attachmentPlan = firstAttachmentPlan ?? await PlanFirstAttachmentAsync();
         if (attachmentPlan.Action == FirstAttachmentAction.Defer)
         {
             return new(
@@ -1665,6 +1724,14 @@ internal static class Program
                Version.TryParse(available, out var availableVersion)
             ? installedVersion.CompareTo(availableVersion)
             : 0;
+    }
+
+    private static async Task<FirstAttachmentPlan> PlanFirstAttachmentAsync()
+    {
+        var package = await ReadInstalledPackageAsync();
+        return DesktopRetargetCapability.PlanFirstAttachment(
+            package?["version"]?.GetValue<string>(),
+            CodexDesktopProcesses.Capture());
     }
 
     private static async Task<ProcessResult> RunProcessAsync(

@@ -88,11 +88,34 @@ public sealed class CodexDesktopProcessesTests
         await CodexDesktopProcesses.WaitForNaturalClosureAsync(
             [new CodexDesktopProcessIdentity(12, 1200)],
             CancellationToken.None,
-            _ => ObservedProcessState.Exited,
-            () => observations.Dequeue(),
-            TimeSpan.FromMilliseconds(1));
+            inspect: _ => ObservedProcessState.Exited,
+            observe: () => observations.Dequeue(),
+            pollInterval: TimeSpan.FromMilliseconds(1));
 
         Assert.Empty(observations);
+    }
+
+    [Fact]
+    public async Task VerifiedNewDesktopConnectionBreaksFastRelaunchWaitCycle()
+    {
+        var observations = 0;
+
+        await CodexDesktopProcesses.WaitForNaturalClosureAsync(
+            [new CodexDesktopProcessIdentity(12, 1200)],
+            CancellationToken.None,
+            verifiedRetargetConnection: Task.CompletedTask,
+            inspect: _ => ObservedProcessState.Exited,
+            observe: () =>
+            {
+                observations++;
+                return new(
+                    CodexDesktopObservationKind.Running,
+                    [new CodexDesktopProcessIdentity(13, 1300)],
+                    "A new desktop connected to the reserved Continuity endpoint.");
+            },
+            pollInterval: TimeSpan.FromMilliseconds(1));
+
+        Assert.Equal(1, observations);
     }
 
     [Theory]

@@ -34,7 +34,7 @@ public sealed class SupervisorRelayTests : IDisposable
                 Interlocked.Increment(ref backendStarts);
                 return StartHarnessBackend(port, fixtureStartedPath);
             },
-            waitBeforeFirstBackend: cancellationToken =>
+            waitBeforeFirstBackend: (_, cancellationToken) =>
                 releaseDesktop.Task.WaitAsync(cancellationToken));
         try
         {
@@ -75,11 +75,38 @@ public sealed class SupervisorRelayTests : IDisposable
                 Interlocked.Increment(ref backendStarts);
                 throw new InvalidOperationException("Backend must remain stopped while armed.");
             },
-            waitBeforeFirstBackend: cancellationToken =>
+            waitBeforeFirstBackend: (_, cancellationToken) =>
                 Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
         await ReadStatusAsync("waitingForCodexExit");
 
         shutdown.Cancel();
+
+        Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal(0, Volatile.Read(ref backendStarts));
+        Assert.True(CanBind(publicPort));
+    }
+
+    [Fact]
+    public async Task CancellationReturnedByArmedWaitNeverStartsBackend()
+    {
+        var publicPort = FindAvailablePort();
+        var backendStarts = 0;
+        using var shutdown = new CancellationTokenSource();
+
+        var supervisor = OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            shutdown.Token,
+            _ =>
+            {
+                Interlocked.Increment(ref backendStarts);
+                throw new InvalidOperationException("Backend must not start after cancellation.");
+            },
+            waitBeforeFirstBackend: (_, _) =>
+            {
+                shutdown.Cancel();
+                return Task.CompletedTask;
+            });
 
         Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, Volatile.Read(ref backendStarts));
@@ -229,7 +256,9 @@ public sealed class SupervisorRelayTests : IDisposable
                 return StartHarnessBackend(
                     port,
                     Path.Combine(root, "unexpected-replacement.txt"));
-            });
+            },
+            waitBeforeFirstBackend: (_, cancellationToken) =>
+                Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
         try
         {
             Assert.Equal($"backend:{backendPort}", await ReadWhenReadyAsync(publicPort));
