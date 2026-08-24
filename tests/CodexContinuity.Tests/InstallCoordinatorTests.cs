@@ -1113,6 +1113,31 @@ public sealed class InstallCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public void RollbackRejectsAChangedTraySelectionBeforeMutatingStartup()
+    {
+        var platform = new FakeInstallPlatform();
+        var coordinator = CreateCoordinator(platform);
+        coordinator.Install(
+            CreateSource("version-one"),
+            45123,
+            TrayInstallMode.Disabled);
+        var selected = coordinator.Install(
+            CreateSource("version-two"),
+            45123,
+            TrayInstallMode.Disabled);
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            coordinator.Rollback(
+                selected.State.InstalledExecutable,
+                new string('0', 64)));
+
+        Assert.Contains("selected Continuity build changed", exception.Message);
+        var current = new InstallStateStore(ContinuityPaths.InstallStateFile(root)).Load();
+        Assert.Equal(selected.State.InstalledExecutable, current?.InstalledExecutable);
+        Assert.Equal(selected.State.BinarySha256, current?.BinarySha256);
+    }
+
+    [Fact]
     public void DefaultBundleStagesDisposableTrayWithIndependentStartup()
     {
         var platform = new FakeInstallPlatform();
