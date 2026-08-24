@@ -414,15 +414,28 @@ internal sealed class InstallCoordinator(
         }
 
         var hash = InstallFileStager.ComputeSha256(sourcePath);
+        var trayHash = trayInstallMode == TrayInstallMode.Enabled
+            ? InstallFileStager.ComputeSha256(sourceTrayExecutable)
+            : null;
         var stagedVersion = installFileStager.StageVersion(
             sourcePath,
             trayInstallMode == TrayInstallMode.Enabled ? sourceTrayExecutable : null,
-            hash);
-        var installedExecutable = stagedVersion.SupervisorExecutable;
-        var commandExecutable = installFileStager.PublishCommandExecutable(
+            hash,
+            trayHash);
+        var publishedCommandExecutable = installFileStager.PublishCommandExecutable(
             sourcePath,
             trayInstallMode == TrayInstallMode.Enabled ? sourceTrayExecutable : null,
-            hash);
+            hash,
+            trayHash);
+        var validatedOutputs = ValidateStagedOutputs(
+            stagedVersion,
+            publishedCommandExecutable,
+            hash,
+            trayHash,
+            trayInstallMode);
+        stagedVersion = validatedOutputs.StagedVersion;
+        var installedExecutable = stagedVersion.SupervisorExecutable;
+        var commandExecutable = validatedOutputs.CommandExecutable;
         var serverUrl = LoopbackEndpoint.WebSocketUrl(port);
         var startupCommand = StartupCommandBuilder.Build(installedExecutable, port);
         var trayStartupCommand = stagedVersion.TrayExecutable is null
@@ -950,6 +963,164 @@ internal sealed class InstallCoordinator(
 
     private static bool PathsEqual(string first, string second) =>
         Path.GetFullPath(first).Equals(Path.GetFullPath(second), StringComparison.OrdinalIgnoreCase);
+
+    private ValidatedInstallOutputs ValidateStagedOutputs(
+        StagedInstallVersion stagedVersion,
+        string commandExecutable,
+        string expectedSupervisorSha256,
+        string? expectedTraySha256,
+        TrayInstallMode trayInstallMode)
+    {
+        if (stagedVersion is null)
+        {
+            throw new InvalidDataException("The file stager did not return staged outputs.");
+        }
+        var supervisorExecutable = ValidateVersionedOutput(
+            stagedVersion.SupervisorExecutable,
+            "CodexContinuity.exe",
+            expectedSupervisorSha256,
+            "supervisor");
+        string? trayExecutable;
+        if (trayInstallMode == TrayInstallMode.Enabled)
+        {
+            if (stagedVersion.TrayExecutable is null || expectedTraySha256 is null)
+            {
+                throw new InvalidDataException(
+                    "The file stager did not return the required tray executable.");
+            }
+            trayExecutable = ValidateVersionedOutput(
+                stagedVersion.TrayExecutable,
+                "CodexContinuity.Tray.exe",
+                expectedTraySha256,
+                "tray");
+        }
+        else
+        {
+            if (stagedVersion.TrayExecutable is not null || expectedTraySha256 is not null)
+            {
+                throw new InvalidDataException(
+                    "The file stager returned a tray executable when tray installation is disabled.");
+            }
+            trayExecutable = null;
+        }
+
+        if (trayExecutable is not null && PathsEqual(supervisorExecutable, trayExecutable))
+        {
+            throw new InvalidDataException(
+                "The file stager returned the same path for the supervisor and tray executables.");
+        }
+
+        var validatedCommandExecutable = RequireCanonicalPath(
+            commandExecutable,
+            "command executable");
+        var expectedCommandExecutable = Path.GetFullPath(
+            ContinuityPaths.CommandExecutable(stateDirectory));
+        if (!PathsEqual(validatedCommandExecutable, expectedCommandExecutable))
+        {
+            throw new InvalidDataException(
+                "The file stager returned an unexpected command executable path.");
+        }
+        ValidateFileHash(
+            validatedCommandExecutable,
+            expectedSupervisorSha256,
+            "command executable");
+        if (trayInstallMode == TrayInstallMode.Enabled)
+        {
+            var commandTrayExecutable = Path.GetFullPath(Path.Combine(
+                ContinuityPaths.CommandDirectory(stateDirectory),
+                "CodexContinuity.Tray.exe"));
+            ValidateFileHash(
+                commandTrayExecutable,
+                expectedTraySha256!,
+                "command tray executable");
+        }
+
+        return new(
+            new StagedInstallVersion(supervisorExecutable, trayExecutable),
+            validatedCommandExecutable);
+    }
+
+    private string ValidateVersionedOutput(
+        string path,
+        string expectedFileName,
+        string expectedSha256,
+        string description)
+    {
+        var canonicalPath = RequireCanonicalPath(path, $"{description} executable");
+        var versionsDirectory = Path.GetFullPath(
+            ContinuityPaths.VersionsDirectory(stateDirectory));
+        if (!IsPathWithinDirectory(canonicalPath, versionsDirectory) ||
+            !string.Equals(
+                Path.GetFileName(canonicalPath),
+                expectedFileName,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"The file stager returned an invalid {description} executable path.");
+        }
+        ValidateFileHash(canonicalPath, expectedSha256, $"{description} executable");
+        return canonicalPath;
+    }
+
+    private static string RequireCanonicalPath(string path, string description)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+        {
+            throw new InvalidDataException(
+                $"The file stager returned a non-qualified {description} path.");
+        }
+        var canonicalPath = Path.GetFullPath(path);
+        if (!string.Equals(path, canonicalPath, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"The file stager returned a non-canonical {description} path.");
+        }
+        return canonicalPath;
+    }
+
+    private static bool IsPathWithinDirectory(string path, string directory)
+    {
+        var canonicalDirectory = Path.GetFullPath(directory);
+        if (!canonicalDirectory.EndsWith(Path.DirectorySeparatorChar) &&
+            !canonicalDirectory.EndsWith(Path.AltDirectorySeparatorChar))
+        {
+            canonicalDirectory += Path.DirectorySeparatorChar;
+        }
+        return path.StartsWith(canonicalDirectory, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void ValidateFileHash(
+        string path,
+        string expectedSha256,
+        string description)
+    {
+        if (!File.Exists(path))
+        {
+            throw new InvalidDataException(
+                $"The file stager did not produce the {description}.");
+        }
+        string actualSha256;
+        try
+        {
+            actualSha256 = InstallFileStager.ComputeSha256(path);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidDataException(
+                $"The file stager output could not be read: {description}.",
+                exception);
+        }
+        if (!string.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"The file stager returned a {description} with an unexpected SHA-256 digest.");
+        }
+    }
+
+    private sealed record ValidatedInstallOutputs(
+        StagedInstallVersion StagedVersion,
+        string CommandExecutable);
 
     private bool IsLegacyExecutable(string executable) =>
         LegacyExecutableCandidates().Any(candidate => PathsEqual(executable, candidate));
