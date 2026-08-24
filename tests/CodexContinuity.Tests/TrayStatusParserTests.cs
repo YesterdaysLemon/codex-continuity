@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Text.Json;
+using System.Windows.Forms;
 using Xunit;
 
 namespace CodexContinuity.Tests;
@@ -196,6 +197,477 @@ public sealed class TrayStatusParserTests
     }
 
     [Fact]
+    public async Task UpdateReadUsesTheExactRepositoryReleaseNotesLink()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"continuity-tray-release-{Guid.NewGuid():N}");
+        var applicationDirectory = Path.Combine(root, "tray");
+        var stateDirectory = Path.Combine(root, "state");
+        var legacyDirectory = Path.Combine(root, "legacy");
+        Directory.CreateDirectory(applicationDirectory);
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(stateDirectory, "update-status.json"),
+                """{"latestVersion":"0.6.0","latestReleaseUrl":"https://example.invalid/redirect"}""");
+            var client = new TrayStatusClient(
+                "status.exe",
+                applicationDirectory,
+                stateDirectory,
+                legacyDirectory);
+
+            var update = await client.ReadUpdateAsync(CancellationToken.None);
+
+            Assert.Equal(
+                "https://github.com/YesterdaysLemon/codex-continuity/releases/tag/v0.6.0",
+                update.LatestReleaseUrl);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void ReportsUnsignedInstalledBuildAsUpdaterReadinessBlocker()
+    {
+        var update = TrayStatusParser.ParseUpdate(
+            """
+            {
+              "runningVersion": "0.5.0",
+              "runningProcessObserved": true,
+              "latestVersion": "0.6.0",
+              "latestState": "failed",
+              "lastError": "The installed Continuity build does not have a valid Authenticode signature; automatic staging is disabled for unsigned or development builds."
+            }
+            """);
+
+        Assert.Equal("unsignedInstalledBuild", update.UpdaterReadiness);
+        Assert.Contains(
+            "installed build is unsigned",
+            TrayStatusPresentation.UpdaterReadinessDetail(update),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ParsesHonestCodexDesktopStoreStatusWithoutClaimingEligibility()
+    {
+        var desktop = TrayStatusParser.ParseDesktopUpdate(
+            """
+            {
+              "codexDesktopUpdate": {
+                "installedVersion": "26.818.2872.0",
+                "advertisedVersion": "26.818.3698.0",
+                "manifestNewerThanInstalled": true,
+                "microsoftStoreAvailability": "notChecked",
+                "recommendedAction": "checkMicrosoftStore",
+                "detail": "Store eligibility is not proven."
+              }
+            }
+            """);
+
+        Assert.True(desktop.ShouldOfferMicrosoftStore);
+        Assert.Equal("notChecked", desktop.MicrosoftStoreAvailability);
+        Assert.True(TrayStatusPresentation.ShowMicrosoftStoreUpdate(desktop));
+    }
+
+    [Fact]
+    public void VersionProjectionLabelsRecordedBuildsSeparatelyFromProvenBuilds()
+    {
+        var update = new ContinuityUpdateSnapshot(
+            "0.5.0",
+            true,
+            "0.6.0",
+            1,
+            1,
+            0,
+            "staged",
+            null,
+            SelectedVersion: "0.6.0",
+            RollbackVersion: "0.4.0",
+            RunningBuild: new("0.5.0", "running.exe", new string('a', 64), true, null),
+            SelectedBuild: new("0.6.0", "selected.exe", new string('b', 64), true, null),
+            RollbackBuild: new("0.4.0", "rollback.exe", new string('c', 64), false, "digest mismatch"));
+
+        var detail = TrayStatusPresentation.VersionDetail(update);
+
+        Assert.Contains("Running: v0.5.0 (proven)", detail);
+        Assert.Contains("Startup target: v0.6.0 (proven)", detail);
+        Assert.Contains("Rollback: v0.4.0 (recorded)", detail);
+        Assert.False(TrayStatusPresentation.ShowRollback(update));
+    }
+
+    [Fact]
+    public void NotificationsAreTransitionBasedAndDeduplicated()
+    {
+        var previous = new TrayNotificationSnapshot(
+            ContinuityHealth.Healthy,
+            "observed",
+            "0.6.0",
+            "waiting",
+            "0.6.0",
+            null);
+        var staged = previous with
+        {
+            LatestState = "staged",
+            LatestVersion = "0.6.0",
+        };
+        var notification = TrayNotificationPlanner.Plan(
+            previous,
+            staged,
+            "https://github.com/YesterdaysLemon/codex-continuity/releases/tag/v0.6.0");
+        var deduper = new TrayNotificationDeduper();
+
+        Assert.NotNull(notification);
+        Assert.Equal(TrayNotificationAction.OpenReleaseNotes, notification!.Action);
+        Assert.True(deduper.ShouldShow(notification));
+        Assert.False(deduper.ShouldShow(notification));
+        Assert.Null(TrayNotificationPlanner.Plan(staged, staged, notification.Key));
+    }
+
+    [Fact]
+    public void DiagnosticsSummaryOmitsPathsAndThreadIdentifiers()
+    {
+        var summary = TrayDiagnosticsFormatter.Format(
+            new TrayStatusSnapshot(
+                ContinuityHealth.Healthy,
+                2,
+                @"Backend failed at C:\Users\Yeste\private-state.json"),
+            new ContinuityUpdateSnapshot(
+                "0.5.0",
+                true,
+                "0.6.0",
+                1,
+                1,
+                0,
+                "staged",
+                null,
+                SelectedVersion: "0.6.0",
+                RollbackVersion: "0.4.0",
+                UpdaterReadiness: "ready"),
+            ContinuityApplySnapshot.Default,
+            new TrayDesktopUpdateSnapshot(
+                "26.818.2872.0",
+                "26.818.3698.0",
+                true,
+                "notChecked",
+                "checkMicrosoftStore",
+                "not proven"));
+
+        Assert.DoesNotContain("C:\\Users", summary, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("thread-secret", summary, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Running version: 0.5.0", summary);
+    }
+
+    [Fact]
+    public void CustomActivationWindowPlannerValidatesOvernightRangeAndExactArguments()
+    {
+        var valid = TrayActivationWindowPlanner.TryCreate(
+            "22:00",
+            "07:00",
+            "UTC",
+            out var selection,
+            out var error);
+
+        Assert.True(valid);
+        Assert.Empty(error);
+        Assert.Equal(
+            new TrayActivationWindowSelection("22:00-07:00", "UTC", IsOvernight: true),
+            selection);
+        Assert.Equal(
+            [
+                "update-policy",
+                "--activation-window",
+                "22:00-07:00",
+                "--time-zone",
+                "UTC",
+            ],
+            TrayActivationWindowPlanner.BuildArguments(selection!));
+    }
+
+    [Theory]
+    [InlineData("07:00", "07:00", "Start and end must be different.")]
+    [InlineData("7:00", "08:00", "Enter both times as HH:mm.")]
+    [InlineData("07:00", "08:00", "The selected time zone is not available on this computer.")]
+    public void CustomActivationWindowPlannerRejectsUnsafeOrAmbiguousInput(
+        string start,
+        string end,
+        string expectedError)
+    {
+        var valid = TrayActivationWindowPlanner.TryCreate(
+            start,
+            end,
+            start == "07:00" && end == "08:00" ? "not-a-time-zone" : "UTC",
+            out var selection,
+            out var error);
+
+        Assert.False(valid);
+        Assert.Null(selection);
+        Assert.Equal(expectedError, error);
+    }
+
+    [Fact]
+    public void CustomActivationWindowRangeValidationIsFailClosed()
+    {
+        Assert.False(TrayActivationWindowPlanner.TryCreateRange(
+            "22:00-07:00-extra",
+            "UTC",
+            out var selection,
+            out _));
+        Assert.Null(selection);
+    }
+
+    [Fact]
+    public void CancelledCustomActivationWindowHasNoSelectionOrMutation()
+    {
+        var selection = new TrayActivationWindowSelection("22:00-07:00", "UTC", true);
+
+        Assert.Null(TrayActivationWindowDialog.AcceptedSelection(
+            DialogResult.Cancel,
+            selection));
+    }
+
+    [Fact]
+    public void ActivityPlannerRecordsMeaningfulTransitionsOnly()
+    {
+        var previous = new TrayNotificationSnapshot(
+            ContinuityHealth.Healthy,
+            "observed",
+            "0.5.0",
+            "waiting",
+            "0.6.0",
+            null);
+        var staged = previous with
+        {
+            LatestState = "staged",
+            LatestVersion = "0.6.0",
+        };
+
+        var activity = TrayActivityPlanner.Plan(previous, staged);
+
+        Assert.Equal(
+            new TrayActivityEvent(
+                TrayActivityKind.Staged,
+                "0.6.0",
+                "staged",
+                TrayActivityCatalog.StagedSummary),
+            activity);
+        Assert.Null(TrayActivityPlanner.Plan(staged, staged));
+        Assert.Null(TrayActivityPlanner.Plan(
+            previous,
+            previous with { ApplyState = "waiting" }));
+    }
+
+    [Fact]
+    public void ActivityHistoryDeduplicatesAndRendersAllowlistedEntries()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"continuity-tray-history-{Guid.NewGuid():N}");
+        var historyPath = Path.Combine(root, "tray-activity-history.json");
+        try
+        {
+            var store = new TrayActivityHistoryStore(historyPath);
+            var activity = new TrayActivityEvent(
+                TrayActivityKind.Staged,
+                "0.6.0",
+                "staged",
+                TrayActivityCatalog.StagedSummary);
+            var occurredAt = new DateTimeOffset(
+                2026,
+                8,
+                24,
+                20,
+                0,
+                0,
+                TimeSpan.Zero);
+
+            Assert.True(store.TryAppend(activity, occurredAt));
+            Assert.False(store.TryAppend(activity, occurredAt.AddMinutes(1)));
+            var entries = store.Load();
+            var rendered = TrayActivityHistoryFormatter.Render(entries);
+
+            Assert.Single(entries);
+            Assert.Contains("2026-08-24 20:00 UTC", rendered);
+            Assert.Contains("v0.6.0", rendered);
+            Assert.DoesNotContain("C:\\", rendered, StringComparison.Ordinal);
+            Assert.DoesNotContain("thread", rendered, StringComparison.OrdinalIgnoreCase);
+            Assert.Empty(Directory.EnumerateFiles(root, "*.tmp"));
+        }
+        finally
+        {
+            DeleteDirectoryIfPresent(root);
+        }
+    }
+
+    [Fact]
+    public void ActivityHistoryKeepsRepeatedSuccessfulUserMutations()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"continuity-tray-history-mutations-{Guid.NewGuid():N}");
+        try
+        {
+            var store = new TrayActivityHistoryStore(
+                Path.Combine(root, "tray-activity-history.json"));
+            var mutation = new TrayActivityEvent(
+                TrayActivityKind.UserMutationSucceeded,
+                null,
+                "succeeded",
+                TrayActivityCatalog.SnoozeSummary,
+                Deduplicate: false);
+
+            Assert.True(store.TryAppend(mutation, DateTimeOffset.UtcNow));
+            Assert.True(store.TryAppend(mutation, DateTimeOffset.UtcNow.AddMinutes(1)));
+            Assert.Equal(2, store.Load().Count);
+        }
+        finally
+        {
+            DeleteDirectoryIfPresent(root);
+        }
+    }
+
+    [Fact]
+    public void ActivityHistoryCapsEntriesAndBytesWithAtomicReplacement()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"continuity-tray-history-cap-{Guid.NewGuid():N}");
+        var historyPath = Path.Combine(root, "tray-activity-history.json");
+        try
+        {
+            var store = new TrayActivityHistoryStore(historyPath);
+            for (var index = 0; index < TrayActivityHistoryStore.MaximumEntries + 8; index++)
+            {
+                Assert.True(store.TryAppend(
+                    new TrayActivityEvent(
+                        TrayActivityKind.Staged,
+                        $"1.0.{index}",
+                        "staged",
+                        TrayActivityCatalog.StagedSummary),
+                    DateTimeOffset.UtcNow.AddMinutes(index)));
+            }
+
+            var entries = store.Load();
+
+            Assert.Equal(TrayActivityHistoryStore.MaximumEntries, entries.Count);
+            Assert.True(new FileInfo(historyPath).Length <= TrayActivityHistoryStore.MaximumBytes);
+            Assert.DoesNotContain(
+                Directory.EnumerateFiles(root),
+                path => path.EndsWith(".tmp", StringComparison.Ordinal));
+            Assert.Equal(
+                $"1.0.{TrayActivityHistoryStore.MaximumEntries + 7}",
+                entries[0].Version);
+        }
+        finally
+        {
+            DeleteDirectoryIfPresent(root);
+        }
+    }
+
+    [Fact]
+    public void ActivityHistoryFailsClosedForInvalidOrNewerSchema()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"continuity-tray-history-invalid-{Guid.NewGuid():N}");
+        var historyPath = Path.Combine(root, "tray-activity-history.json");
+        Directory.CreateDirectory(root);
+        try
+        {
+            foreach (var json in new[]
+            {
+                """{"schemaVersion":2,"entries":[]}""",
+                """{"schemaVersion":1,"entries":[{"kind":"failure","occurredAtUtc":"2026-08-24T20:00:00Z","version":"9.9.9","state":"failed","summary":"C:\\secret\\error"}]}""",
+                new string('x', TrayActivityHistoryStore.MaximumBytes + 1),
+            })
+            {
+                File.WriteAllText(historyPath, json);
+                var store = new TrayActivityHistoryStore(historyPath);
+
+                Assert.Empty(store.Load());
+                Assert.False(store.TryAppend(
+                    new TrayActivityEvent(
+                        TrayActivityKind.Failure,
+                        "0.6.0",
+                        "failed",
+                        TrayActivityCatalog.FailureSummary),
+                    DateTimeOffset.UtcNow));
+            }
+        }
+        finally
+        {
+            DeleteDirectoryIfPresent(root);
+        }
+    }
+
+    [Fact]
+    public void ActivityHistoryRejectsArbitrarySummaryAndExceptionText()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"continuity-tray-history-redaction-{Guid.NewGuid():N}");
+        try
+        {
+            var store = new TrayActivityHistoryStore(
+                Path.Combine(root, "tray-activity-history.json"));
+
+            Assert.False(store.TryAppend(
+                new TrayActivityEvent(
+                    TrayActivityKind.Failure,
+                    "0.6.0",
+                    "failed",
+                    @"failed C:\Users\Yeste\state\thread-secret"),
+                DateTimeOffset.UtcNow));
+            Assert.False(store.TryAppend(
+                new TrayActivityEvent(
+                    TrayActivityKind.Failure,
+                    "not-a-public-version",
+                    "failed",
+                    TrayActivityCatalog.FailureSummary),
+                DateTimeOffset.UtcNow));
+            Assert.Empty(store.Load());
+        }
+        finally
+        {
+            DeleteDirectoryIfPresent(root);
+        }
+    }
+
+    private static void DeleteDirectoryIfPresent(string path)
+    {
+        if (Directory.Exists(path))
+        {
+            Directory.Delete(path, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void MenuControllerResetsAfterExternalClosedBeforeRepeatedToggleAndEscapeClose()
+    {
+        var controller = new TrayMenuController();
+        var shown = 0;
+        var closed = 0;
+
+        controller.Toggle(() => shown++, () => closed++);
+        Assert.True(controller.IsVisible);
+        controller.MarkClosed();
+        Assert.False(controller.IsVisible);
+
+        controller.Toggle(() => shown++, () => closed++);
+        controller.Toggle(() => shown++, () => closed++);
+        controller.Toggle(() => shown++, () => closed++);
+        controller.Close(() => closed++);
+
+        Assert.Equal(3, shown);
+        Assert.Equal(2, closed);
+        Assert.False(controller.IsVisible);
+    }
+
+    [Fact]
     public void MissingApplyStateDefaultsToExplicitStagedOnlyOptOut()
     {
         var apply = TrayStatusParser.ParseApply(policyJson: null, statusJson: null);
@@ -205,6 +677,58 @@ public sealed class TrayStatusParserTests
             "Activation: staged only; automatic apply is off",
             TrayStatusPresentation.ApplyDetail(apply));
         Assert.False(TrayStatusPresentation.ShowApplyRetry(apply));
+    }
+
+    [Fact]
+    public void ParsesSchemaV2SnoozeAndActivationWindowWithoutConfusingActivationState()
+    {
+        var now = new DateTimeOffset(2026, 8, 24, 20, 0, 0, TimeSpan.Zero);
+        var policy =
+            """
+            {
+              "schemaVersion": 2,
+              "automaticApplyWhenIdle": true,
+              "generation": 8,
+              "updatedAtUtc": "2026-08-24T19:00:00Z",
+              "snoozedUntilUtc": "2026-08-24T21:00:00Z",
+              "activationWindow": {
+                "startMinuteLocal": 1320,
+                "endMinuteLocal": 420,
+                "timeZoneId": "UTC"
+              }
+            }
+            """;
+        var status =
+            """{"schemaVersion":1,"state":"waiting","policyGeneration":8,"targetVersion":"0.6.0"}""";
+
+        var apply = TrayStatusParser.ParseApply(policy, status);
+
+        Assert.True(apply.ControlsAvailable);
+        Assert.Equal(2, apply.PolicySchemaVersion);
+        Assert.Equal(
+            new DateTimeOffset(2026, 8, 24, 21, 0, 0, TimeSpan.Zero),
+            apply.SnoozedUntilUtc);
+        Assert.Equal(new TrayActivationWindow(1320, 420, "UTC"), apply.ActivationWindow);
+        Assert.Equal(
+            "Activation schedule: activation snoozed until 2026-08-24 21:00 UTC; " +
+            "window 22:00-07:00 (UTC)",
+            TrayStatusPresentation.ActivationScheduleDetail(apply, now));
+        Assert.Contains(
+            "snoozed until 2026-08-24 21:00 UTC",
+            TrayStatusPresentation.ApplyDetail(apply, now));
+    }
+
+    [Fact]
+    public void InvalidSchemaV2ScheduleDisablesPolicyActions()
+    {
+        var policy =
+            """{"schemaVersion":2,"automaticApplyWhenIdle":true,"generation":8,"activationWindow":{"startMinuteLocal":10,"endMinuteLocal":10,"timeZoneId":"UTC"}}""";
+
+        var apply = TrayStatusParser.ParseApply(policy, statusJson: null);
+
+        Assert.False(apply.ControlsAvailable);
+        Assert.Contains("invalid activation window", apply.AvailabilityError);
+        Assert.False(TrayStatusPresentation.CanChangeApplyPolicy(apply));
     }
 
     [Theory]
@@ -344,7 +868,7 @@ public sealed class TrayStatusParserTests
 
     [Fact]
     public void CompactsMultilineUpdateErrors() => Assert.Equal(
-        $"Last ran v0.2.1; latest v0.3.0; last check failed: first  {new string('x', 153)}…",
+        $"Last ran v0.2.1; latest v0.3.0; last check failed: first  {new string('x', 153)}\u2026",
         TrayStatusPresentation.UpdateDetail(new(
             "0.2.1", true, "0.3.0", 0, 0, 0, "failed", "first\r\n" + new string('x', 170)),
             ContinuityHealth.Unavailable));
@@ -365,7 +889,7 @@ public sealed class TrayStatusParserTests
         var enabledStates = new List<bool>();
         var feedback = string.Empty;
         await new TrayMutationPresenter().RunAsync(
-            "Checkingâ€¦",
+            "Checking\u2026",
             "Update check",
             _ => throw new Win32Exception("launch failed"),
             CancellationToken.None,
@@ -609,6 +1133,14 @@ public sealed class TrayStatusParserTests
             await Task.WhenAll(update, recovery);
             await client.SetAutomaticApplyAsync(enabled: true, CancellationToken.None);
             await client.SetAutomaticApplyAsync(enabled: false, CancellationToken.None);
+            await client.SetSnoozeAsync(minutes: 60, CancellationToken.None);
+            await client.ClearSnoozeAsync(CancellationToken.None);
+            await client.SetDefaultActivationWindowAsync(CancellationToken.None);
+            await client.SetActivationWindowAsync(
+                "22:00-07:00",
+                "UTC",
+                CancellationToken.None);
+            await client.ClearActivationWindowAsync(CancellationToken.None);
             Assert.Equal(
                 [
                     $"{Path.GetFullPath(installedExecutable)}|update",
@@ -617,8 +1149,61 @@ public sealed class TrayStatusParserTests
                         "--expected-installed-sha256|ABC123",
                     $"{Path.GetFullPath(installedExecutable)}|update-policy|--enable",
                     $"{Path.GetFullPath(installedExecutable)}|update-policy|--disable",
+                    $"{Path.GetFullPath(installedExecutable)}|update-policy|--snooze-minutes|60",
+                    $"{Path.GetFullPath(installedExecutable)}|update-policy|--clear-snooze",
+                    $"{Path.GetFullPath(installedExecutable)}|update-policy|--activation-window|22:00-07:00",
+                    $"{Path.GetFullPath(installedExecutable)}|update-policy|--activation-window|22:00-07:00|" +
+                        "--time-zone|UTC",
+                    $"{Path.GetFullPath(installedExecutable)}|update-policy|--clear-activation-window",
                 ],
                 calls);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RollbackActionPinsExpectedSelectionAndDigest()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"continuity-tray-rollback-{Guid.NewGuid():N}");
+        var applicationDirectory = Path.Combine(root, "tray");
+        var stateDirectory = Path.Combine(root, "state");
+        var legacyDirectory = Path.Combine(root, "legacy");
+        var installedExecutable = Path.Combine(stateDirectory, "versions", "v2", "CodexContinuity.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(installedExecutable)!);
+        Directory.CreateDirectory(applicationDirectory);
+        File.WriteAllText(installedExecutable, "selected");
+        WriteInstallState(
+            Path.Combine(stateDirectory, "install-state.json"),
+            installedExecutable,
+            "ABC123",
+            lifecycle: 0);
+        var calls = new List<string>();
+        try
+        {
+            var client = new TrayStatusClient(
+                "status.exe",
+                applicationDirectory,
+                stateDirectory,
+                legacyDirectory,
+                (executable, arguments, _) =>
+                {
+                    calls.Add($"{executable}|{string.Join('|', arguments)}");
+                    return Task.FromResult(new TrayCommandResult(0, string.Empty, string.Empty));
+                });
+
+            await client.RollbackAsync(CancellationToken.None);
+
+            Assert.Equal(
+                $"{Path.GetFullPath(installedExecutable)}|rollback|" +
+                $"--expected-installed-executable|{Path.GetFullPath(installedExecutable)}|" +
+                "--expected-installed-sha256|ABC123",
+                Assert.Single(calls));
         }
         finally
         {

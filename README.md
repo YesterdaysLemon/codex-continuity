@@ -151,6 +151,21 @@ endpoint on the configured port. Mutating actions use the selected versioned
 coordinator and are serialized so update, policy, repair, uninstall, or rollback
 state cannot change concurrently.
 
+The tray's activation menu keeps the 22:00-07:00 preset and clear action, and
+also offers **Custom...**. The compact dialog defaults to the computer's local
+time zone, accepts HH:mm clock inputs, explains overnight windows when the end
+is earlier than the start, rejects equal times, and makes Cancel a no-op. The
+selected range is passed to the same fail-closed update-policy command with its
+explicit time-zone identifier.
+
+**Recent Continuity activity...** opens a dedicated, read-only view of a small
+bounded history stored under the owned Continuity state directory. It records
+only allowlisted transition kinds and successful tray mutations with UTC time,
+public version/state, and canned summaries. Paths, thread identifiers and
+content, command output, and exception text are never written; invalid or
+newer history schemas display as empty and history I/O never interrupts the
+backend or active agents.
+
 ## Requirements
 
 - Windows 11 (the initial release is tested on Windows 11 x64).

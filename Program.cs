@@ -50,7 +50,7 @@ internal static class Program
                 "attach" => await AttachAsync(requestedPort),
                 "repair" => await RepairAsync(args),
                 "uninstall" => await UninstallAsync(),
-                "rollback" => Rollback(),
+                "rollback" => Rollback(args),
                 "setup" when args.Contains(
                     "--uninstall",
                     StringComparer.OrdinalIgnoreCase) => await UninstallAsync(),
@@ -1250,9 +1250,19 @@ internal static class Program
         }
     }
 
-    private static int Rollback()
+    private static int Rollback(string[] args)
     {
-        var state = CreateInstallCoordinator(ContinuityPaths.StateDirectory).Rollback();
+        var expectedExecutable = ArgumentValue(args, "--expected-installed-executable");
+        var expectedSha256 = ArgumentValue(args, "--expected-installed-sha256");
+        if ((expectedExecutable is null) != (expectedSha256 is null))
+        {
+            throw new ArgumentException(
+                "Rollback selection requires both the expected executable and SHA-256 digest.");
+        }
+
+        var state = CreateInstallCoordinator(ContinuityPaths.StateDirectory).Rollback(
+            expectedExecutable,
+            expectedSha256);
         Console.WriteLine($"Staged previous build for the next safe start: {state.InstalledExecutable}");
         Console.WriteLine("The currently running supervisor and active agents were not changed.");
         return 0;

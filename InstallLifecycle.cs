@@ -622,7 +622,11 @@ internal sealed class InstallCoordinator(
         return true;
     }
 
-    internal InstallState Rollback()
+    internal InstallState Rollback() => Rollback(expectedInstalledExecutable: null, expectedInstalledSha256: null);
+
+    internal InstallState Rollback(
+        string? expectedInstalledExecutable,
+        string? expectedInstalledSha256)
     {
         Directory.CreateDirectory(stateDirectory);
         using var lifecycleLock = ContinuityLifecycleLock.Acquire(stateDirectory);
@@ -632,6 +636,22 @@ internal sealed class InstallCoordinator(
         {
             throw new InvalidOperationException(
                 "Continuity is pending deferred uninstall and cannot be rolled back.");
+        }
+        if ((expectedInstalledExecutable is null) != (expectedInstalledSha256 is null))
+        {
+            throw new InvalidOperationException(
+                "Rollback selection requires both the expected executable and SHA-256 digest.");
+        }
+        if (expectedInstalledExecutable is not null &&
+            (!Path.GetFullPath(state.InstalledExecutable).Equals(
+                 Path.GetFullPath(expectedInstalledExecutable),
+                 StringComparison.OrdinalIgnoreCase) ||
+             !state.BinarySha256.Equals(
+                 expectedInstalledSha256,
+                 StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException(
+                "The selected Continuity build changed before rollback acquired the lifecycle lock.");
         }
         var previousExecutable = state.PreviousInstalledExecutable;
         if (string.IsNullOrWhiteSpace(previousExecutable) || !File.Exists(previousExecutable))
