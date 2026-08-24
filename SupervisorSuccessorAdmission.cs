@@ -182,7 +182,7 @@ internal static class SupervisorSuccessorAdmission
         return handoff;
     }
 
-    private static SupervisorPredecessorState InspectPredecessor(
+    internal static SupervisorPredecessorState InspectPredecessor(
         int processId,
         DateTimeOffset expectedStartedAtUtc)
     {

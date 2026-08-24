@@ -134,6 +134,13 @@ until the user explicitly retries. Unsigned and development builds can still
 observe releases, but automatic staging fails closed; use the explicit manual
 installation path until publisher signing is configured.
 
+If a supervisor process dies mid-handoff, a later start resumes only a still-valid
+manifest whose executable, predecessor, backend lease, supervisor status, and
+desktop anchor all match. A lease already transferred to a crashed successor is
+rebased only from that exact proof. Missing, expired, foreign, or post-desktop-close
+handoffs become a visible failed generation while normal backend recovery remains
+available; they are never silently called active.
+
 The tray's **Check for updates now** action runs the same verified staging path
 without interrupting the backend. Its activation line distinguishes staged-only,
 waiting, applying, active, rolled-back, and failed states. The checked idle-apply

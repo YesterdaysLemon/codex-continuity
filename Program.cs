@@ -321,12 +321,22 @@ internal static class Program
         var stateDirectories = LifecycleStateDirectories();
         var desktopWaitPlan = CodexDesktopProcesses.ParseWaitPlan(args);
         var successorRequest = SupervisorSuccessorAdmission.ParseRequest(args);
+        var interruptedKind = InterruptedSupervisorHandoffKind.None;
         AdmittedSupervisorSuccessor? successor = null;
+        var executable = Environment.ProcessPath
+            ?? throw new InvalidOperationException(
+                "The supervisor executable path is unavailable.");
+        if (successorRequest is null)
+        {
+            var interrupted = SupervisorInterruptedHandoffRecovery.Inspect(
+                stateDirectory,
+                executable,
+                DateTimeOffset.UtcNow);
+            interruptedKind = interrupted.Kind;
+            successorRequest = interrupted.Request;
+        }
         if (successorRequest is not null)
         {
-            var executable = Environment.ProcessPath
-                ?? throw new InvalidOperationException(
-                    "The successor supervisor executable path is unavailable.");
             var handoff = await SupervisorSuccessorAdmission.PrepareAsync(
                 stateDirectory,
                 successorRequest,
@@ -334,6 +344,11 @@ internal static class Program
                 FutureProcessEnvironment.ResolveCodexHome(),
                 executable,
                 CancellationToken.None);
+            if (interruptedKind ==
+                InterruptedSupervisorHandoffKind.ResumeCompatibilityRollback)
+            {
+                return await CompleteRollbackHelperAsync(stateDirectory, handoff);
+            }
             successor = new(handoff, successorRequest.Role);
         }
         return await ServeAsync(
@@ -344,7 +359,8 @@ internal static class Program
             AutomaticUpdateRunner.RunAsync,
             Fail,
             successor: successor,
-            waitBeforeFirstBackend: !desktopWaitPlan.WaitForNaturalClosure
+            waitBeforeFirstBackend: successor is not null ||
+                !desktopWaitPlan.WaitForNaturalClosure
                 ? null
                 : cancellationToken => CodexDesktopProcesses.WaitForNaturalClosureAsync(
                     desktopWaitPlan.Processes,
@@ -524,15 +540,20 @@ internal static class Program
             FutureProcessEnvironment.ResolveCodexHome(),
             executable,
             CancellationToken.None);
-        return await SupervisorRollbackHelper.CompleteAsync(
-            ContinuityPaths.StateDirectory,
+        return await CompleteRollbackHelperAsync(ContinuityPaths.StateDirectory, handoff);
+    }
+
+    private static Task<int> CompleteRollbackHelperAsync(
+        string stateDirectory,
+        SupervisorSuccessorHandoff handoff) =>
+        SupervisorRollbackHelper.CompleteAsync(
+            stateDirectory,
             handoff,
             ActivateRollbackAsync,
             ReadPublicThreadIdsAsync,
             CodexDesktopProcesses.Capture,
             () => DateTimeOffset.UtcNow,
             CancellationToken.None);
-    }
 
     private static async Task<bool> ActivateRollbackAsync(
         SupervisorSuccessorHandoff handoff,
