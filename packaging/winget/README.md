@@ -15,8 +15,8 @@ To reproduce a manifest set:
 
 ```powershell
 .\scripts\write-winget-manifests.ps1 `
-  -Version 0.5.0 `
-  -InstallerUrl https://github.com/YesterdaysLemon/codex-continuity/releases/download/v0.5.0/CodexContinuity-v0.5.0-Setup.exe `
+  -Version 0.6.0 `
+  -InstallerUrl https://github.com/YesterdaysLemon/codex-continuity/releases/download/v0.6.0/CodexContinuity-v0.6.0-Setup.exe `
   -InstallerSha256 <64-character-release-sha256> `
   -ReleaseDate 2026-08-24 `
   -OutputDirectory .\artifacts\winget
