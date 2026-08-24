@@ -35,7 +35,7 @@ internal sealed class ContinuityTrayContext : ApplicationContext
     private readonly ToolStripMenuItem recoveryItem;
     private readonly System.Windows.Forms.Timer refreshTimer;
     private readonly TrayStatusClient statusClient;
-    private readonly Icon healthyIcon;
+    private readonly Icon applicationIcon;
     private bool refreshInProgress;
     private readonly TrayMutationPresenter mutationPresenter = new();
 
@@ -45,7 +45,7 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         var supervisorExecutable = TrayStatusClient.ResolveSupervisorExecutable(
             applicationDirectory);
         statusClient = new TrayStatusClient(supervisorExecutable, applicationDirectory);
-        healthyIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath)
+        applicationIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath)
             ?? SystemIcons.Application;
         healthItem = new ToolStripMenuItem("Checking backend…") { Enabled = false };
         agentsItem = new ToolStripMenuItem("Active agents: checking…") { Enabled = false };
@@ -78,7 +78,7 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         notifyIcon = new NotifyIcon
         {
             ContextMenuStrip = menu,
-            Icon = healthyIcon,
+            Icon = applicationIcon,
             Text = "Codex Continuity — checking backend",
             Visible = true,
         };
@@ -120,13 +120,9 @@ internal sealed class ContinuityTrayContext : ApplicationContext
             healthItem.Text = status.Detail;
             var activeAgents = status.ActiveAgentCount?.ToString() ?? "unknown";
             agentsItem.Text = $"Active agents: {activeAgents}";
-            notifyIcon.Icon = status.Health switch
-            {
-                ContinuityHealth.Healthy => healthyIcon,
-                ContinuityHealth.Degraded => SystemIcons.Warning,
-                ContinuityHealth.Unavailable => SystemIcons.Error,
-                _ => throw new ArgumentOutOfRangeException(nameof(status), status.Health, null),
-            };
+            notifyIcon.Icon = TrayStatusPresentation.IconForHealth(
+                status.Health,
+                applicationIcon);
             var state = status.Health.ToString().ToLowerInvariant();
             notifyIcon.Text = $"Codex Continuity — {state} — {activeAgents} active agents";
             recoveryItem.Visible = TrayStatusPresentation.ShowRecovery(status.Health);
@@ -212,7 +208,7 @@ internal sealed class ContinuityTrayContext : ApplicationContext
             shutdown.Cancel();
             refreshTimer.Dispose();
             notifyIcon.Dispose();
-            healthyIcon.Dispose();
+            applicationIcon.Dispose();
             shutdown.Dispose();
         }
         base.Dispose(disposing);

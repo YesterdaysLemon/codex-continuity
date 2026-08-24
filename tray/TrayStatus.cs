@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Drawing;
 using System.Text.Json;
 
 namespace CodexContinuity.Tray;
@@ -65,6 +66,18 @@ internal sealed record ContinuityUpdateSnapshot(
 
 internal static class TrayStatusPresentation
 {
+    internal static Icon IconForHealth(ContinuityHealth health, Icon applicationIcon)
+    {
+        ArgumentNullException.ThrowIfNull(applicationIcon);
+        return health switch
+        {
+            ContinuityHealth.Healthy or
+            ContinuityHealth.Degraded or
+            ContinuityHealth.Unavailable => applicationIcon,
+            _ => throw new ArgumentOutOfRangeException(nameof(health), health, null),
+        };
+    }
+
     internal static bool ShowRecovery(ContinuityHealth health) => health == ContinuityHealth.Unavailable;
 
     internal static string UpdateCounts(ContinuityUpdateSnapshot update) =>
