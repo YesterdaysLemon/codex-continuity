@@ -1940,11 +1940,8 @@ internal static class Program
     {
         WriteIndented = true,
     };
-    private static readonly JsonSerializerOptions HandoffJsonOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = true,
-    };
+    private static readonly JsonSerializerOptions HandoffJsonOptions =
+        ContinuityJsonSerializerPresets.CamelCaseIndented();
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
     private sealed record SupervisorActivation(SupervisorActivationKind Kind, string Detail);

@@ -1,6 +1,5 @@
 using System.Net;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Win32;
@@ -160,11 +159,8 @@ internal sealed class InstallStateStore(string path)
     private const int MaximumPathCharacters = 32767;
     internal const int CurrentSchemaVersion = 4;
 
-    private static readonly JsonSerializerOptions SerializerOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = true,
-    };
+    private static readonly JsonSerializerOptions SerializerOptions =
+        ContinuityJsonSerializerPresets.CamelCaseIndented();
 
     internal InstallState? Load()
     {
@@ -250,7 +246,8 @@ internal sealed class InstallCoordinator(
     string stateDirectory,
     IInstallPlatform platform,
     InstallStateStore stateStore,
-    string? legacyStateDirectory = null)
+    string? legacyStateDirectory = null,
+    IInstallFileStager? fileStager = null)
 {
     private const int MaximumKnownVersionsPerStateDirectory = 128;
     internal const string SupervisorDiscoveryFailureMessage =
@@ -258,6 +255,8 @@ internal sealed class InstallCoordinator(
     internal const string AppServerUrlVariable = "CODEX_APP_SERVER_WS_URL";
     internal const string DisableUpdaterVariable = "CODEX_SPARKLE_ENABLED";
     internal const string PathVariable = "Path";
+    private readonly IInstallFileStager installFileStager =
+        fileStager ?? new InstallFileStager(stateDirectory);
 
     internal int? DetectLegacyInstalledPort()
     {
@@ -388,7 +387,7 @@ internal sealed class InstallCoordinator(
         if (intent == InstallIntent.AutomaticUpdate &&
             (!File.Exists(previousState!.InstalledExecutable) ||
              !string.Equals(
-                 ComputeSha256(previousState.InstalledExecutable),
+                 InstallFileStager.ComputeSha256(previousState.InstalledExecutable),
                  expectedInstalledSha256,
                  StringComparison.OrdinalIgnoreCase)))
         {
@@ -414,13 +413,13 @@ internal sealed class InstallCoordinator(
                 sourceTrayExecutable);
         }
 
-        var hash = ComputeSha256(sourcePath);
-        var stagedVersion = StageVersion(
+        var hash = InstallFileStager.ComputeSha256(sourcePath);
+        var stagedVersion = installFileStager.StageVersion(
             sourcePath,
             trayInstallMode == TrayInstallMode.Enabled ? sourceTrayExecutable : null,
             hash);
         var installedExecutable = stagedVersion.SupervisorExecutable;
-        var commandExecutable = PublishCommandExecutable(
+        var commandExecutable = installFileStager.PublishCommandExecutable(
             sourcePath,
             trayInstallMode == TrayInstallMode.Enabled ? sourceTrayExecutable : null,
             hash);
@@ -661,7 +660,7 @@ internal sealed class InstallCoordinator(
             PreviousInstalledExecutable = state.InstalledExecutable,
             InstalledTrayExecutable = previousTrayExecutable,
             PreviousInstalledTrayExecutable = state.InstalledTrayExecutable,
-            BinarySha256 = ComputeSha256(previousExecutable),
+            BinarySha256 = InstallFileStager.ComputeSha256(previousExecutable),
             StartupCommand = CaptureOwnedValue(currentStartup, state.StartupCommand, startupCommand),
             TrayStartupCommand = trayStartupCommand is null
                 ? null
@@ -697,124 +696,6 @@ internal sealed class InstallCoordinator(
             throw;
         }
         return rolledBack;
-    }
-
-    private sealed record StagedVersion(string SupervisorExecutable, string? TrayExecutable);
-
-    private string StageExecutable(string sourceExecutable, string destination)
-    {
-        var sourceHash = ComputeSha256(sourceExecutable);
-        if (File.Exists(destination))
-        {
-            if (!string.Equals(
-                    ComputeSha256(destination),
-                    sourceHash,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidDataException($"Staged executable hash mismatch at {destination}.");
-            }
-            return destination;
-        }
-
-        var temporaryPath = $"{destination}.{Guid.NewGuid():N}.tmp";
-        try
-        {
-            File.Copy(sourceExecutable, temporaryPath, overwrite: false);
-            if (!string.Equals(
-                    ComputeSha256(temporaryPath),
-                    sourceHash,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidDataException("Staged executable failed its SHA-256 verification.");
-            }
-            File.Move(temporaryPath, destination, overwrite: false);
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-        }
-        return destination;
-    }
-
-    private StagedVersion StageVersion(
-        string sourceExecutable,
-        string? sourceTrayExecutable,
-        string hash)
-    {
-        var assemblyVersion = typeof(InstallCoordinator).Assembly.GetName().Version;
-        var version = assemblyVersion is null
-            ? "dev"
-            : $"{assemblyVersion.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}";
-        var versionDirectory = Path.Combine(
-            ContinuityPaths.VersionsDirectory(stateDirectory),
-            $"{version}-{hash[..12].ToLowerInvariant()}");
-        Directory.CreateDirectory(versionDirectory);
-        var destination = Path.Combine(versionDirectory, "CodexContinuity.exe");
-        var supervisor = StageExecutable(sourceExecutable, destination);
-        var tray = sourceTrayExecutable is null
-            ? null
-            : StageExecutable(
-                sourceTrayExecutable,
-                Path.Combine(versionDirectory, "CodexContinuity.Tray.exe"));
-        return new StagedVersion(supervisor, tray);
-    }
-
-    private string PublishCommandExecutable(
-        string sourceExecutable,
-        string? sourceTrayExecutable,
-        string hash)
-    {
-        var destination = ContinuityPaths.CommandExecutable(stateDirectory);
-        PublishCommandFile(sourceExecutable, destination, hash);
-        if (sourceTrayExecutable is not null)
-        {
-            PublishCommandFile(
-                sourceTrayExecutable,
-                Path.Combine(
-                    ContinuityPaths.CommandDirectory(stateDirectory),
-                    "CodexContinuity.Tray.exe"),
-                ComputeSha256(sourceTrayExecutable));
-        }
-        return destination;
-    }
-
-    private static void PublishCommandFile(
-        string sourceExecutable,
-        string destination,
-        string hash)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-        if (PathsEqual(sourceExecutable, destination) ||
-            (File.Exists(destination) && string.Equals(
-                ComputeSha256(destination),
-                hash,
-                StringComparison.OrdinalIgnoreCase)))
-        {
-            return;
-        }
-        var temporaryPath = $"{destination}.{Guid.NewGuid():N}.tmp";
-        try
-        {
-            File.Copy(sourceExecutable, temporaryPath, overwrite: false);
-            if (!string.Equals(
-                    ComputeSha256(temporaryPath),
-                    hash,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidDataException("Published command failed its SHA-256 verification.");
-            }
-            File.Move(temporaryPath, destination, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-        }
     }
 
     private bool UninstallLegacyConfiguration(UninstallReconnectPolicy reconnectPolicy)
@@ -862,7 +743,7 @@ internal sealed class InstallCoordinator(
                 InstalledTrayExecutable: LegacyTrayExecutable(trayStartup),
                 PreviousInstalledTrayExecutable: null,
                 BinarySha256: File.Exists(legacyExecutable)
-                    ? ComputeSha256(legacyExecutable)
+                    ? InstallFileStager.ComputeSha256(legacyExecutable)
                     : string.Empty,
                 AppServerUrl: new OwnedString(
                     PreviousValue: null,
@@ -1106,12 +987,6 @@ internal sealed class InstallCoordinator(
             directories.Add(legacyStateDirectory);
         }
         return directories;
-    }
-
-    private static string ComputeSha256(string path)
-    {
-        using var stream = File.OpenRead(path);
-        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
     private InstalledAppRegistration BuildInstalledAppRegistration(

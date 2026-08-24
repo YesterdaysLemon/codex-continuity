@@ -189,11 +189,8 @@ internal sealed class ContinuityUpdateStateStore(string path, int retainedReleas
     private const int MaximumLoadedReleases = 256;
     private static readonly IComparer<string> SemanticVersionComparer =
         Comparer<string>.Create(ContinuitySemanticVersion.Compare);
-    private static readonly JsonSerializerOptions SerializerOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = true,
-    };
+    private static readonly JsonSerializerOptions SerializerOptions =
+        ContinuityJsonSerializerPresets.CamelCaseIndented();
 
     internal ContinuityUpdateStateLoadResult Load()
     {
