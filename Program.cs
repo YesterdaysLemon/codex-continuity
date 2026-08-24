@@ -184,15 +184,17 @@ internal static class Program
         var desktopProcesses = CodexDesktopProcesses.Capture();
         var retarget = DesktopRetargetCapability.Assess(
             package?["version"]?.GetValue<string>());
+        var codexDesktopUpdate = CodexDesktopUpdateStatus.Assess(
+            package?["version"]?.GetValue<string>(),
+            manifest?["buildVersion"]?.GetValue<string>());
 
         var result = new JsonObject
         {
             ["codexExecutable"] = codexPath,
             ["installedPackage"] = package,
             ["availableUpdate"] = manifest,
-            ["updateAvailable"] = CompareVersions(
-                package?["version"]?.GetValue<string>(),
-                manifest?["buildVersion"]?.GetValue<string>()) < 0,
+            ["updateAvailable"] = null,
+            ["codexDesktopUpdate"] = codexDesktopUpdate.ToJson(),
             ["appServerUrlForFutureLaunches"] = configuredUrl,
             ["inAppUpdaterDisabledForFutureLaunches"] = updaterDisabled == "false",
             ["continuityBackendReady"] = healthy,
@@ -1700,14 +1702,6 @@ internal static class Program
         using var response = await client.GetAsync(UpdateManifestUrl);
         response.EnsureSuccessStatusCode();
         return JsonNode.Parse(await response.Content.ReadAsStringAsync())?.AsObject();
-    }
-
-    private static int CompareVersions(string? installed, string? available)
-    {
-        return Version.TryParse(installed, out var installedVersion) &&
-               Version.TryParse(available, out var availableVersion)
-            ? installedVersion.CompareTo(availableVersion)
-            : 0;
     }
 
     private static async Task<FirstAttachmentPlan> PlanFirstAttachmentAsync()
