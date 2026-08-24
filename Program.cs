@@ -311,12 +311,26 @@ internal static class Program
         }
     }
 
-    private static Task<int> ServeAsync(int port, string[] args)
+    private static async Task<int> ServeAsync(int port, string[] args)
     {
         var stateDirectory = ContinuityPaths.StateDirectory;
         var stateDirectories = LifecycleStateDirectories();
         var desktopWaitPlan = CodexDesktopProcesses.ParseWaitPlan(args);
-        return ServeAsync(
+        var successorRequest = SupervisorSuccessorAdmission.ParseRequest(args);
+        if (successorRequest is not null)
+        {
+            var executable = Environment.ProcessPath
+                ?? throw new InvalidOperationException(
+                    "The successor supervisor executable path is unavailable.");
+            await SupervisorSuccessorAdmission.PrepareAsync(
+                stateDirectory,
+                successorRequest,
+                port,
+                FutureProcessEnvironment.ResolveCodexHome(),
+                executable,
+                CancellationToken.None);
+        }
+        return await ServeAsync(
             port,
             stateDirectory,
             stateDirectories,
