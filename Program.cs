@@ -16,6 +16,7 @@ internal static class Program
     private const string UpdateManifestUrl =
         "https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json";
     private static readonly DateTimeOffset ProcessStartedAtUtc = GetProcessStartedAtUtc();
+    internal static DateTimeOffset ProcessStartedAtUtcForHandoff => ProcessStartedAtUtc;
 
     public static async Task<int> Main(string[] args)
     {
