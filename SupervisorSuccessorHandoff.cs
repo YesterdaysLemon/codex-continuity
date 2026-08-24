@@ -35,12 +35,16 @@ internal sealed record SupervisorSuccessorHandoff(
     SupervisorExecutableIdentity SelectedBuild,
     SupervisorExecutableIdentity RollbackBuild,
     BackendLease Backend,
+    IReadOnlyList<string> PersistedThreadIds,
+    IReadOnlyList<CodexDesktopProcessIdentity> DesktopProcesses,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset ExpiresAtUtc)
 {
-    internal const int CurrentSchemaVersion = 1;
+    internal const int CurrentSchemaVersion = 2;
     internal static readonly TimeSpan MaximumLifetime = TimeSpan.FromMinutes(2);
     internal static readonly TimeSpan MaximumClockSkew = TimeSpan.FromSeconds(5);
+    internal const int MaximumPersistedThreadIds = RpcReadBudget.DefaultMaximumItems;
+    internal const int MaximumThreadIdCharacters = 128;
 
     internal void Validate()
     {
@@ -66,9 +70,11 @@ internal sealed record SupervisorSuccessorHandoff(
         if (RunningBuild is null ||
             SelectedBuild is null ||
             RollbackBuild is null ||
-            Backend is null)
+            Backend is null ||
+            PersistedThreadIds is null ||
+            DesktopProcesses is null)
         {
-            throw new InvalidDataException("Supervisor handoff identities are required.");
+            throw new InvalidDataException("Supervisor handoff proof fields are required.");
         }
         RunningBuild.Validate();
         SelectedBuild.Validate();
@@ -80,6 +86,24 @@ internal sealed record SupervisorSuccessorHandoff(
         {
             throw new InvalidDataException(
                 "The leased backend does not belong to the previous supervisor handoff.");
+        }
+        if (PersistedThreadIds.Count > MaximumPersistedThreadIds ||
+            PersistedThreadIds.Any(id =>
+                string.IsNullOrWhiteSpace(id) ||
+                id.Length > MaximumThreadIdCharacters ||
+                id.Any(char.IsControl)) ||
+            PersistedThreadIds.Distinct(StringComparer.Ordinal).Count() !=
+                PersistedThreadIds.Count)
+        {
+            throw new InvalidDataException("Supervisor handoff thread IDs are invalid.");
+        }
+        if (DesktopProcesses.Count is < 1 or > CodexDesktopProcesses.MaximumWaitProcesses ||
+            DesktopProcesses.Any(process =>
+                process.ProcessId <= 0 || process.StartedAtUtcTicks <= 0) ||
+            DesktopProcesses.Distinct().Count() != DesktopProcesses.Count)
+        {
+            throw new InvalidDataException(
+                "Supervisor handoff desktop process identities are invalid.");
         }
         if (CreatedAtUtc == default ||
             ExpiresAtUtc <= CreatedAtUtc ||

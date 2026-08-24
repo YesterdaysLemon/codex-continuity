@@ -39,7 +39,7 @@ internal static class CodexDesktopProcesses
     internal const string WaitArgument = "--wait-for-codex-process";
     internal const string NaturalClosureArgument = "--wait-for-codex-natural-closure";
 
-    private const int MaximumWaitProcesses = 64;
+    internal const int MaximumWaitProcesses = 64;
     private const string DesktopProcessName = "ChatGPT";
     private const string StorePackagePathMarker = @"\WindowsApps\OpenAI.Codex_";
 

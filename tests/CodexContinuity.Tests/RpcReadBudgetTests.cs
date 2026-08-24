@@ -35,6 +35,14 @@ public sealed class RpcReadBudgetTests
             [new ThreadLifecycleStatus("idle", [], Malformed: false)],
             Program.RpcClient.ParseThreadLifecycleData(JsonNode.Parse(
                 """[{"id":{"ignored":true},"name":["ignored"],"status":{"type":"idle"}}]""")));
+        Assert.Equal(
+            ["thread-1", "thread-2"],
+            Program.RpcClient.ParseThreadIdData(JsonNode.Parse(
+                """[{"id":"thread-1","name":"ignored"},{"id":"thread-2"}]""")));
+        Assert.Throws<InvalidOperationException>(() => Program.RpcClient.ParseThreadIdData(
+            JsonNode.Parse("""[{"id":"thread-1"},{"id":"thread-1"}]""")));
+        Assert.Throws<InvalidOperationException>(() => Program.RpcClient.ParseThreadIdData(
+            JsonNode.Parse("""[{"id":""}]""")));
     }
 
     [Fact]
@@ -156,6 +164,46 @@ public sealed class RpcReadBudgetTests
                 (_, _) => false));
 
         Assert.Contains("not owned", error.Message, StringComparison.OrdinalIgnoreCase);
+        await server;
+    }
+
+    [Fact]
+    public async Task OwnedThreadIdentityReadIsPagedAndNeverParsesTitles()
+    {
+        var (url, server) = StartServer(async socket =>
+        {
+            await CompleteInitializationAsync(socket);
+            var first = await ReceiveAsync(socket);
+            await RespondAsync(socket, first, new JsonObject
+            {
+                ["data"] = JsonNode.Parse(
+                    """[{"id":"thread-1","name":{"ignored":true}}]"""),
+                ["nextCursor"] = "next",
+            });
+            var second = await ReceiveAsync(socket);
+            Assert.Equal("next", second["params"]?["cursor"]?.GetValue<string>());
+            await RespondAsync(socket, second, new JsonObject
+            {
+                ["data"] = JsonNode.Parse(
+                    """[{"id":"thread-2","name":["ignored"]}]"""),
+                ["nextCursor"] = null,
+            });
+        });
+        var connectionChecks = 0;
+        await using var client = await Program.RpcClient.ConnectOwnedAsync(
+            url,
+            expectedBackendProcessId: 42,
+            CancellationToken.None,
+            (_, processId) =>
+            {
+                connectionChecks++;
+                return processId == 42;
+            });
+
+        Assert.Equal(
+            ["thread-1", "thread-2"],
+            await client.ListOwnedThreadIdsAsync(CancellationToken.None));
+        Assert.True(connectionChecks >= 4);
         await server;
     }
 
