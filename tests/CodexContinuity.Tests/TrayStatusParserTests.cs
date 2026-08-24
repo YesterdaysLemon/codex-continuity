@@ -1,6 +1,7 @@
 using CodexContinuity.Tray;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Drawing;
 using System.Text.Json;
 using Xunit;
 
@@ -8,6 +9,19 @@ namespace CodexContinuity.Tests;
 
 public sealed class TrayStatusParserTests
 {
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void UsesBrandedIconForEveryHealthState(int health)
+    {
+        var applicationIcon = SystemIcons.Application;
+
+        Assert.Same(applicationIcon, TrayStatusPresentation.IconForHealth(
+            (ContinuityHealth)health,
+            applicationIcon));
+    }
+
     [Theory]
     [InlineData("{\"port\":45124}", 45124)]
     [InlineData("{}", TrayStatusClient.DefaultPort)]
