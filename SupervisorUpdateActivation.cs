@@ -6,6 +6,344 @@ internal sealed record AdmittedSupervisorSuccessor(
     SupervisorSuccessorHandoff Handoff,
     SupervisorSuccessorRole Role);
 
+internal enum InterruptedSupervisorHandoffKind
+{
+    None,
+    SelectedSuccessor,
+    RollbackSuccessor,
+    ResumeCompatibilityRollback,
+}
+
+internal sealed record InterruptedSupervisorHandoffPlan(
+    InterruptedSupervisorHandoffKind Kind,
+    SupervisorSuccessorRequest? Request);
+
+internal static class SupervisorInterruptedHandoffRecovery
+{
+    internal static InterruptedSupervisorHandoffPlan Inspect(
+        string stateDirectory,
+        string currentExecutable,
+        DateTimeOffset nowUtc)
+    {
+        var current = AutomaticUpdateRunner.ResolveBuildIdentity(currentExecutable);
+        if (current is null)
+        {
+            MarkInterrupted(
+                stateDirectory,
+                nowUtc,
+                "The recovery supervisor executable identity is unavailable.");
+            return None();
+        }
+        return Inspect(
+            stateDirectory,
+            new SupervisorExecutableIdentity(
+                current.Version,
+                Path.GetFullPath(currentExecutable),
+                current.ExecutableSha256),
+            nowUtc,
+            CodexDesktopProcesses.Capture,
+            SupervisorSuccessorAdmission.InspectPredecessor);
+    }
+
+    internal static InterruptedSupervisorHandoffPlan Inspect(
+        string stateDirectory,
+        SupervisorExecutableIdentity current,
+        DateTimeOffset nowUtc,
+        Func<CodexDesktopObservation>? captureDesktop = null,
+        Func<int, DateTimeOffset, SupervisorPredecessorState>? inspectPredecessor = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(stateDirectory);
+        ArgumentNullException.ThrowIfNull(current);
+        current.Validate();
+        FileStream lifecycleLock;
+        try
+        {
+            lifecycleLock = ContinuityLifecycleLock.Acquire(
+                stateDirectory,
+                timeout: TimeSpan.Zero);
+        }
+        catch (InvalidOperationException)
+        {
+            return None();
+        }
+        using (lifecycleLock)
+        {
+            return InspectOwned(
+                stateDirectory,
+                current,
+                nowUtc,
+                captureDesktop,
+                inspectPredecessor);
+        }
+    }
+
+    private static InterruptedSupervisorHandoffPlan InspectOwned(
+        string stateDirectory,
+        SupervisorExecutableIdentity current,
+        DateTimeOffset nowUtc,
+        Func<CodexDesktopObservation>? captureDesktop,
+        Func<int, DateTimeOffset, SupervisorPredecessorState>? inspectPredecessor)
+    {
+        var store = new SupervisorSuccessorHandoffStore(
+            ContinuityPaths.SupervisorHandoffFile(stateDirectory));
+        var loaded = store.Load(nowUtc);
+        if (loaded.Kind == SupervisorSuccessorHandoffLoadKind.Missing)
+        {
+            MarkInterrupted(
+                stateDirectory,
+                nowUtc,
+                "The supervisor handoff is missing after an interrupted activation.");
+            return None();
+        }
+        if (loaded.Kind == SupervisorSuccessorHandoffLoadKind.Expired)
+        {
+            MarkInterrupted(
+                stateDirectory,
+                nowUtc,
+                "The supervisor handoff expired before activation could be verified.");
+            store.Delete();
+            return None();
+        }
+        if (loaded.Kind != SupervisorSuccessorHandoffLoadKind.Loaded || loaded.Handoff is null)
+        {
+            MarkInterrupted(
+                stateDirectory,
+                nowUtc,
+                $"The supervisor handoff is {loaded.Kind.ToString().ToLowerInvariant()} after an interrupted activation.");
+            return None();
+        }
+
+        var handoff = loaded.Handoff;
+        inspectPredecessor ??= (_, _) => SupervisorPredecessorState.Exited;
+        if (inspectPredecessor(
+                handoff.PreviousSupervisorProcessId,
+                handoff.PreviousSupervisorStartedAtUtc) != SupervisorPredecessorState.Exited)
+        {
+            return None();
+        }
+        var applyStatus = new ContinuityUpdateApplyStatusStore(
+            ContinuityPaths.UpdateApplyStatusFile(stateDirectory)).Load();
+        if (applyStatus is
+            {
+                Kind: ContinuityUpdateApplyLoadKind.Loaded,
+                Status.State: ContinuityUpdateApplyStates.Active or
+                    ContinuityUpdateApplyStates.RolledBack,
+                Status.HandoffId: null,
+            } && SameTarget(applyStatus.Status!, handoff.SelectedBuild))
+        {
+            store.Delete();
+            return None();
+        }
+        if (captureDesktop is not null &&
+            !DesktopAnchorStillRunning(handoff.DesktopProcesses, captureDesktop()))
+        {
+            MarkInterrupted(
+                stateDirectory,
+                nowUtc,
+                "The original Codex desktop closed before interrupted activation proof could resume.");
+            store.Delete();
+            return None();
+        }
+        var lease = new BackendLeaseStore(
+            ContinuityPaths.BackendLeaseFile(stateDirectory)).Load();
+        if (lease.Kind != BackendLeaseLoadKind.Loaded || lease.Lease is null)
+        {
+            MarkInterrupted(
+                stateDirectory,
+                nowUtc,
+                "The backend lease is unavailable after an interrupted activation.");
+            return None();
+        }
+        if (lease.Lease != handoff.Backend)
+        {
+            var rebased = RebaseCrashedSuccessor(
+                stateDirectory,
+                handoff,
+                lease.Lease,
+                applyStatus,
+                nowUtc);
+            if (rebased is null)
+            {
+                MarkInterrupted(
+                    stateDirectory,
+                    nowUtc,
+                    "The backend ownership changed without exact crashed-successor proof.");
+                return None();
+            }
+            handoff = rebased;
+        }
+        if (SameBuild(current, handoff.RollbackBuild))
+        {
+            return new(
+                InterruptedSupervisorHandoffKind.RollbackSuccessor,
+                new(handoff.HandoffId, SupervisorSuccessorRole.Rollback));
+        }
+        if (SameBuild(current, handoff.SelectedBuild))
+        {
+            var resumingCompatibilityRollback =
+                SameBuild(handoff.RunningBuild, handoff.SelectedBuild) &&
+                !SameBuild(handoff.SelectedBuild, handoff.RollbackBuild);
+            return new(
+                resumingCompatibilityRollback
+                    ? InterruptedSupervisorHandoffKind.ResumeCompatibilityRollback
+                    : InterruptedSupervisorHandoffKind.SelectedSuccessor,
+                new(handoff.HandoffId, SupervisorSuccessorRole.Selected));
+        }
+
+        MarkInterrupted(
+            stateDirectory,
+            nowUtc,
+            "The available supervisor does not match the interrupted handoff builds.");
+        return None();
+    }
+
+    private static void MarkInterrupted(
+        string stateDirectory,
+        DateTimeOffset nowUtc,
+        string error)
+    {
+        var store = new ContinuityUpdateApplyStatusStore(
+            ContinuityPaths.UpdateApplyStatusFile(stateDirectory));
+        var loaded = store.Load();
+        if (loaded is not
+            {
+                Kind: ContinuityUpdateApplyLoadKind.Loaded,
+                Status.State: ContinuityUpdateApplyStates.Applying,
+            })
+        {
+            return;
+        }
+        store.Save(loaded.Status! with
+        {
+            State = ContinuityUpdateApplyStates.Failed,
+            UpdatedAtUtc = nowUtc,
+            IdleSinceUtc = null,
+            HandoffId = null,
+            LastError = SupervisorUpdateApplyMonitor.BoundError(error),
+        });
+    }
+
+    private static SupervisorSuccessorHandoff? RebaseCrashedSuccessor(
+        string stateDirectory,
+        SupervisorSuccessorHandoff handoff,
+        BackendLease lease,
+        ContinuityUpdateApplyStatusLoadResult applyStatus,
+        DateTimeOffset nowUtc)
+    {
+        if (!SameBackendExceptOwner(handoff.Backend, lease) ||
+            applyStatus is not
+            {
+                Kind: ContinuityUpdateApplyLoadKind.Loaded,
+                Status.State: ContinuityUpdateApplyStates.Applying,
+            } ||
+            applyStatus.Status!.HandoffId != handoff.HandoffId)
+        {
+            return null;
+        }
+        var supervisor = new SupervisorStatusStore(
+            ContinuityPaths.SupervisorStatusFile(stateDirectory)).Load();
+        if (supervisor is not
+            {
+                Kind: SupervisorStatusLoadKind.Loaded,
+                Status.SupervisorStartedAtUtc: { } supervisorStartedAtUtc,
+                Status.SupervisorExecutable: { } supervisorExecutable,
+            } ||
+            supervisor.Status!.SupervisorProcessId != lease.OwnerSupervisorProcessId ||
+            supervisor.Status.BackendProcessId != lease.BackendProcessId ||
+            supervisor.Status.Port != lease.PublicPort ||
+            !SameOptionalPath(supervisor.Status.CodexHome, lease.CodexHome) ||
+            !Path.GetFullPath(supervisorExecutable).Equals(
+                Path.GetFullPath(handoff.SelectedBuild.Executable),
+                StringComparison.OrdinalIgnoreCase) ||
+            SupervisorSuccessorAdmission.InspectPredecessor(
+                lease.OwnerSupervisorProcessId,
+                supervisorStartedAtUtc) != SupervisorPredecessorState.Exited)
+        {
+            return null;
+        }
+        var selected = AutomaticUpdateRunner.ResolveBuildIdentity(
+            handoff.SelectedBuild.Executable);
+        if (selected is null ||
+            !selected.Version.Equals(
+                handoff.SelectedBuild.Version,
+                StringComparison.OrdinalIgnoreCase) ||
+            !selected.ExecutableSha256.Equals(
+                handoff.SelectedBuild.ExecutableSha256,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var rebased = handoff with
+        {
+            HandoffId = Guid.NewGuid().ToString("N"),
+            PreviousSupervisorProcessId = lease.OwnerSupervisorProcessId,
+            PreviousSupervisorStartedAtUtc = supervisorStartedAtUtc,
+            Backend = lease,
+            CreatedAtUtc = nowUtc,
+            ExpiresAtUtc = nowUtc + SupervisorSuccessorHandoff.MaximumLifetime,
+        };
+        rebased.Validate();
+        new SupervisorSuccessorHandoffStore(
+            ContinuityPaths.SupervisorHandoffFile(stateDirectory)).Write(rebased);
+        new ContinuityUpdateApplyStatusStore(
+            ContinuityPaths.UpdateApplyStatusFile(stateDirectory)).Save(
+                applyStatus.Status with
+                {
+                    UpdatedAtUtc = nowUtc,
+                    HandoffId = rebased.HandoffId,
+                    LastError = null,
+                });
+        return rebased;
+    }
+
+    private static InterruptedSupervisorHandoffPlan None() => new(
+        InterruptedSupervisorHandoffKind.None,
+        Request: null);
+
+    private static bool SameBuild(
+        SupervisorExecutableIdentity left,
+        SupervisorExecutableIdentity right) =>
+        Path.GetFullPath(left.Executable).Equals(
+            Path.GetFullPath(right.Executable),
+            StringComparison.OrdinalIgnoreCase) &&
+        left.Version.Equals(right.Version, StringComparison.OrdinalIgnoreCase) &&
+        left.ExecutableSha256.Equals(
+            right.ExecutableSha256,
+            StringComparison.OrdinalIgnoreCase);
+
+    private static bool SameTarget(
+        ContinuityUpdateApplyStatus status,
+        SupervisorExecutableIdentity build) =>
+        status.TargetVersion?.Equals(build.Version, StringComparison.OrdinalIgnoreCase) == true &&
+        status.TargetExecutableSha256?.Equals(
+            build.ExecutableSha256,
+            StringComparison.OrdinalIgnoreCase) == true;
+
+    private static bool SameBackendExceptOwner(BackendLease left, BackendLease right) =>
+        left.SchemaVersion == right.SchemaVersion &&
+        left.BackendProcessId == right.BackendProcessId &&
+        left.PublicPort == right.PublicPort &&
+        left.BackendPort == right.BackendPort &&
+        Path.GetFullPath(left.BackendExecutable).Equals(
+            Path.GetFullPath(right.BackendExecutable),
+            StringComparison.OrdinalIgnoreCase) &&
+        SameOptionalPath(left.CodexHome, right.CodexHome) &&
+        left.BackendStartedAtUtc == right.BackendStartedAtUtc;
+
+    private static bool SameOptionalPath(string? left, string? right) =>
+        left is null && right is null ||
+        left is not null && right is not null && Path.GetFullPath(left).Equals(
+            Path.GetFullPath(right),
+            StringComparison.OrdinalIgnoreCase);
+
+    private static bool DesktopAnchorStillRunning(
+        IReadOnlyList<CodexDesktopProcessIdentity> expected,
+        CodexDesktopObservation current) =>
+        current.Kind == CodexDesktopObservationKind.Running &&
+        expected.All(current.Processes.Contains);
+}
+
 internal sealed class SupervisorUpdateApplyMonitor
 {
     internal static readonly TimeSpan ObservationInterval = TimeSpan.FromSeconds(5);

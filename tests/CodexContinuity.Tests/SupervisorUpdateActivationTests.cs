@@ -303,6 +303,286 @@ public sealed class SupervisorUpdateActivationTests : IDisposable
         Assert.EndsWith("…", result);
     }
 
+    [Fact]
+    public void ExactSelectedBuildRecoversAnInterruptedActivationHandoff()
+    {
+        var fixture = PrepareCompletionFixture(SupervisorSuccessorRole.Selected);
+
+        var recovery = SupervisorInterruptedHandoffRecovery.Inspect(
+            root,
+            fixture.Successor.Handoff.SelectedBuild,
+            Now);
+
+        Assert.Equal(InterruptedSupervisorHandoffKind.SelectedSuccessor, recovery.Kind);
+        Assert.Equal(
+            new SupervisorSuccessorRequest(
+                fixture.Successor.Handoff.HandoffId,
+                SupervisorSuccessorRole.Selected),
+            recovery.Request);
+        Assert.Equal(ContinuityUpdateApplyStates.Applying, LoadApplyStatus().State);
+    }
+
+    [Fact]
+    public void ExactRollbackBuildRecoversAsRollbackSuccessor()
+    {
+        var fixture = PrepareCompletionFixture(SupervisorSuccessorRole.Selected);
+
+        var recovery = SupervisorInterruptedHandoffRecovery.Inspect(
+            root,
+            fixture.Successor.Handoff.RollbackBuild,
+            Now);
+
+        Assert.Equal(InterruptedSupervisorHandoffKind.RollbackSuccessor, recovery.Kind);
+        Assert.Equal(SupervisorSuccessorRole.Rollback, recovery.Request!.Role);
+    }
+
+    [Fact]
+    public void InterruptedCompatibilityRollbackResumesThroughHelper()
+    {
+        var fixture = PrepareCompletionFixture(SupervisorSuccessorRole.Selected);
+        var rollbackHandoff = fixture.Successor.Handoff with
+        {
+            RunningBuild = fixture.Successor.Handoff.SelectedBuild,
+        };
+        new SupervisorSuccessorHandoffStore(
+            ContinuityPaths.SupervisorHandoffFile(root)).Write(rollbackHandoff);
+
+        var recovery = SupervisorInterruptedHandoffRecovery.Inspect(
+            root,
+            rollbackHandoff.SelectedBuild,
+            Now);
+
+        Assert.Equal(
+            InterruptedSupervisorHandoffKind.ResumeCompatibilityRollback,
+            recovery.Kind);
+        Assert.Equal(SupervisorSuccessorRole.Selected, recovery.Request!.Role);
+    }
+
+    [Fact]
+    public void MissingInterruptedHandoffBecomesRetryableFailureEvidence()
+    {
+        var fixture = PrepareCompletionFixture(SupervisorSuccessorRole.Selected);
+        new SupervisorSuccessorHandoffStore(
+            ContinuityPaths.SupervisorHandoffFile(root)).Delete();
+
+        var recovery = SupervisorInterruptedHandoffRecovery.Inspect(
+            root,
+            fixture.Successor.Handoff.SelectedBuild,
+            Now);
+
+        Assert.Equal(InterruptedSupervisorHandoffKind.None, recovery.Kind);
+        var status = LoadApplyStatus();
+        Assert.Equal(ContinuityUpdateApplyStates.Failed, status.State);
+        Assert.Contains("missing", status.LastError);
+        Assert.Null(status.HandoffId);
+    }
+
+    [Fact]
+    public void ExpiredInterruptedHandoffIsDeletedAndBecomesFailureEvidence()
+    {
+        var fixture = PrepareCompletionFixture(SupervisorSuccessorRole.Selected);
+        var expired = fixture.Successor.Handoff with
+        {
+            CreatedAtUtc = Now - TimeSpan.FromMinutes(3),
+            ExpiresAtUtc = Now - TimeSpan.FromMinutes(1),
+        };
+        new SupervisorSuccessorHandoffStore(
+            ContinuityPaths.SupervisorHandoffFile(root)).Write(expired);
+
+        var recovery = SupervisorInterruptedHandoffRecovery.Inspect(
+            root,
+            expired.SelectedBuild,
+            Now);
+
+        Assert.Equal(InterruptedSupervisorHandoffKind.None, recovery.Kind);
+        Assert.Equal(ContinuityUpdateApplyStates.Failed, LoadApplyStatus().State);
+        Assert.Equal(
+            SupervisorSuccessorHandoffLoadKind.Missing,
+            new SupervisorSuccessorHandoffStore(
+                ContinuityPaths.SupervisorHandoffFile(root)).Load(Now).Kind);
+    }
+
+    [Fact]
+    public void ForeignRecoveryBuildFailsClosedAndPreservesHandoffEvidence()
+    {
+        PrepareCompletionFixture(SupervisorSuccessorRole.Selected);
+
+        var recovery = SupervisorInterruptedHandoffRecovery.Inspect(
+            root,
+            Build("0.5.0", "foreign.exe", 'c'),
+            Now);
+
+        Assert.Equal(InterruptedSupervisorHandoffKind.None, recovery.Kind);
+        Assert.Equal(ContinuityUpdateApplyStates.Failed, LoadApplyStatus().State);
+        Assert.Equal(
+            SupervisorSuccessorHandoffLoadKind.Loaded,
+            new SupervisorSuccessorHandoffStore(
+                ContinuityPaths.SupervisorHandoffFile(root)).Load(Now).Kind);
+    }
+
+    [Theory]
+    [InlineData(ContinuityUpdateApplyStates.Active)]
+    [InlineData(ContinuityUpdateApplyStates.RolledBack)]
+    public void TerminalProofMakesLeftoverHandoffCleanupIdempotent(string terminalState)
+    {
+        var fixture = PrepareCompletionFixture(SupervisorSuccessorRole.Selected);
+        var status = LoadApplyStatus() with
+        {
+            State = terminalState,
+            HandoffId = null,
+            LastError = terminalState == ContinuityUpdateApplyStates.RolledBack
+                ? "selected proof failed"
+                : null,
+        };
+        new ContinuityUpdateApplyStatusStore(
+            ContinuityPaths.UpdateApplyStatusFile(root)).Save(status);
+
+        var recovery = SupervisorInterruptedHandoffRecovery.Inspect(
+            root,
+            fixture.Successor.Handoff.SelectedBuild,
+            Now);
+
+        Assert.Equal(InterruptedSupervisorHandoffKind.None, recovery.Kind);
+        Assert.Equal(terminalState, LoadApplyStatus().State);
+        Assert.Equal(
+            SupervisorSuccessorHandoffLoadKind.Missing,
+            new SupervisorSuccessorHandoffStore(
+                ContinuityPaths.SupervisorHandoffFile(root)).Load(Now).Kind);
+    }
+
+    [Fact]
+    public void CrashedSelectedSuccessorLeaseIsRebasedFromExactStatusProof()
+    {
+        var fixture = PrepareCompletionFixture(SupervisorSuccessorRole.Selected);
+        var executable = typeof(Program).Assembly.Location;
+        var identity = AutomaticUpdateRunner.ResolveBuildIdentity(executable)!;
+        var selected = new SupervisorExecutableIdentity(
+            identity.Version,
+            executable,
+            identity.ExecutableSha256);
+        var original = fixture.Successor.Handoff with { SelectedBuild = selected };
+        var crashedOwner = int.MaxValue;
+        var movedLease = original.Backend with { OwnerSupervisorProcessId = crashedOwner };
+        new SupervisorSuccessorHandoffStore(
+            ContinuityPaths.SupervisorHandoffFile(root)).Write(original);
+        new BackendLeaseStore(
+            ContinuityPaths.BackendLeaseFile(root)).Write(movedLease);
+        new ContinuityUpdateApplyStatusStore(
+            ContinuityPaths.UpdateApplyStatusFile(root)).Save(LoadApplyStatus() with
+            {
+                TargetVersion = selected.Version,
+                TargetExecutableSha256 = selected.ExecutableSha256,
+                HandoffId = original.HandoffId,
+            });
+        new SupervisorStatusStore(
+            ContinuityPaths.SupervisorStatusFile(root)).Write(new(
+                "running",
+                crashedOwner,
+                movedLease.BackendProcessId,
+                movedLease.PublicPort,
+                movedLease.CodexHome,
+                ConsecutiveFailures: 0,
+                LastExitCode: null,
+                Now,
+                NextRetryAtUtc: null,
+                "crashed selected fixture",
+                SupervisorStartedAtUtc: Now - TimeSpan.FromMinutes(1),
+                SupervisorExecutable: executable));
+
+        var recovery = SupervisorInterruptedHandoffRecovery.Inspect(
+            root,
+            selected,
+            Now);
+
+        Assert.Equal(InterruptedSupervisorHandoffKind.SelectedSuccessor, recovery.Kind);
+        Assert.NotEqual(original.HandoffId, recovery.Request!.HandoffId);
+        var rebased = new SupervisorSuccessorHandoffStore(
+            ContinuityPaths.SupervisorHandoffFile(root)).Load(Now).Handoff!;
+        Assert.Equal(crashedOwner, rebased.PreviousSupervisorProcessId);
+        Assert.Equal(movedLease, rebased.Backend);
+        Assert.Equal(rebased.HandoffId, LoadApplyStatus().HandoffId);
+    }
+
+    [Fact]
+    public void ChangedLeaseWithoutExactSupervisorProofFailsClosed()
+    {
+        var fixture = PrepareCompletionFixture(SupervisorSuccessorRole.Selected);
+        new BackendLeaseStore(
+            ContinuityPaths.BackendLeaseFile(root)).Write(
+                fixture.Successor.Handoff.Backend with
+                {
+                    OwnerSupervisorProcessId = int.MaxValue,
+                });
+
+        var recovery = SupervisorInterruptedHandoffRecovery.Inspect(
+            root,
+            fixture.Successor.Handoff.SelectedBuild,
+            Now);
+
+        Assert.Equal(InterruptedSupervisorHandoffKind.None, recovery.Kind);
+        Assert.Equal(ContinuityUpdateApplyStates.Failed, LoadApplyStatus().State);
+        Assert.Contains("ownership changed", LoadApplyStatus().LastError);
+    }
+
+    [Fact]
+    public void ClosedDesktopTurnsInterruptedHandoffIntoRecoverableFailure()
+    {
+        var fixture = PrepareCompletionFixture(SupervisorSuccessorRole.Selected);
+
+        var recovery = SupervisorInterruptedHandoffRecovery.Inspect(
+            root,
+            fixture.Successor.Handoff.SelectedBuild,
+            Now,
+            () => new(CodexDesktopObservationKind.NotRunning, [], "closed"));
+
+        Assert.Equal(InterruptedSupervisorHandoffKind.None, recovery.Kind);
+        Assert.Equal(ContinuityUpdateApplyStates.Failed, LoadApplyStatus().State);
+        Assert.Contains("desktop closed", LoadApplyStatus().LastError);
+        Assert.Equal(
+            SupervisorSuccessorHandoffLoadKind.Missing,
+            new SupervisorSuccessorHandoffStore(
+                ContinuityPaths.SupervisorHandoffFile(root)).Load(Now).Kind);
+    }
+
+    [Fact]
+    public void ConcurrentPlainStartDoesNotMutateAnActiveHandoff()
+    {
+        var fixture = PrepareCompletionFixture(SupervisorSuccessorRole.Selected);
+
+        var recovery = SupervisorInterruptedHandoffRecovery.Inspect(
+            root,
+            fixture.Successor.Handoff.SelectedBuild,
+            Now,
+            () => new(CodexDesktopObservationKind.NotRunning, [], "inconclusive fixture"),
+            (_, _) => SupervisorPredecessorState.Running);
+
+        Assert.Equal(InterruptedSupervisorHandoffKind.None, recovery.Kind);
+        Assert.Equal(ContinuityUpdateApplyStates.Applying, LoadApplyStatus().State);
+        Assert.Equal(
+            SupervisorSuccessorHandoffLoadKind.Loaded,
+            new SupervisorSuccessorHandoffStore(
+                ContinuityPaths.SupervisorHandoffFile(root)).Load(Now).Kind);
+    }
+
+    [Fact]
+    public void BusyLifecycleLockDefersInterruptedHandoffRecoveryWithoutMutation()
+    {
+        var fixture = PrepareCompletionFixture(SupervisorSuccessorRole.Selected);
+        using var lifecycleLock = ContinuityLifecycleLock.Acquire(root);
+
+        var recovery = SupervisorInterruptedHandoffRecovery.Inspect(
+            root,
+            fixture.Successor.Handoff.SelectedBuild,
+            Now);
+
+        Assert.Equal(InterruptedSupervisorHandoffKind.None, recovery.Kind);
+        Assert.Equal(ContinuityUpdateApplyStates.Applying, LoadApplyStatus().State);
+        Assert.Equal(
+            SupervisorSuccessorHandoffLoadKind.Loaded,
+            new SupervisorSuccessorHandoffStore(
+                ContinuityPaths.SupervisorHandoffFile(root)).Load(Now).Kind);
+    }
+
     private SupervisorUpdateApplyMonitor Monitor(
         MonitorFixture fixture,
         Func<string, int, int, CancellationToken, Task<ContinuityHandoffPlan>>? observe = null,
@@ -396,6 +676,8 @@ public sealed class SupervisorUpdateActivationTests : IDisposable
             Now);
         new SupervisorSuccessorHandoffStore(
             ContinuityPaths.SupervisorHandoffFile(root)).Write(handoff);
+        new BackendLeaseStore(
+            ContinuityPaths.BackendLeaseFile(root)).Write(handoff.Backend);
         new ContinuityUpdateApplyStatusStore(
             ContinuityPaths.UpdateApplyStatusFile(root)).Save(new(
                 ContinuityUpdateApplyStatus.CurrentSchemaVersion,
