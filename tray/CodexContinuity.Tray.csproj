@@ -8,7 +8,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <AssemblyName>CodexContinuity.Tray</AssemblyName>
     <RootNamespace>CodexContinuity.Tray</RootNamespace>
-    <Version>0.6.0</Version>
+    <Version>0.7.0</Version>
     <Authors>YesterdaysLemon</Authors>
     <Company>YesterdaysLemon</Company>
     <Product>Codex Continuity</Product>
@@ -20,5 +20,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\UpdateContracts.cs" Link="UpdateContracts.cs" />
+    <Compile Include="..\PackageIdentity.cs" Link="PackageIdentity.cs" />
   </ItemGroup>
 </Project>

@@ -68,12 +68,20 @@ internal sealed class ContinuityTrayContext : ApplicationContext
     private TrayNotificationSnapshot? previousNotificationSnapshot;
     private TrayNotificationAction notificationAction;
     private readonly TrayMutationPresenter mutationPresenter = new();
+    private readonly TrayDistributionContext distribution;
 
     internal ContinuityTrayContext()
     {
+        distribution = TrayDistribution.Detect();
+        var packaged = distribution.Packaged;
         var applicationDirectory = AppContext.BaseDirectory;
-        var supervisorExecutable = TrayStatusClient.ResolveSupervisorExecutable(
-            applicationDirectory);
+        var supervisorExecutable = packaged
+            ? Path.GetFullPath(Path.Combine(
+                applicationDirectory,
+                "..",
+                "Supervisor",
+                "CodexContinuity.exe"))
+            : TrayStatusClient.ResolveSupervisorExecutable(applicationDirectory);
         statusClient = new TrayStatusClient(supervisorExecutable, applicationDirectory);
         activityHistory = new TrayActivityHistoryStore(statusClient.ActivityHistoryPath);
         applicationIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath)
@@ -87,6 +95,8 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         readinessItem = new ToolStripMenuItem("Updater readiness: checking...") { Enabled = false };
         applyDetailItem = new ToolStripMenuItem("Activation: checking...") { Enabled = false };
         activationScheduleItem = new ToolStripMenuItem("Activation schedule: checking...") { Enabled = false };
+        applyDetailItem.Visible = !packaged;
+        activationScheduleItem.Visible = !packaged;
         automaticApplyItem = MenuItem(
             "Apply Continuity updates when idle (Codex stays open)",
             async () => await ToggleAutomaticApplyAsync());
@@ -124,6 +134,7 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         checkForUpdatesItem = MenuItem(
             "Check for updates now",
             async () => await CheckForUpdatesAsync());
+        checkForUpdatesItem.Visible = !packaged;
         recoveryItem = MenuItem(
             "Restart Continuity backend",
             async () => await RestartSupervisorAsync());
@@ -134,7 +145,9 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         rollbackItem.Visible = false;
         releaseNotesItem = MenuItem("View release notes", OpenReleaseNotes);
         releaseNotesItem.Visible = false;
-        storeUpdateItem = MenuItem("Open Codex in Microsoft Store to check", OpenMicrosoftStore);
+        storeUpdateItem = MenuItem(
+            "Open Codex Desktop in Microsoft Store to check",
+            OpenMicrosoftStore);
         storeUpdateItem.Visible = false;
         copyDiagnosticsItem = MenuItem("Copy redacted diagnostics", CopyDiagnostics);
         recentActivityItem = MenuItem(
@@ -240,6 +253,7 @@ internal sealed class ContinuityTrayContext : ApplicationContext
         refreshInProgress = true;
         try
         {
+            var packaged = distribution.Packaged;
             var status = await statusClient.ReadAsync(shutdown.Token);
             healthItem.Text = status.Detail;
             var activeAgents = status.ActiveAgentCount?.ToString() ?? "unknown";
@@ -249,23 +263,43 @@ internal sealed class ContinuityTrayContext : ApplicationContext
                 applicationIcon);
             var state = status.Health.ToString().ToLowerInvariant();
             notifyIcon.Text = $"Codex Continuity — {state} — {activeAgents} active agents";
-            recoveryItem.Visible = TrayStatusPresentation.ShowRecovery(status.Health);
+            recoveryItem.Visible =
+                !packaged && TrayStatusPresentation.ShowRecovery(status.Health);
             var update = await statusClient.ReadUpdateAsync(shutdown.Token);
-            updateItem.Text = TrayStatusPresentation.UpdateCounts(update);
+            const string packagedOwnership = "packaged; source ownership unverified";
+            if (packaged)
+            {
+                update = ContinuityUpdateSnapshot.Unavailable(
+                    "Direct release state does not apply to a packaged build.");
+            }
+            updateItem.Text = packaged
+                ? $"Continuity updates: {packagedOwnership}"
+                : TrayStatusPresentation.UpdateCounts(update);
             updateItem.Enabled = false;
-            updateDetailItem.Text = TrayStatusPresentation.UpdateDetail(update, status.Health);
-            versionDetailItem.Text = TrayStatusPresentation.VersionDetail(update);
-            readinessItem.Text = TrayStatusPresentation.UpdaterReadinessDetail(update);
-            latestReleaseUrl = update.LatestReleaseUrl;
+            updateDetailItem.Text = packaged
+                ? "Package source unverified; Continuity self-update disabled"
+                : TrayStatusPresentation.UpdateDetail(update, status.Health);
+            versionDetailItem.Text = packaged
+                ? $"Continuity v{Application.ProductVersion}; {packagedOwnership}"
+                : TrayStatusPresentation.VersionDetail(update);
+            readinessItem.Text = packaged
+                ? $"Updater readiness: {packagedOwnership}"
+                : TrayStatusPresentation.UpdaterReadinessDetail(update);
+            latestReleaseUrl = packaged ? null : update.LatestReleaseUrl;
             releaseNotesItem.Text = update.LatestVersion is { } latestVersion
                 ? $"View release notes for v{latestVersion}"
                 : "View release notes";
-            releaseNotesItem.Visible = latestReleaseUrl is not null;
+            releaseNotesItem.Visible = !packaged && latestReleaseUrl is not null;
             rollbackItem.Text = update.RollbackVersion is { } rollbackVersion
                 ? $"Rollback to v{rollbackVersion} on next safe start"
                 : "Rollback Continuity on next safe start";
-            rollbackItem.Visible = TrayStatusPresentation.ShowRollback(update);
+            rollbackItem.Visible = !packaged && TrayStatusPresentation.ShowRollback(update);
             var apply = await statusClient.ReadApplyAsync(shutdown.Token);
+            if (packaged)
+            {
+                apply = ContinuityApplySnapshot.Unavailable(
+                    "Direct activation state does not apply to a packaged build.");
+            }
             applyDetailItem.Text = TrayStatusPresentation.ApplyDetail(apply);
             activationScheduleItem.Text = TrayStatusPresentation.ActivationScheduleDetail(
                 apply,
@@ -273,28 +307,33 @@ internal sealed class ContinuityTrayContext : ApplicationContext
             automaticApplyItem.Checked = apply.AutomaticApplyWhenIdle;
             applyPolicyMutable = TrayStatusPresentation.CanChangeApplyPolicy(apply);
             applyRetryAvailable = TrayStatusPresentation.ShowApplyRetry(apply);
-            automaticApplyItem.Enabled = applyPolicyMutable;
-            retryApplyItem.Visible = applyRetryAvailable;
+            automaticApplyItem.Visible = !packaged;
+            automaticApplyItem.Enabled = !packaged && applyPolicyMutable;
+            retryApplyItem.Visible = !packaged && applyRetryAvailable;
             retryApplyItem.Enabled = applyRetryAvailable;
             snoozeMenu.Text = apply.SnoozedUntilUtc is { }
                 ? "Change activation snooze"
                 : "Snooze activation";
-            snoozeMenu.Enabled = applyPolicyMutable;
-            clearSnoozeItem.Visible = apply.SnoozedUntilUtc is not null;
+            snoozeMenu.Visible = !packaged;
+            snoozeMenu.Enabled = !packaged && applyPolicyMutable;
+            clearSnoozeItem.Visible = !packaged && apply.SnoozedUntilUtc is not null;
             clearSnoozeItem.Enabled = applyPolicyMutable;
             activationWindowMenu.Text = apply.ActivationWindow is { }
                 ? "Change activation window"
                 : "Set activation window";
-            activationWindowMenu.Enabled = applyPolicyMutable;
+            activationWindowMenu.Visible = !packaged;
+            activationWindowMenu.Enabled = !packaged && applyPolicyMutable;
             customActivationWindowItem.Enabled = applyPolicyMutable;
-            clearActivationWindowItem.Visible = apply.ActivationWindow is not null;
+            clearActivationWindowItem.Visible =
+                !packaged && apply.ActivationWindow is not null;
             clearActivationWindowItem.Enabled = applyPolicyMutable;
             var desktop = await statusClient.ReadDesktopUpdateAsync(shutdown.Token);
             storeUpdateItem.Visible = TrayStatusPresentation.ShowMicrosoftStoreUpdate(desktop);
             storeUpdateItem.Enabled = storeUpdateItem.Visible;
             if (desktop.AdvertisedVersion is { } advertisedVersion)
             {
-                storeUpdateItem.Text = $"Open Codex v{advertisedVersion} in Microsoft Store to check";
+                storeUpdateItem.Text =
+                    $"Open Codex Desktop v{advertisedVersion} in Microsoft Store to check";
             }
 
             var notificationSnapshot = TrayNotificationSnapshot.From(status, update, apply);

@@ -29,6 +29,11 @@ internal static class Program
             var command = ResolveCommand(setupExecutable, args);
             var requestedPort = ParsePort(args);
             var port = requestedPort ?? DefaultPort;
+            var distribution = ContinuityDistribution.Detect();
+            if (!StoreRuntimePolicy.TryAuthorize(command, distribution, out var policyError))
+            {
+                return Fail(policyError!);
+            }
             return command switch
             {
                 "help" or "--help" or "-h" => PrintHelp(),
@@ -37,6 +42,10 @@ internal static class Program
                 "handoff-plan" => await PrintHandoffPlanAsync(port),
                 "update" => await UpdateAsync(),
                 "update-policy" => UpdatePolicy(args),
+                "store-readiness" => StoreReadiness.Run(
+                    distribution,
+                    Console.Out,
+                    JsonOptions),
                 "serve" => await ServeAsync(port, args),
                 "rollback-helper" => await RollbackHelperAsync(port, args),
                 "install" => await InstallAsync(
@@ -109,6 +118,7 @@ internal static class Program
               handoff-plan  Read whether lifecycle work must wait, apply an update, or may hand off.
               update      Check for and safely stage a verified Continuity release.
               update-policy  Inspect or opt into idle-window activation of verified updates.
+              store-readiness  Print the fail-closed Microsoft Store submission gates.
               serve       Supervise a loopback WebSocket app-server.
               install     Configure future desktop launches and start at user logon.
               attach      Arm or start the installed supervisor without touching Codex.

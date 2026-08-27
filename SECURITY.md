@@ -23,11 +23,21 @@ whether the issue can expose the loopback app-server beyond the local machine.
 - Authentication and thread persistence remain owned by the official Codex
   app-server and the user's existing Codex home.
 - The utility does not patch, replace, or resign the installed desktop app.
-- Installation changes only user environment variables, a user startup entry,
+- The supported direct installation changes only user environment variables, user startup entries,
   and files under the user's local application-data directory.
 - App-server stdout and stderr are local diagnostics and may contain paths,
   thread metadata, or error context. Logs are size-bounded and rotated, but
-  should still be handled as potentially sensitive user data.
+should still be handled as potentially sensitive user data.
+
+## Microsoft Store prototype
+
+The repository's MSIX layout is not a supported or distributable package.
+Package identity disables direct-install lifecycle mutations and self-update
+commands, but does not prove Microsoft Store ownership. The prototype must not
+ship until endpoint configuration and clean uninstall are reversible, startup
+and migration ownership are explicit, and a signed two-version package update
+preserves an active isolated agent. The staging output carries a
+`DO-NOT-SUBMIT.txt` marker and intentionally produces no MSIX.
 
 ## Release integrity
 

@@ -54,7 +54,7 @@ export default function Home() {
               View source <span aria-hidden="true">↗</span>
             </a>
           </div>
-          <p className="microcopy">v0.6.0 · Open source · No desktop patching</p>
+          <p className="microcopy">v0.7.0 · Open source · No desktop patching</p>
         </div>
 
         <div className="continuity-card" aria-label="Continuity architecture">
@@ -172,6 +172,10 @@ export default function Home() {
             arms itself and waits for a natural close. It never asks for a
             restart or starts a competing backend.
           </p>
+          <p>
+            Continuity currently ships through this direct installer. Its MSIX
+            layout is a fail-closed prototype; no Store package is produced.
+          </p>
           <a
             className="text-link"
             href="https://github.com/YesterdaysLemon/codex-continuity#install"
@@ -206,9 +210,9 @@ export default function Home() {
           <div className="terminal" aria-label="Installed Codex Continuity commands">
             <div className="terminal-bar">
               <span>CodexContinuity</span>
-              <span>user PATH / v0.6.0</span>
+              <span>user PATH / v0.7.0</span>
             </div>
-            <pre><code>CodexContinuity status{"\n"}CodexContinuity probe{"\n"}CodexContinuity update-policy --enable{"\n"}CodexContinuity repair{"\n"}CodexContinuity uninstall</code></pre>
+            <pre><code>CodexContinuity status{"\n"}CodexContinuity probe{"\n"}CodexContinuity store-readiness{"\n"}CodexContinuity update-policy --enable{"\n"}CodexContinuity repair{"\n"}CodexContinuity uninstall</code></pre>
             <div className="terminal-foot">
               <span>Uninstall never stops active agents</span>
               <span>Files leave at next sign-in</span>
@@ -256,9 +260,9 @@ export default function Home() {
           <p>
             Codex Continuity relies on experimental app-server transport and
             undocumented desktop environment hooks. A future Codex release may
-            change them. v0.6.0 supports Windows 11 x64 only; there is no macOS
-            or Linux build today. The utility is deliberately small,
-            fail-closed, and removable with one command.
+            change them. v0.7.0 supports Windows 11 x64 only; there is no macOS
+            or Linux build today. The utility is deliberately small and
+            fail-closed; its supported direct install is removable with one command.
           </p>
         </div>
         <a className="button button-secondary" href="https://github.com/YesterdaysLemon/codex-continuity/blob/main/REVERSE_ENGINEERING.md">

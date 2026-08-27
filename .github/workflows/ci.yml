@@ -32,6 +32,31 @@ jobs:
         run: .\scripts\build-icons.ps1 -Check -ExecutablePath .\tray\bin\Release\net10.0-windows\CodexContinuity.Tray.exe -ExpectedDescription 'Codex Continuity Tray' -ExpectedOriginalFilename 'CodexContinuity.Tray.dll'
       - shell: pwsh
         run: .\scripts\build-social-card.ps1 -Check
+      - name: Stage fail-closed Store package prototype
+        shell: pwsh
+        run: |
+          .\scripts\stage-store-prototype.ps1 `
+            -IdentityName 'YesterdaysLemon.CodexContinuity.CIPrototype' `
+            -Publisher 'CN=Codex Continuity CI Prototype' `
+            -PublisherDisplayName 'YesterdaysLemon'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Store prototype staging failed with exit code $LASTEXITCODE."
+          }
+          $root = [IO.Path]::GetFullPath('artifacts/store-prototype')
+          $manifest = [xml](Get-Content (Join-Path $root 'AppxManifest.xml') -Raw)
+          $readiness = Get-Content (Join-Path $root 'store-readiness.json') -Raw | ConvertFrom-Json
+          $startupTasks = @($manifest.SelectNodes("//*[local-name()='StartupTask']"))
+          if ($manifest.Package.Identity.Version -ne $readiness.runtimePreflight.proposedPackageVersion -or
+              $startupTasks.Count -ne 1 -or
+              $startupTasks[0].Enabled -ne 'false' -or
+              $readiness.stagedArtifact -ne 'nonShippablePackagedPrototype' -or
+              $readiness.runtimePreflight.readyForSubmission -ne $false -or
+              -not (Test-Path (Join-Path $root 'Supervisor/CodexContinuity.exe')) -or
+              -not (Test-Path (Join-Path $root 'Tray/CodexContinuity.Tray.exe')) -or
+              -not (Test-Path (Join-Path $root 'DO-NOT-SUBMIT.txt')) -or
+              @(Get-ChildItem $root -Recurse -File -Include *.msix,*.msixupload).Count -ne 0) {
+            throw 'Store prototype escaped its fail-closed layout contract.'
+          }
       - name: Verify unsigned signing policy
         shell: pwsh
         run: >-

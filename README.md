@@ -9,8 +9,8 @@
 
 Codex Continuity is an **unofficial, experimental Windows utility** that keeps
 the Codex agent backend alive independently of the desktop window. If Microsoft
-Store replaces or restarts the UI during an update, working threads remain
-owned by the supervised backend and the new UI reconnects.
+Store replaces or restarts the Codex Desktop UI during an update, working
+threads remain owned by the supervised backend and the new UI reconnects.
 
 [Download the latest release](https://github.com/YesterdaysLemon/codex-continuity/releases/latest)
 · [Visit the product site](https://continuity.alirezaafshan.com)
@@ -82,7 +82,7 @@ to it.
 ```text
 Codex desktop UI  ── reconnectable WebSocket ──  supervised app-server
       │                                                │
-      └──── Store may update/restart this process      └──── owns threads
+      └──── Store may update/restart Codex Desktop     └──── owns threads
 ```
 
 ## What it does
@@ -99,14 +99,32 @@ Codex desktop UI  ── reconnectable WebSocket ──  supervised app-server
   remains off until the user explicitly enables safe idle activation.
 - Binds only to `127.0.0.1`; it does not expose Codex over the network.
 - Removes the desktop's blue in-app update prompt on future launches.
-- Leaves signed package delivery to Microsoft Store, Intune, or another
-  external package manager.
+- Leaves Codex Desktop package delivery to Microsoft Store. Continuity itself
+  currently ships through the direct GitHub installer; its Store lane is a
+  non-shippable, fail-closed prototype.
 - Reports backend health and active thread count through `status`.
 - Includes an isolated reconnect self-test and a reversible install.
 
-Microsoft Store's **Settings > App updates** option must remain on for the fully
-automatic path. Store-delivered MSIX packages are updated by Windows in the
-background rather than by this tool.
+Microsoft Store's **Settings > App updates** option must remain on for automatic
+Codex Desktop updates. Continuity's currently supported direct install has its
+own updater, described below.
+
+### Microsoft Store readiness boundary
+
+The repository contains an MSIX manifest/layout prototype, package-identity
+runtime guards, and a machine-readable submission preflight:
+
+```powershell
+CodexContinuity store-readiness
+```
+
+The command intentionally exits `2` with `readyForSubmission: false`. Package
+identity disables direct-install mutation and GitHub self-update commands, but
+does not prove that Microsoft Store owns a package. Submission remains blocked
+until a packaged install can configure Codex's endpoint reversibly, clean
+uninstall cannot strand Codex on a dead endpoint, first-run/startup consent and
+direct-install migration exist, and a signed two-version update preserves an
+active fake agent. See [`packaging/msix/README.md`](packaging/msix/README.md).
 
 Continuity's own updater is separate from those Codex desktop updates. It keeps
 a bounded ledger in `update-status.json` under the owned state directory. A
@@ -219,7 +237,7 @@ For the advanced portable path:
 The status should report `ready: true` and show that task as active. From that
 point forward, newly started work belongs to the supervised backend.
 
-Installation makes these user-level changes:
+The supported direct installer makes these user-level changes:
 
 - `CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:45123`
 - `CODEX_SPARKLE_ENABLED=false`
@@ -314,12 +332,12 @@ CodexContinuity rollback
 CodexContinuity uninstall
 ```
 
-`rollback` changes only the build selected for a future safe start. Uninstall
-restores values captured before installation, and only while their current
-values still match the ones Continuity applied. Neither command stops a running
-backend or restarts the desktop. If the backend is still reachable, desktop
-restarts in the current Windows session continue reconnecting to it so a second
-app-server cannot contend for the same threads. The next sign-in returns Codex
+For direct installs, `rollback` changes only the build selected for a future
+safe start. Uninstall restores values captured before installation, and only
+while their current values still match the ones Continuity applied. Neither
+command stops a running backend or restarts the desktop. If the backend is still
+reachable, desktop restarts in the current Windows session continue reconnecting
+to it so a second app-server cannot contend for the same threads. The next sign-in returns Codex
 to its normal bundled app-server and updater, then deletes Continuity's installed
 files and logs.
 
