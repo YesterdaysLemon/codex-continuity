@@ -195,6 +195,60 @@ public sealed class PrivateBackendTransitionTests
     }
 
     [Fact]
+    public async Task CompatibilityTimeoutReopensRelayAndNeverForcesBackend()
+    {
+        await using var fixture = await TransitionFixture.CreateAsync("ignore");
+        var forceCalled = false;
+        var checks = Checks(
+            forcedStop: new PrivateBackendForcedStopChecks(
+                WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy,
+                _ => forceCalled = true,
+                (_, _) => Task.FromResult(true)));
+
+        var result = await fixture.StopAsync(
+            gracefulTimeout: TimeSpan.FromMilliseconds(125),
+            checks: checks,
+            allowForcedStop: false);
+
+        Assert.Equal(PrivateBackendTransitionKind.GracefulTimedOut, result.Kind);
+        Assert.Equal(PrivateBackendGracefulStopKind.TimedOut, result.GracefulStop?.Kind);
+        Assert.Null(result.ForcedStop);
+        Assert.False(result.CanStartReplacement);
+        Assert.False(forceCalled);
+        Assert.False(fixture.Relay.IsGated);
+        Assert.False(fixture.Backend.Process.HasExited);
+        Assert.True(File.Exists(fixture.Backend.SignalMarkerPath));
+    }
+
+    [Fact]
+    public async Task ChangedCompatibilityPreconditionReopensRelayWithoutSignalingBackend()
+    {
+        await using var fixture = await TransitionFixture.CreateAsync();
+        var stopCalled = false;
+        var graceful = new PrivateBackendGracefulStopChecks(
+            WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy,
+            (_, _, _) =>
+            {
+                stopCalled = true;
+                return Task.FromResult(Program.AppServerStopDisposition.CleanExit);
+            })
+        {
+            CanStop = _ => false,
+        };
+
+        var result = await fixture.StopAsync(
+            checks: Checks(gracefulStop: graceful),
+            allowForcedStop: false);
+
+        Assert.Equal(PrivateBackendTransitionKind.PreconditionChanged, result.Kind);
+        Assert.Equal(
+            PrivateBackendGracefulStopKind.PreconditionChanged,
+            result.GracefulStop?.Kind);
+        Assert.False(stopCalled);
+        AssertHelperRunning(fixture, expectedGate: false);
+    }
+
+    [Fact]
     public async Task MismatchedStableEndpointIsRejectedBeforeGating()
     {
         await using var fixture = await TransitionFixture.CreateAsync();
@@ -293,7 +347,8 @@ public sealed class PrivateBackendTransitionTests
             CancellationToken cancellationToken = default,
             TimeSpan? gracefulTimeout = null,
             TimeSpan? forcedWaitTimeout = null,
-            PrivateBackendTransitionChecks? checks = null) =>
+            PrivateBackendTransitionChecks? checks = null,
+            bool allowForcedStop = true) =>
             PrivateBackendTransition.StopForReplacementAsync(
                 Relay,
                 Path.GetTempPath(),
@@ -302,7 +357,8 @@ public sealed class PrivateBackendTransitionTests
                 gracefulTimeout ?? TimeSpan.FromSeconds(1),
                 forcedWaitTimeout ?? TimeSpan.FromSeconds(1),
                 cancellationToken,
-                checks ?? Checks());
+                checks ?? Checks(),
+                allowForcedStop);
 
         public async ValueTask DisposeAsync()
         {

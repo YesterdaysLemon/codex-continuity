@@ -42,7 +42,7 @@ Automatic activation remains off by default. `update-policy --enable` opts into 
 
 The supported distribution is the direct GitHub installer. `store-readiness` intentionally exits 2 because the MSIX layout is a non-shippable prototype and no Store package is produced: package identity disables direct mutations, while endpoint cleanup, first-run and startup consent, migration, Store ownership, rollback, and active-agent package updates remain blocked.
 
-Uninstall restores only configuration still owned by Continuity and never stops a running backend. Installed files and logs are removed at the next Windows sign-in. The supported v0.7.0 release target is Windows 11 x64 only; no macOS or Linux build is available. See the repository README and SECURITY.md before production use.
+Uninstall restores only configuration still owned by Continuity and never stops a running backend. Installed files and logs are removed at the next Windows sign-in. The supported v0.8.0 release target is Windows 11 x64 only; no macOS or Linux build is available. See the repository README and SECURITY.md before production use.
 
 ## Canonical links
 

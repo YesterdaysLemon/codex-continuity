@@ -21,9 +21,15 @@ internal static class TrayStatusParser
                 supervisor.TryGetProperty("State", out stateElement))
                 ? stateElement.GetString()
                 : null;
+        var desktopAppToolsState = ReadNestedState(root, "desktopAppTools");
+        var compatibilityState = ReadNestedState(root, "backendCompatibility");
+        var appToolsDegraded = desktopAppToolsState is "unavailable" or "reloadFailed";
+        var compatibilityPending = compatibilityState is
+            "waitingForDesktopClose" or "waitingForStableClose" or "readyToRoll" or "blocked";
         var health = supervisorState == "waitingForCodexExit"
             ? ContinuityHealth.Degraded
-            : ready && supervisorState == "running"
+            : ready && supervisorState == "running" &&
+                !appToolsDegraded && !compatibilityPending
                 ? ContinuityHealth.Healthy
                 : ready
                     ? ContinuityHealth.Degraded
@@ -33,11 +39,32 @@ internal static class TrayStatusParser
             ContinuityHealth.Healthy => "Backend ready",
             ContinuityHealth.Degraded when supervisorState == "waitingForCodexExit" =>
                 "Armed; waiting for the current Codex desktop to close naturally",
+            ContinuityHealth.Degraded when compatibilityState == "waitingForDesktopClose" =>
+                "Backend ready; compatibility refresh waiting for Codex Desktop to close naturally",
+            ContinuityHealth.Degraded when compatibilityState is
+                "waitingForStableClose" or "readyToRoll" =>
+                "Backend ready; compatibility refresh waiting for a safe all-idle rollover",
+            ContinuityHealth.Degraded when compatibilityState == "blocked" =>
+                "Backend ready; compatibility refresh needs attention",
+            ContinuityHealth.Degraded when desktopAppToolsState == "reloadFailed" =>
+                "Backend ready; Desktop tools refresh will retry",
+            ContinuityHealth.Degraded when desktopAppToolsState == "unavailable" =>
+                "Backend ready; Desktop tools are temporarily unavailable",
             ContinuityHealth.Degraded => $"Backend ready; supervisor {supervisorState ?? "state unknown"}",
             ContinuityHealth.Unavailable => "Backend unavailable",
             _ => throw new ArgumentOutOfRangeException(nameof(health), health, null),
         };
         return new TrayStatusSnapshot(health, activeAgentCount, detail);
+    }
+
+    private static string? ReadNestedState(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var value) ||
+            value.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+        return ReadString(value, "state") ?? ReadString(value, "State");
     }
 
     internal static ContinuityUpdateSnapshot ParseUpdate(string json)

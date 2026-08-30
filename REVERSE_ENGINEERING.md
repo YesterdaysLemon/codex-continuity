@@ -6,6 +6,36 @@ Microsoft Store packages `OpenAI.Codex_26.818.2872.0_x64__2p2nqsd0c76g0` and
 and package metadata were extracted to a temporary directory; no installed
 file, signature, or running process was modified.
 
+Additional app-tools observations were made read-only on 2026-08-29 against
+`OpenAI.Codex_26.825.5331.0_x64__2p2nqsd0c76g0`.
+
+## Desktop app-tools contract
+
+- The Desktop materializes an `mcp_servers.codex_app` CLI override containing a
+  package-relative plugin directory, a versioned Node runtime, and an ephemeral
+  `codex-browser-use-{GUID}` named pipe. Copying that override into persistent
+  configuration would turn a process-scoped capability into stale state.
+- `desktop-mcp.json` contains the static command, arguments, approvals, and
+  timeouts, but not the materialized pipe or Node path. The Desktop runtime
+  registration identifies its current process, resources directory, and Node
+  runtime; historical registrations remain present.
+- Multiple browser-use pipes can belong to the same Desktop process. Prefix or
+  process-name matching is therefore insufficient. A read-only framed
+  `tools/list` request distinguishes the app-tools endpoint, and
+  `GetNamedPipeServerProcessId` binds it to the exact observed Store process.
+- Continuity accepts exactly one live registration and one positive pipe. It
+  rechecks the Desktop process start time/path, validates the Store-relative
+  manifest and allowlisted launcher shape, and keeps the pipe only in memory.
+  Zero, multiple, malformed, or rotating candidates fail closed.
+- The supervised app-server receives only a stable Continuity launcher in its
+  CLI config. When Codex spawns that MCP server, the launcher resolves the
+  current capability and transparently proxies stdio to the Store-bundled
+  server. It never edits Store files or user Codex configuration.
+- App-server `config/mcpServer/reload` queues a refresh for loaded threads. This
+  is used after the verified Desktop session fingerprint changes; the backend
+  remains alive. A backend binary/launch-contract change is a separate,
+  naturally-closed Desktop plus all-idle rollover boundary.
+
 ## Continuity seam
 
 - The desktop chooses its app-server WebSocket endpoint from

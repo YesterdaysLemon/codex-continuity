@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>CodexContinuity</AssemblyName>
     <RootNamespace>CodexContinuity.InstallerFixture</RootNamespace>
-    <Version>0.7.0</Version>
+    <Version>0.8.0</Version>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\..\DetachedProcessLauncher.cs" Link="DetachedProcessLauncher.cs" />

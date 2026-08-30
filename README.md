@@ -98,6 +98,13 @@ Codex desktop UI  ── reconnectable WebSocket ──  supervised app-server
   isolated self-test; it never restarts active agents. Applying a staged build
   remains off until the user explicitly enables safe idle activation.
 - Binds only to `127.0.0.1`; it does not expose Codex over the network.
+- Gives the supervised backend a stable, normalized launcher for the current
+  Desktop app-tools server. The launcher discovers a unique live Store-owned
+  capability at spawn time; dynamic pipe names are never saved in user
+  configuration or a backend lease.
+- Queues the app-server's supported MCP reload when the Store Desktop session
+  changes, so loaded threads adopt the current app-tools capability on their
+  next active turn without restarting the backend.
 - Removes the desktop's blue in-app update prompt on future launches.
 - Leaves Codex Desktop package delivery to Microsoft Store. Continuity itself
   currently ships through the direct GitHub installer; its Store lane is a
@@ -183,6 +190,28 @@ public version/state, and canned summaries. Paths, thread identifiers and
 content, command output, and exception text are never written; invalid or
 newer history schemas display as empty and history I/O never interrupts the
 backend or active agents.
+
+### Backend compatibility refresh
+
+Desktop updates can replace both the app-tools runtime and the user-executable
+`codex.exe`. Continuity treats those as two different boundaries. A new Desktop
+session only queues an MCP refresh through the running app-server. It does not
+stop the backend.
+
+If the supervised backend itself predates the normalized app-tools bridge, or
+a newer Codex backend executable is selected, Continuity records a pending
+compatibility refresh. It will not attempt that refresh while a Store Codex
+process is open. After the Desktop closes naturally and remains closed for a
+stable interval, Continuity closes and drains the relay, recomputes every thread
+lifecycle, and proceeds only when all state is idle and known. The old backend
+receives a bounded graceful stop; this path never falls back to a forced kill.
+The replacement must pass the existing readiness, listener-ownership, lease,
+and relay gates before clients can reconnect.
+
+This deliberately means a new Desktop can run against the still-old backend
+while agents are busy. Fresh features may wait; active work wins. `status` and
+the tray report whether Desktop tools are aligned or a compatibility refresh is
+waiting for a natural close/all-idle window.
 
 ## Requirements
 
@@ -390,10 +419,10 @@ or modify installed Store package files. App-server output stays under
 retained history files. Treat those local logs as potentially sensitive diagnostics.
 
 The continuity proof covers UI disconnect/reconnect and durable thread
-ownership. It does not make incompatible app-server protocol versions
-compatible. If a future desktop release raises its minimum app-server version,
-let active threads finish, update the Codex CLI binary used by the supervisor,
-and restart only the supervisor while the desktop is closed.
+ownership. It cannot make arbitrary incompatible app-server protocol versions
+compatible. It can adopt the currently selected Codex CLI only through the
+deferred compatibility boundary above; unknown process identity, thread state,
+or graceful-stop failure leaves the old backend untouched or the relay closed.
 
 See [REVERSE_ENGINEERING.md](REVERSE_ENGINEERING.md) for the version-specific
 desktop observations behind the bridge.
