@@ -223,6 +223,17 @@ internal sealed class RpcClient : IAsyncDisposable
         return lifecycles;
     }
 
+    internal async Task ReloadOwnedMcpServersAsync(CancellationToken cancellationToken)
+    {
+        VerifyOwnedConnection();
+        var response = await RequestAsync(
+            "config/mcpServer/reload",
+            new JsonObject(),
+            cancellationToken);
+        ThrowIfRpcError(response, "config/mcpServer/reload");
+        VerifyOwnedConnection();
+    }
+
     private async Task<List<T>> ListThreadPagesAsync<T>(
         Func<JsonNode?, IReadOnlyList<T>> parseData,
         int maximumThreads,

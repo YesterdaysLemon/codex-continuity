@@ -46,6 +46,8 @@ internal static class Program
                     distribution,
                     Console.Out,
                     JsonOptions),
+                "mcp-launcher" => await DesktopMcpContractResolver.RunLauncherAsync(
+                    CancellationToken.None),
                 "serve" => await ServeAsync(port, args),
                 "rollback-helper" => await RollbackHelperAsync(port, args),
                 "install" => await InstallAsync(
@@ -208,6 +210,8 @@ internal static class Program
         var codexDesktopUpdate = CodexDesktopUpdateStatus.Assess(
             package?["version"]?.GetValue<string>(),
             manifest?["buildVersion"]?.GetValue<string>());
+        var desktopMcp = await DesktopMcpContractResolver.ResolveAsync(
+            CancellationToken.None);
 
         var result = new JsonObject
         {
@@ -231,6 +235,13 @@ internal static class Program
                 ["support"] = retarget.Support.ToString(),
                 ["activation"] = retarget.Activation,
                 ["evidence"] = retarget.Evidence,
+            },
+            ["desktopAppTools"] = new JsonObject
+            {
+                ["state"] = desktopMcp.Kind.ToString(),
+                ["available"] = desktopMcp.IsAvailable,
+                ["fingerprint"] = desktopMcp.Contract?.Fingerprint,
+                ["detail"] = desktopMcp.Detail,
             },
             ["continuityInstallState"] = installState is null
                 ? null
@@ -262,6 +273,17 @@ internal static class Program
         var threads = await client.ListThreadsAsync();
         var active = threads.Where(thread =>
             string.Equals(thread.Status, "active", StringComparison.OrdinalIgnoreCase)).ToList();
+        var desktopMcpStatus = new DesktopMcpBridgeStatusStore(
+            ContinuityPaths.DesktopMcpBridgeStatusFile(ContinuityPaths.StateDirectory)).Load() ??
+            new DesktopMcpBridgeStatusStore(
+                ContinuityPaths.DesktopMcpBridgeStatusFile(
+                    ContinuityPaths.LegacyOpenAiStateDirectory)).Load();
+        var backendCompatibility = new BackendCompatibilityStatusStore(
+            ContinuityPaths.BackendCompatibilityStatusFile(
+                ContinuityPaths.StateDirectory)).Load() ??
+            new BackendCompatibilityStatusStore(
+                ContinuityPaths.BackendCompatibilityStatusFile(
+                    ContinuityPaths.LegacyOpenAiStateDirectory)).Load();
         var result = new JsonObject
         {
             ["ready"] = true,
@@ -276,6 +298,12 @@ internal static class Program
             ["supervisor"] = JsonSerializer.SerializeToNode(
                 SupervisorStatusForDiagnostics(supervisorStatus),
                 JsonOptions),
+            ["desktopAppTools"] = desktopMcpStatus is null
+                ? null
+                : JsonSerializer.SerializeToNode(desktopMcpStatus, JsonOptions),
+            ["backendCompatibility"] = backendCompatibility is null
+                ? null
+                : JsonSerializer.SerializeToNode(backendCompatibility, JsonOptions),
         };
         Console.WriteLine(result.ToJsonString(JsonOptions));
         return 0;
@@ -478,6 +506,10 @@ internal static class Program
         if (runOwnedSupervisor is null)
         {
             var applyMonitor = new SupervisorUpdateApplyMonitor(stateDirectory);
+            var desktopMcpMonitor = new DesktopMcpReloadMonitor(stateDirectory);
+            var backendCompatibility = new BackendCompatibilityMonitor(
+                stateDirectory,
+                () => FindCodexExecutable(persistedEnvironmentOnly: true));
             return await OwnedSupervisorRuntime.RunAsync(
                 port,
                 stateDirectory,
@@ -487,6 +519,9 @@ internal static class Program
                     backendPort),
                 waitBeforeFirstBackend: waitBeforeFirstBackend,
                 tryApplyUpdate: applyMonitor.TryLaunchAsync,
+                tryRefreshDesktopMcp: desktopMcpMonitor.TryRefreshAsync,
+                inspectBackendCompatibility: backendCompatibility.InspectAsync,
+                launchedDesktopMcpBridgeVersion: DesktopMcpContractResolver.BridgeVersion,
                 successor: successor);
         }
         if (waitBeforeFirstBackend is not null || successor is not null)
@@ -1619,13 +1654,44 @@ internal static class Program
         int port,
         string? codexHome = null)
     {
+        var processPath = Environment.ProcessPath
+            ?? throw new InvalidOperationException(
+                "The Continuity executable path is unavailable.");
+        var self = DesktopMcpContractResolver.SelfInvocation(
+            processPath,
+            typeof(Program).Assembly.Location);
+        return WindowsProcessGroup.Start(CreateAppServerStartInfo(
+            executable,
+            port,
+            self.Command,
+            self.Arguments,
+            codexHome));
+    }
+
+    internal static ProcessStartInfo CreateAppServerStartInfo(
+        string executable,
+        int port,
+        string continuityCommand,
+        IReadOnlyList<string> launcherArguments,
+        string? codexHome = null)
+    {
+        LoopbackEndpoint.ValidatePort(port);
         var startInfo = new ProcessStartInfo(executable)
         {
             UseShellExecute = false,
         };
         FutureProcessEnvironment.ApplyTo(startInfo);
+        startInfo.Environment.Remove("CODEX_APP_TOOLS_PIPE_PATH");
+        startInfo.Environment.Remove("CODEX_MCP_NODE_PATH");
+        startInfo.Environment.Remove("CODEX_BROWSER_USE_NODE_PATH");
+        startInfo.Environment.Remove("CODEX_ELECTRON_RESOURCES_PATH");
+        startInfo.Environment.Remove("CODEX_CLI_PATH");
         startInfo.ArgumentList.Add("-c");
         startInfo.ArgumentList.Add("features.code_mode_host=true");
+        startInfo.ArgumentList.Add("-c");
+        startInfo.ArgumentList.Add(DesktopMcpContractResolver.BuildAppServerOverride(
+            continuityCommand,
+            launcherArguments));
         startInfo.ArgumentList.Add("app-server");
         startInfo.ArgumentList.Add("--listen");
         startInfo.ArgumentList.Add(LoopbackEndpoint.WebSocketUrl(port));
@@ -1634,8 +1700,7 @@ internal static class Program
         {
             startInfo.Environment["CODEX_HOME"] = codexHome;
         }
-
-        return WindowsProcessGroup.Start(startInfo);
+        return startInfo;
     }
 
     internal static async Task<bool> WaitUntilReadyAsync(

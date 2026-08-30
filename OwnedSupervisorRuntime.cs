@@ -42,6 +42,19 @@ internal static class OwnedSupervisorRuntime
             int,
             CancellationToken,
             Task<bool>>? tryApplyUpdate = null,
+        Func<
+            BackendLease,
+            int,
+            int,
+            CancellationToken,
+            Task>? tryRefreshDesktopMcp = null,
+        Func<
+            BackendLease,
+            CancellationToken,
+            Task<BackendCompatibilityDecision>>? inspectBackendCompatibility = null,
+        PrivateBackendTransitionChecks? compatibilityTransitionChecks = null,
+        Func<CodexDesktopObservation>? observeDesktopForCompatibility = null,
+        int? launchedDesktopMcpBridgeVersion = null,
         AdmittedSupervisorSuccessor? successor = null)
     {
         Directory.CreateDirectory(stateDirectory);
@@ -185,6 +198,7 @@ internal static class OwnedSupervisorRuntime
                 var lifecycleCompleted = false;
                 var ownershipDefinitivelyLost = false;
                 var successorLaunched = false;
+                var compatibilityRollover = false;
                 BackendLease? activeLease = null;
                 Volatile.Write(ref activeBackendProcessId, process.Id);
                 try
@@ -259,7 +273,10 @@ internal static class OwnedSupervisorRuntime
                                 BackendPort: backendPort,
                                 BackendExecutable: backendExecutable,
                                 CodexHome: codexHome,
-                                BackendStartedAtUtc: backendStartedAtUtc);
+                                BackendStartedAtUtc: backendStartedAtUtc,
+                                DesktopMcpBridgeVersion: recovered
+                                    ? recovery.Lease!.DesktopMcpBridgeVersion
+                                    : launchedDesktopMcpBridgeVersion);
                             leaseStore.Write(activeLease);
                             leaseActive = true;
                             relay.OpenGate();
@@ -317,6 +334,11 @@ internal static class OwnedSupervisorRuntime
                                         relay,
                                         activeLease,
                                         tryApplyUpdate,
+                                        tryRefreshDesktopMcp,
+                                        inspectBackendCompatibility,
+                                        compatibilityTransitionChecks,
+                                        observeDesktopForCompatibility,
+                                        stateDirectory,
                                         shutdownToken);
                                     if (backendOutcome ==
                                         BackendWaitOutcome.SuccessorLaunched)
@@ -324,6 +346,11 @@ internal static class OwnedSupervisorRuntime
                                         preserveBackend = true;
                                         publishStopped = false;
                                         successorLaunched = true;
+                                    }
+                                    else if (backendOutcome ==
+                                        BackendWaitOutcome.CompatibilityRollover)
+                                    {
+                                        compatibilityRollover = true;
                                     }
                                     else if (backendOutcome != BackendWaitOutcome.Exited)
                                     {
@@ -444,6 +471,12 @@ internal static class OwnedSupervisorRuntime
                 {
                     break;
                 }
+                if (compatibilityRollover)
+                {
+                    consecutiveFailures = 0;
+                    backendPort = Program.FindAvailablePort(publicPort, backendPort);
+                    continue;
+                }
                 if (shutdownToken.IsCancellationRequested)
                 {
                     break;
@@ -554,6 +587,19 @@ internal static class OwnedSupervisorRuntime
             int,
             CancellationToken,
             Task<bool>>? tryApplyUpdate,
+        Func<
+            BackendLease,
+            int,
+            int,
+            CancellationToken,
+            Task>? tryRefreshDesktopMcp,
+        Func<
+            BackendLease,
+            CancellationToken,
+            Task<BackendCompatibilityDecision>>? inspectBackendCompatibility,
+        PrivateBackendTransitionChecks? compatibilityTransitionChecks,
+        Func<CodexDesktopObservation>? observeDesktopForCompatibility,
+        string stateDirectory,
         CancellationToken cancellationToken)
     {
         while (!process.HasExited)
@@ -604,9 +650,112 @@ internal static class OwnedSupervisorRuntime
                         $"Idle update apply check failed safely: {exception.Message}");
                 }
             }
+            if (tryRefreshDesktopMcp is not null && !relay.IsGated)
+            {
+                await tryRefreshDesktopMcp(
+                    activeLease,
+                    port,
+                    process.Id,
+                    cancellationToken);
+            }
+            if (inspectBackendCompatibility is not null && !relay.IsGated)
+            {
+                var compatibility = await inspectBackendCompatibility(
+                    activeLease,
+                    cancellationToken);
+                if (compatibility.RequiresRollover)
+                {
+                    FileStream? lifecycleLock = null;
+                    try
+                    {
+                        lifecycleLock = ContinuityLifecycleLock.Acquire(
+                            stateDirectory,
+                            TimeSpan.Zero);
+                    }
+                    catch (InvalidOperationException)
+                    {
+                    }
+                    if (lifecycleLock is not null)
+                    {
+                        using (lifecycleLock)
+                        {
+                            var transitionChecks = CompatibilityTransitionChecks(
+                                compatibilityTransitionChecks ??
+                                    PrivateBackendTransitionChecks.Native,
+                                observeDesktopForCompatibility ??
+                                    CodexDesktopProcesses.Capture);
+                            var transition = await PrivateBackendTransition.StopForReplacementAsync(
+                                relay,
+                                stateDirectory,
+                                activeLease,
+                                process,
+                                gracefulTimeout: TimeSpan.FromSeconds(10),
+                                forcedWaitTimeout: TimeSpan.FromSeconds(1),
+                                cancellationToken,
+                                transitionChecks,
+                                allowForcedStop: false);
+                            if (transition.CanStartReplacement)
+                            {
+                                if (transition.ReplacementGateLease?.TryReleaseClosed() != true)
+                                {
+                                    throw new InvalidOperationException(
+                                        "The compatibility rollover could not retain a closed relay gate.");
+                                }
+                                return BackendWaitOutcome.CompatibilityRollover;
+                            }
+                            if (relay.IsGated)
+                            {
+                                return BackendWaitOutcome.OwnershipUnknown;
+                            }
+                        }
+                    }
+                }
+            }
             await Task.Delay(ownershipChecks.PollInterval, cancellationToken);
         }
         return BackendWaitOutcome.Exited;
+    }
+
+    internal static PrivateBackendTransitionChecks CompatibilityTransitionChecks(
+        PrivateBackendTransitionChecks checks,
+        Func<CodexDesktopObservation> observeDesktop)
+    {
+        checks.Validate();
+        ArgumentNullException.ThrowIfNull(observeDesktop);
+        return checks with
+        {
+            Observe = async (stateDirectory, backendPort, backendProcessId, cancellationToken) =>
+            {
+                var plan = await checks.Observe(
+                    stateDirectory,
+                    backendPort,
+                    backendProcessId,
+                    cancellationToken);
+                var desktop = observeDesktop();
+                if (desktop.Kind == CodexDesktopObservationKind.NotRunning)
+                {
+                    return plan;
+                }
+                var reason = desktop.Kind == CodexDesktopObservationKind.Running
+                    ? "desktopRunning"
+                    : "desktopIdentityUnknown";
+                return plan with
+                {
+                    Action = "wait",
+                    TransitionReady = false,
+                    Reasons = plan.Reasons
+                        .Append(reason)
+                        .Distinct(StringComparer.Ordinal)
+                        .ToArray(),
+                };
+            },
+            GracefulStop = checks.GracefulStop with
+            {
+                CanStop = target =>
+                    checks.GracefulStop.CanStop(target) &&
+                    observeDesktop().Kind == CodexDesktopObservationKind.NotRunning,
+            },
+        };
     }
 
     private enum BackendOwnership
@@ -622,5 +771,6 @@ internal static class OwnedSupervisorRuntime
         OwnershipLost,
         OwnershipUnknown,
         SuccessorLaunched,
+        CompatibilityRollover,
     }
 }

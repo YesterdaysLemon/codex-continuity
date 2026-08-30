@@ -14,6 +14,7 @@ internal enum PrivateBackendGracefulStopKind
     WindowsControlExit,
     UnexpectedExit,
     TimedOut,
+    PreconditionChanged,
     CallerCanceled,
 }
 
@@ -22,6 +23,8 @@ internal sealed record PrivateBackendGracefulStopChecks(
     Func<PrivateBackendStopTarget, TimeSpan, CancellationToken,
         Task<Program.AppServerStopDisposition>> StopTarget)
 {
+    internal Func<PrivateBackendStopTarget, bool> CanStop { get; init; } = _ => true;
+
     internal static PrivateBackendGracefulStopChecks Native { get; } = new(
         WindowsTcpPortOwnership.IsLoopbackListenerOwnedBy,
         static (target, timeout, cancellationToken) =>
@@ -31,6 +34,7 @@ internal sealed record PrivateBackendGracefulStopChecks(
     {
         ArgumentNullException.ThrowIfNull(IsListenerOwnedBy);
         ArgumentNullException.ThrowIfNull(StopTarget);
+        ArgumentNullException.ThrowIfNull(CanStop);
     }
 }
 
@@ -134,6 +138,19 @@ internal static class PrivateBackendGracefulStop
             if (!reservation.IsCurrent)
             {
                 return Settled(PrivateBackendGracefulStopKind.GateUnavailable);
+            }
+
+            try
+            {
+                if (!checks.CanStop(target))
+                {
+                    return Settled(PrivateBackendGracefulStopKind.PreconditionChanged);
+                }
+            }
+            catch (Exception exception) when (
+                exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                return Settled(PrivateBackendGracefulStopKind.Unknown);
             }
 
             try

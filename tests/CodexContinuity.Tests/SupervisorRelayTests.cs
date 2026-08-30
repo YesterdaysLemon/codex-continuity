@@ -599,7 +599,12 @@ public sealed class SupervisorRelayTests : IDisposable
                 Interlocked.Increment(ref connectionChecks);
                 return processId == Volatile.Read(ref backendProcessId) &&
                     Volatile.Read(ref connectionDenied) == 0;
-            });
+            })
+        {
+            // Keep the supervisor's periodic listener audit from racing the
+            // one denial this test injects specifically at relay admission.
+            PollInterval = TimeSpan.FromSeconds(5),
+        };
         using var shutdown = new CancellationTokenSource();
 
         WindowsProcessGroup StartBackend(int port)
@@ -1249,6 +1254,85 @@ public sealed class SupervisorRelayTests : IDisposable
             $"backend:{persisted.Lease.BackendPort}",
             await client.GetStringAsync(
                 $"http://127.0.0.1:{persisted.Lease.BackendPort}/readyz"));
+    }
+
+    [Fact]
+    public async Task QuiescentCompatibilityRolloverReplacesBackendBehindSameRelay()
+    {
+        var publicPort = FindAvailablePort();
+        var processIds = new ConcurrentQueue<int>();
+        var backendPorts = new ConcurrentQueue<int>();
+        var startCount = 0;
+        var inspections = 0;
+        using var shutdown = new CancellationTokenSource();
+        WindowsProcessGroup StartBackend(int port)
+        {
+            var process = StartHarnessBackend(
+                port,
+                Path.Combine(root, $"compatibility-{Interlocked.Increment(ref startCount)}.txt"));
+            processIds.Enqueue(process.Id);
+            backendPorts.Enqueue(port);
+            return process;
+        }
+        var readyPlan = new ContinuityHandoffPlan(
+            "handoff",
+            TransitionReady: true,
+            BackendReady: true,
+            UpdateState: "loaded",
+            PendingUpdate: false,
+            ThreadCount: 0,
+            new HandoffBlockerCounts(0, 0, 0, 0, 0),
+            Reasons: []);
+        var transitionChecks = new PrivateBackendTransitionChecks(
+            (_, _, _, _) => Task.FromResult(readyPlan),
+            PrivateBackendGracefulStopChecks.Native,
+            PrivateBackendForcedStopChecks.Native);
+
+        var supervisor = OwnedSupervisorRuntime.RunAsync(
+            publicPort,
+            root,
+            shutdown.Token,
+            StartBackend,
+            inspectBackendCompatibility: (_, _) => Task.FromResult(
+                Interlocked.Increment(ref inspections) == 1
+                    ? new BackendCompatibilityDecision(true, "fixture")
+                    : BackendCompatibilityDecision.Current),
+            compatibilityTransitionChecks: transitionChecks,
+            observeDesktopForCompatibility: () => new(
+                CodexDesktopObservationKind.NotRunning,
+                [],
+                "fixture"),
+            launchedDesktopMcpBridgeVersion: DesktopMcpContractResolver.BridgeVersion);
+        try
+        {
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+            while (Volatile.Read(ref startCount) < 2 && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(50);
+            }
+            var body = await ReadWhenReadyAsync(publicPort);
+            var recordedProcessIds = processIds.ToArray();
+            var recordedPorts = backendPorts.ToArray();
+            Assert.Equal(2, recordedProcessIds.Length);
+            Assert.Equal($"backend:{recordedPorts[1]}", body);
+            Assert.False(ProcessIsRunning(recordedProcessIds[0]));
+            Assert.True(ProcessIsRunning(recordedProcessIds[1]));
+            var lease = new BackendLeaseStore(
+                ContinuityPaths.BackendLeaseFile(root)).Load();
+            Assert.Equal(BackendLeaseLoadKind.Loaded, lease.Kind);
+            Assert.Equal(recordedProcessIds[1], lease.Lease!.BackendProcessId);
+            Assert.Equal(
+                DesktopMcpContractResolver.BridgeVersion,
+                lease.Lease.DesktopMcpBridgeVersion);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            Assert.Equal(0, await supervisor.WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+
+        Assert.All(processIds, processId => Assert.False(ProcessIsRunning(processId)));
+        Assert.True(CanBind(publicPort));
     }
 
     private async Task<SupervisorStatus> ReadStatusAsync(string state)

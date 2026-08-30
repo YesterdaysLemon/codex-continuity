@@ -66,9 +66,9 @@ public sealed class BootstrapInstallerTests
     {
         var release = BootstrapInstaller.ResolveRelease();
 
-        Assert.Equal("0.7.0", release.Version);
+        Assert.Equal("0.8.0", release.Version);
         Assert.Equal(
-            "https://github.com/YesterdaysLemon/codex-continuity/releases/download/v0.7.0/CodexContinuity-win-x64.zip",
+            "https://github.com/YesterdaysLemon/codex-continuity/releases/download/v0.8.0/CodexContinuity-win-x64.zip",
             release.ArchiveUrl);
         Assert.Equal($"{release.ArchiveUrl}.sha256", release.ChecksumUrl);
     }

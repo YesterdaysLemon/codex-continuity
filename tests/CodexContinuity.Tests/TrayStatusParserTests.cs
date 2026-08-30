@@ -68,6 +68,41 @@ public sealed class TrayStatusParserTests
         Assert.Equal(ContinuityHealth.Degraded, status.Health);
     }
 
+    [Theory]
+    [InlineData(
+        "{\"state\":\"reloadFailed\"}",
+        "null",
+        "Backend ready; Desktop tools refresh will retry")]
+    [InlineData(
+        "{\"state\":\"unavailable\"}",
+        "null",
+        "Backend ready; Desktop tools are temporarily unavailable")]
+    [InlineData(
+        "null",
+        "{\"state\":\"waitingForDesktopClose\"}",
+        "Backend ready; compatibility refresh waiting for Codex Desktop to close naturally")]
+    public void SurfacesAppToolsAndCompatibilityDegradation(
+        string desktopAppTools,
+        string compatibility,
+        string expectedDetail)
+    {
+        var json = $$"""
+            {
+              "ready": true,
+              "activeThreadCount": 1,
+              "supervisor": { "state": "running" },
+              "desktopAppTools": {{desktopAppTools}},
+              "backendCompatibility": {{compatibility}}
+            }
+            """;
+
+        var status = TrayStatusParser.Parse(json);
+
+        Assert.Equal(ContinuityHealth.Degraded, status.Health);
+        Assert.Equal(expectedDetail, status.Detail);
+        Assert.False(TrayStatusPresentation.ShowRecovery(status.Health));
+    }
+
     [Fact]
     public void PresentsArmedSupervisorWithoutOfferingRecovery()
     {

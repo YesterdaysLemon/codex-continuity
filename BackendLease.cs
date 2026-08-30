@@ -10,7 +10,8 @@ internal sealed record BackendLease(
     int BackendPort,
     string BackendExecutable,
     string? CodexHome,
-    DateTimeOffset BackendStartedAtUtc)
+    DateTimeOffset BackendStartedAtUtc,
+    int? DesktopMcpBridgeVersion = null)
 {
     internal const int CurrentSchemaVersion = 1;
 
@@ -41,6 +42,10 @@ internal sealed record BackendLease(
         if (BackendStartedAtUtc == default)
         {
             throw new InvalidDataException("Backend lease start time is required.");
+        }
+        if (DesktopMcpBridgeVersion is not null and not DesktopMcpContractResolver.BridgeVersion)
+        {
+            throw new InvalidDataException("Backend lease app-tools bridge version is unsupported.");
         }
     }
 }

@@ -45,6 +45,8 @@ internal sealed class RelayGateLease(LoopbackRelay relay, long ownedEpoch)
 
     internal bool TryRetargetAndOpen(int backendPort) =>
         relay.TryRetargetAndOpenGate(ownedEpoch, backendPort);
+
+    internal bool TryReleaseClosed() => relay.TryReleaseExclusiveGateClosed(ownedEpoch);
 }
 
 internal sealed class RelayBackendStopReservation(
@@ -237,6 +239,25 @@ internal sealed class LoopbackRelay : IAsyncDisposable
                     "The relay gate cannot open until old connections have drained.");
             }
             gated = false;
+            exclusiveGateEpoch = null;
+            gateEpoch++;
+            return true;
+        }
+    }
+
+    internal bool TryReleaseExclusiveGateClosed(long ownedEpoch)
+    {
+        lock (sync)
+        {
+            if (disposed ||
+                !gated ||
+                gateEpoch != ownedEpoch ||
+                exclusiveGateEpoch != ownedEpoch ||
+                activeBackendStopReservationToken is not null ||
+                connections.Count != 0)
+            {
+                return false;
+            }
             exclusiveGateEpoch = null;
             gateEpoch++;
             return true;

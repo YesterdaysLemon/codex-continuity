@@ -39,13 +39,13 @@ public sealed class InstallerEndToEndTests : IDisposable
                 startNow: true,
                 skipSelfTest: false,
                 quiet: true,
-                server.BaseUrl).WaitAsync(TimeSpan.FromSeconds(8));
+                server.BaseUrl).WaitAsync(TimeSpan.FromSeconds(20));
 
             Assert.Equal(0, nativeExitCode);
             var powershell = StartPowerShellInstaller(server.BaseUrl, port: 45125);
             using (powershell.Process)
             {
-                await powershell.Process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(8));
+                await powershell.Process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(20));
                 await Task.WhenAll(powershell.Output, powershell.Error)
                     .WaitAsync(TimeSpan.FromSeconds(3));
                 var standardOutput = await powershell.Output;

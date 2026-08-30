@@ -119,6 +119,12 @@ internal static class ContinuityPaths
     internal static string BackendLeaseFile(string stateDirectory) =>
         Path.Combine(stateDirectory, "backend-lease.json");
 
+    internal static string DesktopMcpBridgeStatusFile(string stateDirectory) =>
+        Path.Combine(stateDirectory, "desktop-mcp-status.json");
+
+    internal static string BackendCompatibilityStatusFile(string stateDirectory) =>
+        Path.Combine(stateDirectory, "backend-compatibility-status.json");
+
     internal static string UpdateStatusFile(string stateDirectory) =>
         Path.Combine(stateDirectory, "update-status.json");
 

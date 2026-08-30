@@ -79,7 +79,7 @@ public sealed class StoreReadinessTests
         Assert.Equal("packaged", root.GetProperty("runtimePackaging").GetString());
         Assert.Equal("externalPackageSource", root.GetProperty("updateOwner").GetString());
         Assert.Equal("unverified", root.GetProperty("updateSourceEvidence").GetString());
-        Assert.Equal("1.7.0.0", root.GetProperty("proposedPackageVersion").GetString());
+        Assert.Equal("1.8.0.0", root.GetProperty("proposedPackageVersion").GetString());
         Assert.False(root.GetProperty("restartsCodex").GetBoolean());
         var gates = root.GetProperty("gates").EnumerateArray().ToArray();
         Assert.Contains(gates, gate =>

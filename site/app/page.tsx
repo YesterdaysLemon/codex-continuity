@@ -54,7 +54,7 @@ export default function Home() {
               View source <span aria-hidden="true">↗</span>
             </a>
           </div>
-          <p className="microcopy">v0.7.0 · Open source · No desktop patching</p>
+          <p className="microcopy">v0.8.0 · Open source · No desktop patching</p>
         </div>
 
         <div className="continuity-card" aria-label="Continuity architecture">
@@ -147,6 +147,7 @@ export default function Home() {
           <ul>
             <li>The app-server runs outside the desktop process tree.</li>
             <li>Future desktop launches reconnect to one loopback endpoint.</li>
+            <li>Desktop tools follow the current Store session without persisting its pipe.</li>
             <li>Verified Continuity updates can hand off after an idle proof.</li>
             <li>The in-app restart prompt stays out of the way.</li>
           </ul>
@@ -210,7 +211,7 @@ export default function Home() {
           <div className="terminal" aria-label="Installed Codex Continuity commands">
             <div className="terminal-bar">
               <span>CodexContinuity</span>
-              <span>user PATH / v0.7.0</span>
+              <span>user PATH / v0.8.0</span>
             </div>
             <pre><code>CodexContinuity status{"\n"}CodexContinuity probe{"\n"}CodexContinuity store-readiness{"\n"}CodexContinuity update-policy --enable{"\n"}CodexContinuity repair{"\n"}CodexContinuity uninstall</code></pre>
             <div className="terminal-foot">
@@ -260,7 +261,7 @@ export default function Home() {
           <p>
             Codex Continuity relies on experimental app-server transport and
             undocumented desktop environment hooks. A future Codex release may
-            change them. v0.7.0 supports Windows 11 x64 only; there is no macOS
+            change them. v0.8.0 supports Windows 11 x64 only; there is no macOS
             or Linux build today. The utility is deliberately small and
             fail-closed; its supported direct install is removable with one command.
           </p>

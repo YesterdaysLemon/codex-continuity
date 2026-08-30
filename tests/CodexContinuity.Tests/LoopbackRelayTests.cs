@@ -111,6 +111,25 @@ public sealed class LoopbackRelayTests
     }
 
     [Fact]
+    public async Task ExclusiveGateCanTransferToRuntimeWhileRemainingClosed()
+    {
+        await using var backend = new TaggedBackend("backend:");
+        await using var replacement = new TaggedBackend("replacement:");
+        var publicPort = AvailablePort();
+        await using var relay = LoopbackRelay.Start(publicPort, backend.Port);
+
+        var gate = await relay.CloseGateExclusivelyAsync();
+
+        Assert.True(gate.TryReleaseClosed());
+        Assert.True(relay.IsGated);
+        Assert.False(gate.TryOpen());
+        relay.SetBackendPort(replacement.Port);
+        relay.OpenGate();
+        using var client = await ConnectAsync(publicPort);
+        Assert.Equal("replacement:continued", await RoundTripAsync(client, "continued"));
+    }
+
+    [Fact]
     public async Task BlockedTransitionCannotReopenAConcurrentSafetyGate()
     {
         await using var backend = new TaggedBackend("backend:");

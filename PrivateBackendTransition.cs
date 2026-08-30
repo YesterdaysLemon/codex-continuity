@@ -5,6 +5,8 @@ internal enum PrivateBackendTransitionKind
     BlockedByPlan,
     GracefulExit,
     ForcedExit,
+    GracefulTimedOut,
+    PreconditionChanged,
     Unsafe,
 }
 
@@ -55,7 +57,8 @@ internal static class PrivateBackendTransition
         TimeSpan gracefulTimeout,
         TimeSpan forcedWaitTimeout,
         CancellationToken cancellationToken,
-        PrivateBackendTransitionChecks? checks = null)
+        PrivateBackendTransitionChecks? checks = null,
+        bool allowForcedStop = true)
     {
         ArgumentNullException.ThrowIfNull(relay);
         ArgumentException.ThrowIfNullOrWhiteSpace(stateDirectory);
@@ -128,9 +131,42 @@ internal static class PrivateBackendTransition
                 graceful,
                 ForcedStop: null);
         }
+        if (graceful.Kind == PrivateBackendGracefulStopKind.PreconditionChanged)
+        {
+            if (decision.GateLease?.TryOpen() != true)
+            {
+                return Unsafe(decision.Plan, graceful, forced: null);
+            }
+            return new(
+                PrivateBackendTransitionKind.PreconditionChanged,
+                decision.Plan,
+                ReplacementGateLease: null,
+                graceful,
+                ForcedStop: null);
+        }
         if (graceful.Kind != PrivateBackendGracefulStopKind.TimedOut)
         {
             return Unsafe(decision.Plan, graceful, forced: null);
+        }
+
+        if (!allowForcedStop)
+        {
+            var reservation = graceful.TryTakeTimedOutReservation(target);
+            if (reservation is null)
+            {
+                return Unsafe(decision.Plan, graceful, forced: null);
+            }
+            reservation.Dispose();
+            if (decision.GateLease?.TryOpen() != true)
+            {
+                return Unsafe(decision.Plan, graceful, forced: null);
+            }
+            return new(
+                PrivateBackendTransitionKind.GracefulTimedOut,
+                decision.Plan,
+                ReplacementGateLease: null,
+                graceful,
+                ForcedStop: null);
         }
 
         var forced = await PrivateBackendForcedStop.StopAsync(
